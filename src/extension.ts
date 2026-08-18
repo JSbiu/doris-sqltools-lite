@@ -12,9 +12,8 @@ import {
   type DatabaseType,
   type SqlToolsConnection,
 } from './connectionSecurity';
+import { displayValue, isExportFormat, toDelimited, toJson, type ExportFormat } from './exports';
 import { createQueryResultView, hasMultipleStatements, type Row } from './queryResults';
-
-type ExportFormat = 'csv' | 'json' | 'tsv';
 
 class ConnectionManager {
   private readonly secretPrefix = 'dorisSqlLite.password.';
@@ -192,8 +191,8 @@ class ResultPanel {
     ResultPanel.panels.add(resultPanel);
     resultPanel.render();
     panel.onDidDispose(() => ResultPanel.panels.delete(resultPanel));
-    panel.webview.onDidReceiveMessage(async (message: { type?: string; format?: ExportFormat }) => {
-      if (message.type === 'export' && message.format) {
+    panel.webview.onDidReceiveMessage(async (message: { type?: unknown; format?: unknown }) => {
+      if (message.type === 'export' && isExportFormat(message.format)) {
         await resultPanel.export(message.format);
       }
     });
@@ -259,7 +258,7 @@ class ResultPanel {
     }
 
     const content = format === 'json'
-      ? JSON.stringify(this.rows, null, 2)
+      ? toJson(this.rows)
       : toDelimited(this.rows, this.columns, format === 'csv' ? ',' : '\t');
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
     vscode.window.showInformationMessage(`已导出 ${this.rows.length} 行到 ${uri.fsPath}`);
@@ -539,30 +538,6 @@ async function requiredInput(prompt: string, value?: string): Promise<string | u
 
 async function optionalInput(prompt: string, value?: string): Promise<string | undefined> {
   return vscode.window.showInputBox({ title: prompt, value, ignoreFocusOut: true });
-}
-
-function displayValue(value: unknown): string {
-  if (value === null || value === undefined) {
-    return '';
-  }
-  if (Buffer.isBuffer(value)) {
-    return `0x${value.toString('hex')}`;
-  }
-  if (typeof value === 'object') {
-    return JSON.stringify(value);
-  }
-  return String(value);
-}
-
-function toDelimited(rows: Row[], columns: string[], separator: string): string {
-  const quote = (value: unknown): string => {
-    const text = displayValue(value);
-    return `${separator === ',' ? '"' : ''}${separator === ',' ? text.replace(/"/g, '""') : text}${separator === ',' ? '"' : ''}`;
-  };
-  return [
-    columns.map((column) => quote(column)).join(separator),
-    ...rows.map((row) => columns.map((column) => quote(row[column])).join(separator)),
-  ].join('\n');
 }
 
 function escapeHtml(value: string): string {

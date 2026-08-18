@@ -21,6 +21,8 @@
 4. 右键连接创建 SQL 查询，`Ctrl+Enter` 执行当前文件或选中的 SQL。
 5. 在结果面板导出 CSV、JSON 或 TSV。
 
+结果导出只包含当前结果面板中的数据，不包含连接信息或密码；CSV/TSV 会处理字段中的引号、换行和分隔符。
+
 ## 从 SQLTools 迁移
 
 执行命令 `Doris SQL Lite: Import SQLTools Connections`：

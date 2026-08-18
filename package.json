@@ -145,7 +145,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/query-results.test.js",
+    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/query-results.test.js tests/exports.test.js",
     "watch": "tsc -p ./ -w",
     "package": "vsce package --no-dependencies"
   },
