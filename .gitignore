@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Generated TypeScript and extension package output
+out/
+*.tsbuildinfo
+*.vsix
+
+# Test and coverage output
+.vscode-test/
+coverage/
+
+# Local Codex/agent state
+.agents/
+.codex/
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+.vscode/settings.json
+
+# Package-manager and runtime logs
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*

@@ -1,0 +1,156 @@
+{
+  "name": "doris-sqltools-lite",
+  "displayName": "Doris SQLTools Lite",
+  "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:dorisSqlLiteExplorer",
+    "onCommand:dorisSqlLite.addConnection",
+    "onCommand:dorisSqlLite.importSqlTools",
+    "onLanguage:sql"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dorisSqlLite.addConnection",
+        "title": "Doris SQL Lite: Add Connection"
+      },
+      {
+        "command": "dorisSqlLite.importSqlTools",
+        "title": "Doris SQL Lite: Import SQLTools Connections"
+      },
+      {
+        "command": "dorisSqlLite.newQuery",
+        "title": "Doris SQL Lite: New Query"
+      },
+      {
+        "command": "dorisSqlLite.runQuery",
+        "title": "Doris SQL Lite: Run Query"
+      },
+      {
+        "command": "dorisSqlLite.testConnection",
+        "title": "Doris SQL Lite: Test Connection"
+      },
+      {
+        "command": "dorisSqlLite.removeConnection",
+        "title": "Doris SQL Lite: Remove Connection"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "dorisSqlLite.runQuery",
+        "key": "ctrl+enter",
+        "when": "editorTextFocus && resourceLangId == sql"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dorisSqlLite",
+          "title": "Doris SQL Lite",
+          "icon": "./media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dorisSqlLite": [
+        {
+          "id": "dorisSqlLiteExplorer",
+          "name": "Connections"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "dorisSqlLite.addConnection",
+          "when": "view == dorisSqlLiteExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "dorisSqlLite.importSqlTools",
+          "when": "view == dorisSqlLiteExplorer",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dorisSqlLite.newQuery",
+          "when": "view == dorisSqlLiteExplorer && viewItem == dorisSqlLite.connection",
+          "group": "inline"
+        },
+        {
+          "command": "dorisSqlLite.testConnection",
+          "when": "view == dorisSqlLiteExplorer && viewItem == dorisSqlLite.connection",
+          "group": "database"
+        },
+        {
+          "command": "dorisSqlLite.removeConnection",
+          "when": "view == dorisSqlLiteExplorer && viewItem == dorisSqlLite.connection",
+          "group": "z_delete"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Doris SQL Lite",
+      "properties": {
+        "dorisSqlLite.connections": {
+          "type": "array",
+          "scope": "workspace",
+          "description": "Non-sensitive MySQL/Doris connection metadata. Passwords are stored in VS Code SecretStorage.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "type",
+              "host",
+              "port",
+              "username"
+            ],
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "type": { "type": "string", "enum": ["MySQL", "Doris"] },
+              "host": { "type": "string" },
+              "port": { "type": "number", "default": 3306 },
+              "database": { "type": "string" },
+              "username": { "type": "string" },
+              "ssl": { "type": "boolean", "default": false }
+            }
+          }
+        },
+        "dorisSqlLite.maxResultRows": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 1,
+          "maximum": 100000,
+          "description": "Maximum number of rows kept in the result panel for one query."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -p ./ -w",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "mysql2": "^3.14.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.8.3",
+    "@vscode/vsce": "^3.6.1"
+  }
+}
