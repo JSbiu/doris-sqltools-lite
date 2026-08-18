@@ -25,16 +25,13 @@
 
 结果导出只包含当前结果面板中的数据，不包含连接信息或密码；CSV/TSV 会处理字段中的引号、换行和分隔符。
 
-## 从 SQLTools 迁移
+## 本地验证与打包
 
-执行命令 `Doris SQL Lite: Import SQLTools Connections`：
+- 编译：`node_modules/.bin/tsc.CMD -p .`
+- 测试：`node --test tests/connection-security.test.js tests/query-results.test.js tests/exports.test.js`
+- 打包：`node scripts/package-runtime.js`
 
-- 复制 SQLTools 的 MySQL/MariaDB/TiDB 连接元数据；
-- 把已有明文密码迁移进 SecretStorage；
-- 只从可导入的 SQLTools 连接中删除 `password` 字段，其他驱动的配置不会修改。
-- 重复执行导入时会复用相同连接，不会不断创建重复项。
-
-迁移前会弹窗确认。Doris 连接会根据端口 `9030` 或连接名自动标记为 Doris。
+打包脚本会把 `mysql2` 及其生产依赖一并放入 VSIX；安装后的扩展不依赖本机的 npm 或 SQLTools。
 
 ## 当前 MVP 边界
 

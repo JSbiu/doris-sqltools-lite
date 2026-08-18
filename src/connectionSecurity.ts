@@ -11,18 +11,6 @@ export interface ConnectionProfile {
   ssl?: boolean;
 }
 
-export interface SqlToolsConnection {
-  name?: string;
-  driver?: string;
-  server?: string;
-  port?: number;
-  database?: string;
-  username?: string;
-  password?: string;
-  askForPassword?: boolean;
-  mysqlOptions?: { enableSsl?: string };
-}
-
 type RecordValue = Record<string, unknown>;
 
 export interface LegacyConnectionMigration {
@@ -97,18 +85,6 @@ export function serializeConnectionProfile(profile: ConnectionProfile): Connecti
   return serialized;
 }
 
-export function connectionProfileKey(profile: ConnectionProfile): string {
-  return JSON.stringify([
-    profile.name.trim().toLowerCase(),
-    profile.type,
-    profile.host.trim().toLowerCase(),
-    profile.port,
-    profile.database ?? '',
-    profile.username,
-    profile.ssl === true,
-  ]);
-}
-
 export function prepareLegacyConnection(value: unknown): LegacyConnectionMigration | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -122,26 +98,6 @@ export function prepareLegacyConnection(value: unknown): LegacyConnectionMigrati
     hadPasswordField: Object.prototype.hasOwnProperty.call(value, 'password'),
     password: typeof value.password === 'string' ? value.password : undefined,
   };
-}
-
-export function isSupportedSqlToolsDriver(driver: unknown): boolean {
-  if (typeof driver !== 'string') {
-    return false;
-  }
-  const normalized = driver.trim().toLowerCase();
-  return normalized === 'mysql' || normalized === 'mariadb' || normalized === 'tidb';
-}
-
-export function stripSupportedSqlToolsPasswords(
-  connections: readonly SqlToolsConnection[],
-): SqlToolsConnection[] {
-  return connections.map((connection) => {
-    if (!isSupportedSqlToolsDriver(connection.driver)) {
-      return { ...connection };
-    }
-    const { password: _password, ...cleaned } = connection;
-    return cleaned;
-  });
 }
 
 export function redactErrorMessage(message: string, knownSecrets: readonly string[] = []): string {

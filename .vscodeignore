@@ -1,6 +1,10 @@
 .agents/**
 .vscode/**
-node_modules/**
+.packaging/**
+scripts/**
+!node_modules/
+!node_modules/mysql2/
+!node_modules/mysql2/**
 src/**
 tests/**
 tsconfig.json

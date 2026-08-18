@@ -2,16 +2,12 @@ import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
 import {
-  connectionProfileKey,
-  isSupportedSqlToolsDriver,
   normalizeConnectionProfiles,
   prepareLegacyConnection,
   redactErrorMessage,
   serializeConnectionProfile,
-  stripSupportedSqlToolsPasswords,
   type ConnectionProfile,
   type DatabaseType,
-  type SqlToolsConnection,
 } from './connectionSecurity';
 import { displayValue, isExportFormat, toDelimited, toJson, type ExportFormat } from './exports';
 import { createQueryResultView, hasMultipleStatements, type Row } from './queryResults';
@@ -298,13 +294,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('dorisSqlLite.addConnection', async () => {
       await addConnection(manager, provider);
     }),
-    vscode.commands.registerCommand('dorisSqlLite.importSqlTools', async () => {
-      try {
-        await importSqlToolsConnections(manager, provider);
-      } catch (error) {
-        showError('导入失败', error);
-      }
-    }),
     vscode.commands.registerCommand('dorisSqlLite.newQuery', async (connectionId?: string) => {
       const profile = await chooseProfile(manager, connectionId);
       if (!profile) {
@@ -423,74 +412,6 @@ async function addConnection(manager: ConnectionManager, provider: ConnectionPro
   await manager.savePassword(profile.id, password);
   provider.refresh();
   vscode.window.showInformationMessage(`已添加连接：${name}`);
-}
-
-async function importSqlToolsConnections(
-  manager: ConnectionManager,
-  provider: ConnectionProvider,
-): Promise<void> {
-  const sqlToolsConfig = vscode.workspace.getConfiguration('sqltools');
-  const source = sqlToolsConfig.get<SqlToolsConnection[]>('connections', []);
-  const mysqlConnections = source.filter((connection) =>
-    isSupportedSqlToolsDriver(connection?.driver),
-  );
-
-  if (mysqlConnections.length === 0) {
-    vscode.window.showInformationMessage('没有找到可导入的 SQLTools MySQL/MariaDB/TiDB 连接。');
-    return;
-  }
-
-  const answer = await vscode.window.showWarningMessage(
-    `将导入 ${mysqlConnections.length} 个连接，并只清理这些可导入连接中的明文 password；其他 SQLTools 驱动不会修改，继续？`,
-    { modal: true },
-    '导入并清理明文密码',
-  );
-  if (answer !== '导入并清理明文密码') {
-    return;
-  }
-
-  const existingProfiles = manager.getProfiles();
-  const profilesByKey = new Map(existingProfiles.map((profile) => [connectionProfileKey(profile), profile]));
-  const imported: ConnectionProfile[] = [];
-  let reused = 0;
-  for (const sourceConnection of mysqlConnections) {
-    const id = randomUUID();
-    const port = Number(sourceConnection.port ?? 3306);
-    const type: DatabaseType = port === 9030 || /doris/i.test(sourceConnection.name ?? '') ? 'Doris' : 'MySQL';
-    const profile: ConnectionProfile = {
-      id,
-      name: sourceConnection.name ?? `${type} ${sourceConnection.server ?? ''}`,
-      type,
-      host: sourceConnection.server ?? '127.0.0.1',
-      port,
-      database: sourceConnection.database,
-      username: sourceConnection.username ?? 'root',
-      ssl: sourceConnection.mysqlOptions?.enableSsl === 'Enabled',
-    };
-    const existing = profilesByKey.get(connectionProfileKey(profile));
-    const target = existing ?? profile;
-    if (existing) {
-      reused += 1;
-    } else {
-      imported.push(profile);
-      profilesByKey.set(connectionProfileKey(profile), profile);
-    }
-    if (sourceConnection.password !== undefined) {
-      await manager.savePassword(target.id, sourceConnection.password);
-    }
-  }
-
-  await manager.saveProfiles([...existingProfiles, ...imported]);
-  const cleaned = stripSupportedSqlToolsPasswords(source);
-  await sqlToolsConfig.update(
-    'connections',
-    cleaned,
-    getConfigurationTarget(sqlToolsConfig, 'connections'),
-  );
-  provider.refresh();
-  vscode.window.showInformationMessage(
-    `已导入 ${imported.length} 个新连接，复用 ${reused} 个已有连接；可导入 SQLTools 连接中的 password 字段已清理。`,
-  );
 }
 
 async function runQuery(
