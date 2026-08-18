@@ -18,7 +18,7 @@
 1. 打开扩展开发主机或安装打包出的 `.vsix`。
 2. 在活动栏打开 `Doris SQL Lite`。
 3. 点击 `Add Connection`，选择 `Doris` 或 `MySQL`，首次输入密码。
-4. 右键连接创建 SQL 查询。当前文件第一次执行时选择连接，之后在本次 VS Code 会话中会自动复用；选中 SQL 后右键选择 `Doris SQL Lite: Run Query`，或按 `Ctrl+Enter` 执行。没有选中内容时会执行整个 SQL 文件。
+4. 右键连接创建 SQL 查询。第一次选择的连接会作为本次 VS Code 会话的默认连接；当前文件如果已指定连接，则优先使用当前文件的连接。选中 SQL 后右键选择 `Doris SQL Lite: Run Query`，或按 `Ctrl+Enter` 执行。没有选中内容时会执行整个 SQL 文件。
 5. 在结果面板导出 TSV 文件，也可以点击 `Copy to Clipboard`；两者都使用带表头的 TSV 格式，适合直接粘贴到 Excel。
 
 如果要更换当前文件的连接，在 SQL 编辑器中右键选择 `Doris SQL Lite: Set Connection`。连接选择只保存在当前扩展会话内，不会写入工作区配置。

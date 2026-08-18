@@ -12,6 +12,11 @@ import {
 import { displayValue, isExportFormat, toTsv, type ExportFormat } from './exports';
 import { createQueryResultView, hasMultipleStatements, type Row } from './queryResults';
 
+type ConnectionSessionState = {
+  documentConnections: Map<string, string>;
+  defaultConnectionId?: string;
+};
+
 class ConnectionManager {
   private readonly secretPrefix = 'dorisSqlLite.password.';
 
@@ -287,7 +292,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const manager = new ConnectionManager(context);
   const provider = new ConnectionProvider(manager);
   // Kept only for the current extension host session; never persisted to settings.
-  const documentConnections = new Map<string, string>();
+  const connectionSession: ConnectionSessionState = {
+    documentConnections: new Map(),
+  };
 
   try {
     await manager.migrateLegacyPasswords();
@@ -306,15 +313,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await addConnection(manager, provider);
     }),
     vscode.commands.registerCommand('dorisSqlLite.newQuery', async (connectionId?: string) => {
-      const profile = await chooseProfile(manager, connectionId);
+      const profile = await chooseProfile(manager, connectionId ?? connectionSession.defaultConnectionId);
       if (!profile) {
         return;
       }
+      connectionSession.defaultConnectionId = profile.id;
       const document = await vscode.workspace.openTextDocument({
         language: 'sql',
         content: `-- Doris SQL Lite connection: ${profile.id}\n\nSELECT 1;\n`,
       });
-      documentConnections.set(document.uri.toString(), profile.id);
+      connectionSession.documentConnections.set(document.uri.toString(), profile.id);
       await vscode.window.showTextDocument(document, vscode.ViewColumn.Active);
     }),
     vscode.commands.registerCommand('dorisSqlLite.setConnection', async () => {
@@ -327,11 +335,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!profile) {
         return;
       }
-      documentConnections.set(editor.document.uri.toString(), profile.id);
+      connectionSession.documentConnections.set(editor.document.uri.toString(), profile.id);
+      connectionSession.defaultConnectionId = profile.id;
       vscode.window.showInformationMessage(`已为当前文件指定连接：${profile.name}`);
     }),
     vscode.commands.registerCommand('dorisSqlLite.runQuery', async (connectionId?: string) => {
-      await runQuery(manager, documentConnections, connectionId);
+      await runQuery(manager, connectionSession, connectionId);
     }),
     vscode.commands.registerCommand('dorisSqlLite.testConnection', async (item?: ConnectionItem) => {
       const profile = await chooseProfile(manager, item?.profile.id);
@@ -440,7 +449,7 @@ async function addConnection(manager: ConnectionManager, provider: ConnectionPro
 
 async function runQuery(
   manager: ConnectionManager,
-  documentConnections: Map<string, string>,
+  connectionSession: ConnectionSessionState,
   requestedConnectionId?: string,
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
@@ -461,12 +470,15 @@ async function runQuery(
   }
 
   const documentKey = editor.document.uri.toString();
-  const id = requestedConnectionId ?? documentConnections.get(documentKey);
+  const id = requestedConnectionId
+    ?? connectionSession.documentConnections.get(documentKey)
+    ?? connectionSession.defaultConnectionId;
   const profile = await chooseProfile(manager, id);
   if (!profile) {
     return;
   }
-  documentConnections.set(documentKey, profile.id);
+  connectionSession.documentConnections.set(documentKey, profile.id);
+  connectionSession.defaultConnectionId = profile.id;
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `执行 ${profile.name}` },
