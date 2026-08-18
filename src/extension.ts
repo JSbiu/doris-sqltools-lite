@@ -1,32 +1,19 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
+import {
+  isSupportedSqlToolsDriver,
+  normalizeConnectionProfiles,
+  prepareLegacyConnection,
+  redactErrorMessage,
+  serializeConnectionProfile,
+  stripSupportedSqlToolsPasswords,
+  type ConnectionProfile,
+  type DatabaseType,
+  type SqlToolsConnection,
+} from './connectionSecurity';
 
-type DatabaseType = 'MySQL' | 'Doris';
 type ExportFormat = 'csv' | 'json' | 'tsv';
-
-interface ConnectionProfile {
-  id: string;
-  name: string;
-  type: DatabaseType;
-  host: string;
-  port: number;
-  database?: string;
-  username: string;
-  ssl?: boolean;
-}
-
-interface SqlToolsConnection {
-  name?: string;
-  driver?: string;
-  server?: string;
-  port?: number;
-  database?: string;
-  username?: string;
-  password?: string;
-  askForPassword?: boolean;
-  mysqlOptions?: { enableSsl?: string };
-}
 
 type Row = Record<string, unknown>;
 
@@ -38,30 +25,53 @@ class ConnectionManager {
   public getProfiles(): ConnectionProfile[] {
     const raw = vscode.workspace
       .getConfiguration('dorisSqlLite')
-      .get<unknown[]>('connections', []);
+      .get<unknown>('connections', []);
 
-    return raw.filter((item): item is ConnectionProfile => {
-      if (!item || typeof item !== 'object') {
-        return false;
-      }
-      const candidate = item as Partial<ConnectionProfile>;
-      return Boolean(
-        candidate.id &&
-          candidate.name &&
-          candidate.host &&
-          candidate.username &&
-          typeof candidate.port === 'number',
-      );
-    });
+    return normalizeConnectionProfiles(raw);
   }
 
   public async saveProfiles(profiles: ConnectionProfile[]): Promise<void> {
-    const target = vscode.workspace.workspaceFolders
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
-    await vscode.workspace
-      .getConfiguration('dorisSqlLite')
-      .update('connections', profiles, target);
+    const configuration = vscode.workspace.getConfiguration('dorisSqlLite');
+    await configuration.update(
+      'connections',
+      profiles.map((profile) => serializeConnectionProfile(profile)),
+      getConfigurationTarget(configuration, 'connections'),
+    );
+  }
+
+  public async migrateLegacyPasswords(): Promise<void> {
+    const configuration = vscode.workspace.getConfiguration('dorisSqlLite');
+    const raw = configuration.get<unknown>('connections', []);
+    if (!Array.isArray(raw)) {
+      return;
+    }
+
+    let changed = false;
+    const cleaned: unknown[] = [];
+    for (const item of raw) {
+      const migration = prepareLegacyConnection(item);
+      if (!migration || !migration.hadPasswordField) {
+        cleaned.push(item);
+        continue;
+      }
+
+      if (migration.password !== undefined) {
+        const existing = await this.context.secrets.get(this.secretKey(migration.profile.id));
+        if (existing === undefined) {
+          await this.savePassword(migration.profile.id, migration.password);
+        }
+      }
+      cleaned.push(serializeConnectionProfile(migration.profile));
+      changed = true;
+    }
+
+    if (changed) {
+      await configuration.update(
+        'connections',
+        cleaned,
+        getConfigurationTarget(configuration, 'connections'),
+      );
+    }
   }
 
   public async savePassword(id: string, password: string): Promise<void> {
@@ -99,19 +109,24 @@ class ConnectionManager {
       throw new Error('已取消密码输入。');
     }
 
-    return mysql.createConnection({
-      host: profile.host,
-      port: profile.port,
-      user: profile.username,
-      password,
-      database: profile.database || undefined,
-      ssl: profile.ssl ? {} : undefined,
-      connectTimeout: 10_000,
-      multipleStatements: true,
-      dateStrings: true,
-      supportBigNumbers: true,
-      bigNumberStrings: true,
-    });
+    try {
+      return await mysql.createConnection({
+        host: profile.host,
+        port: profile.port,
+        user: profile.username,
+        password,
+        database: profile.database || undefined,
+        ssl: profile.ssl ? {} : undefined,
+        connectTimeout: 10_000,
+        multipleStatements: true,
+        dateStrings: true,
+        supportBigNumbers: true,
+        bigNumberStrings: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(redactErrorMessage(message, [password]));
+    }
   }
 
   private secretKey(id: string): string {
@@ -252,10 +267,16 @@ class ResultPanel {
   }
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const manager = new ConnectionManager(context);
   const provider = new ConnectionProvider(manager);
   const documentConnections = new Map<string, string>();
+
+  try {
+    await manager.migrateLegacyPasswords();
+  } catch (error) {
+    showError('迁移旧连接密码失败', error);
+  }
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('dorisSqlLiteExplorer', provider),
@@ -376,10 +397,9 @@ async function importSqlToolsConnections(
 ): Promise<void> {
   const sqlToolsConfig = vscode.workspace.getConfiguration('sqltools');
   const source = sqlToolsConfig.get<SqlToolsConnection[]>('connections', []);
-  const mysqlConnections = source.filter((connection) => {
-    const driver = (connection.driver ?? '').toLowerCase();
-    return driver === 'mysql' || driver === 'mariadb' || driver === 'tidb';
-  });
+  const mysqlConnections = source.filter((connection) =>
+    isSupportedSqlToolsDriver(connection?.driver),
+  );
 
   if (mysqlConnections.length === 0) {
     vscode.window.showInformationMessage('没有找到可导入的 SQLTools MySQL/MariaDB/TiDB 连接。');
@@ -387,7 +407,7 @@ async function importSqlToolsConnections(
   }
 
   const answer = await vscode.window.showWarningMessage(
-    `将导入 ${mysqlConnections.length} 个连接，并从 sqltools.connections 中删除已有的明文 password，继续？`,
+    `将导入 ${mysqlConnections.length} 个连接，并只清理这些可导入连接中的明文 password；其他 SQLTools 驱动不会修改，继续？`,
     { modal: true },
     '导入并清理明文密码',
   );
@@ -417,18 +437,15 @@ async function importSqlToolsConnections(
   }
 
   await manager.saveProfiles([...manager.getProfiles(), ...imported]);
-  const cleaned = source.map((connection) => {
-    const copy: Record<string, unknown> = { ...connection };
-    delete copy.password;
-    return copy;
-  });
-  const target = vscode.workspace.workspaceFolders
-    ? vscode.ConfigurationTarget.Workspace
-    : vscode.ConfigurationTarget.Global;
-  await sqlToolsConfig.update('connections', cleaned, target);
+  const cleaned = stripSupportedSqlToolsPasswords(source);
+  await sqlToolsConfig.update(
+    'connections',
+    cleaned,
+    getConfigurationTarget(sqlToolsConfig, 'connections'),
+  );
   provider.refresh();
   vscode.window.showInformationMessage(
-    `已导入 ${imported.length} 个连接；SQLTools 配置中的 password 字段已清理。`,
+    `已导入 ${imported.length} 个连接；可导入 SQLTools 连接中的 password 字段已清理。`,
   );
 }
 
@@ -583,8 +600,27 @@ function nonce(): string {
   return randomUUID().replace(/-/g, '');
 }
 
+function getConfigurationTarget(
+  configuration: vscode.WorkspaceConfiguration,
+  key: string,
+): vscode.ConfigurationTarget {
+  const inspected = configuration.inspect<unknown>(key);
+  if (inspected?.workspaceFolderValue !== undefined) {
+    return vscode.ConfigurationTarget.WorkspaceFolder;
+  }
+  if (inspected?.workspaceValue !== undefined) {
+    return vscode.ConfigurationTarget.Workspace;
+  }
+  if (inspected?.globalValue !== undefined) {
+    return vscode.ConfigurationTarget.Global;
+  }
+  return vscode.workspace.workspaceFolders
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+}
+
 function showError(prefix: string, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = redactErrorMessage(error instanceof Error ? error.message : String(error));
   vscode.window.showErrorMessage(`${prefix}：${message}`);
 }
 

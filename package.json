@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JSbiu/doris-sqltools-lite.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -141,6 +145,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test": "tsc -p ./ && node --test tests/connection-security.test.js",
     "watch": "tsc -p ./ -w",
     "package": "vsce package --no-dependencies"
   },
