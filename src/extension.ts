@@ -286,6 +286,7 @@ class ResultPanel {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const manager = new ConnectionManager(context);
   const provider = new ConnectionProvider(manager);
+  // Kept only for the current extension host session; never persisted to settings.
   const documentConnections = new Map<string, string>();
 
   try {
@@ -301,9 +302,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         provider.refresh();
       }
     }),
-    vscode.workspace.onDidCloseTextDocument((document) => {
-      documentConnections.delete(document.uri.toString());
-    }),
     vscode.commands.registerCommand('dorisSqlLite.addConnection', async () => {
       await addConnection(manager, provider);
     }),
@@ -318,6 +316,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
       documentConnections.set(document.uri.toString(), profile.id);
       await vscode.window.showTextDocument(document, vscode.ViewColumn.Active);
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.setConnection', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showInformationMessage('请先打开 SQL 文件。');
+        return;
+      }
+      const profile = await chooseProfile(manager);
+      if (!profile) {
+        return;
+      }
+      documentConnections.set(editor.document.uri.toString(), profile.id);
+      vscode.window.showInformationMessage(`已为当前文件指定连接：${profile.name}`);
     }),
     vscode.commands.registerCommand('dorisSqlLite.runQuery', async (connectionId?: string) => {
       await runQuery(manager, documentConnections, connectionId);
@@ -449,11 +460,13 @@ async function runQuery(
     return;
   }
 
-  const id = requestedConnectionId ?? documentConnections.get(editor.document.uri.toString());
+  const documentKey = editor.document.uri.toString();
+  const id = requestedConnectionId ?? documentConnections.get(documentKey);
   const profile = await chooseProfile(manager, id);
   if (!profile) {
     return;
   }
+  documentConnections.set(documentKey, profile.id);
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `执行 ${profile.name}` },
