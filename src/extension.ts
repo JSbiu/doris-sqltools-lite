@@ -9,7 +9,7 @@ import {
   type ConnectionProfile,
   type DatabaseType,
 } from './connectionSecurity';
-import { displayValue, isExportFormat, toDelimited, toJson, type ExportFormat } from './exports';
+import { displayValue, isExportFormat, toClipboard, toDelimited, toJson, type ExportFormat } from './exports';
 import { createQueryResultView, hasMultipleStatements, type Row } from './queryResults';
 
 class ConnectionManager {
@@ -189,6 +189,14 @@ class ResultPanel {
     resultPanel.render();
     panel.onDidDispose(() => ResultPanel.panels.delete(resultPanel));
     panel.webview.onDidReceiveMessage(async (message: { type?: unknown; format?: unknown }) => {
+      if (message.type === 'copy') {
+        try {
+          await resultPanel.copyToClipboard();
+        } catch (error) {
+          showError('复制失败', error);
+        }
+        return;
+      }
       if (message.type === 'export' && isExportFormat(message.format)) {
         try {
           await resultPanel.export(message.format);
@@ -234,10 +242,14 @@ class ResultPanel {
     <button data-format="csv">Export CSV</button>
     <button data-format="json">Export JSON</button>
     <button data-format="tsv">Export TSV</button>
+    <button data-action="copy">Copy to Clipboard</button>
   </div>
   <div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
+    document.querySelector('button[data-action="copy"]')?.addEventListener('click', () => {
+      api.postMessage({ type: 'copy' });
+    });
     document.querySelectorAll('button[data-format]').forEach((button) => {
       button.addEventListener('click', () => api.postMessage({ type: 'export', format: button.dataset.format }));
     });
@@ -267,6 +279,11 @@ class ResultPanel {
       : toDelimited(this.rows, this.columns, format === 'csv' ? ',' : '\t');
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
     vscode.window.showInformationMessage(`已导出 ${this.rows.length} 行到 ${uri.fsPath}`);
+  }
+
+  public async copyToClipboard(): Promise<void> {
+    await vscode.env.clipboard.writeText(toClipboard(this.rows, this.columns));
+    vscode.window.showInformationMessage(`已复制 ${this.rows.length} 行结果到剪贴板（TSV）。`);
   }
 }
 

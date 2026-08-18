@@ -19,11 +19,11 @@
 2. 在活动栏打开 `Doris SQL Lite`。
 3. 点击 `Add Connection`，选择 `Doris` 或 `MySQL`，首次输入密码。
 4. 右键连接创建 SQL 查询；选中 SQL 后右键选择 `Doris SQL Lite: Run Query`，或按 `Ctrl+Enter` 执行。没有选中内容时会执行整个 SQL 文件。
-5. 在结果面板导出 CSV、JSON 或 TSV。
+5. 在结果面板导出 CSV、JSON 或 TSV，也可以点击 `Copy to Clipboard`；复制内容使用带表头的 TSV 格式，适合直接粘贴到 Excel。
 
 如果数据库密码发生变化，可在连接右键菜单执行 `Forget Saved Password`，下次连接时重新输入。
 
-结果导出只包含当前结果面板中的数据，不包含连接信息或密码；CSV/TSV 会处理字段中的引号、换行和分隔符。
+结果导出或复制只包含当前结果面板中的数据，不包含连接信息或密码；CSV/TSV 会处理字段中的引号、换行和分隔符。
 
 ## 本地验证与打包
 

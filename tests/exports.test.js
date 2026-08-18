@@ -4,6 +4,7 @@ const test = require('node:test');
 const {
   displayValue,
   isExportFormat,
+  toClipboard,
   toDelimited,
   toJson,
 } = require('../out/exports.js');
@@ -34,6 +35,10 @@ test('quotes only structurally necessary TSV fields', () => {
   );
 
   assert.equal(tsv, 'plain\ttab\tnote\tquote\r\na,b\t"x\ty"\t"line1\nline2"\t"a""b"');
+});
+
+test('formats clipboard content as TSV with headers', () => {
+  assert.equal(toClipboard([{ id: 1, name: 'Alice' }], ['id', 'name']), 'id\tname\r\n1\tAlice');
 });
 
 test('serializes JSON and binary values without connection metadata', () => {

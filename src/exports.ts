@@ -22,6 +22,10 @@ export function toDelimited(rows: Row[], columns: string[], separator: ',' | '\t
   ].join('\r\n');
 }
 
+export function toClipboard(rows: Row[], columns: string[]): string {
+  return toDelimited(rows, columns, '\t');
+}
+
 export function displayValue(value: unknown): string {
   if (value === null || value === undefined) {
     return '';
