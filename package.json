@@ -47,6 +47,10 @@
       {
         "command": "dorisSqlLite.removeConnection",
         "title": "Doris SQL Lite: Remove Connection"
+      },
+      {
+        "command": "dorisSqlLite.forgetPassword",
+        "title": "Doris SQL Lite: Forget Saved Password"
       }
     ],
     "keybindings": [
@@ -101,6 +105,11 @@
           "command": "dorisSqlLite.removeConnection",
           "when": "view == dorisSqlLiteExplorer && viewItem == dorisSqlLite.connection",
           "group": "z_delete"
+        },
+        {
+          "command": "dorisSqlLite.forgetPassword",
+          "when": "view == dorisSqlLiteExplorer && viewItem == dorisSqlLite.connection",
+          "group": "z_password"
         }
       ]
     },

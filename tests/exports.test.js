@@ -38,6 +38,7 @@ test('quotes only structurally necessary TSV fields', () => {
 
 test('serializes JSON and binary values without connection metadata', () => {
   assert.equal(toJson([{ id: 1 }]), '[\n  {\n    "id": 1\n  }\n]');
+  assert.equal(toJson([{ id: 1n }]), '[\n  {\n    "id": "1"\n  }\n]');
   assert.equal(displayValue(Buffer.from([0, 255])), '0x00ff');
   assert.equal(displayValue(null), '');
 });

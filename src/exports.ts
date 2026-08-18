@@ -7,7 +7,7 @@ export function isExportFormat(value: unknown): value is ExportFormat {
 }
 
 export function toJson(rows: Row[]): string {
-  return JSON.stringify(rows, null, 2);
+  return JSON.stringify(rows, jsonReplacer, 2);
 }
 
 export function toDelimited(rows: Row[], columns: string[], separator: ',' | '\t'): string {
@@ -30,7 +30,15 @@ export function displayValue(value: unknown): string {
     return `0x${value.toString('hex')}`;
   }
   if (typeof value === 'object') {
-    return JSON.stringify(value) ?? '';
+    try {
+      return JSON.stringify(value, jsonReplacer) ?? '';
+    } catch {
+      return String(value);
+    }
   }
   return String(value);
+}
+
+function jsonReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value;
 }

@@ -252,11 +252,15 @@ class ResultPanel {
 
   private async export(format: ExportFormat): Promise<void> {
     const extension = format;
+    const defaultName = `${this.title.replace(/[^a-z0-9_-]+/gi, '_')}.${extension}`;
+    const defaultUri = vscode.workspace.workspaceFolders?.[0]
+      ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, defaultName)
+      : undefined;
     const uri = await vscode.window.showSaveDialog({
       title: `Export ${this.title}`,
       saveLabel: 'Export',
       filters: { [format.toUpperCase()]: [extension] },
-      defaultUri: vscode.Uri.file(`${this.title.replace(/[^a-z0-9_-]+/gi, '_')}.${extension}`),
+      defaultUri,
     });
     if (!uri) {
       return;
@@ -295,7 +299,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await addConnection(manager, provider);
     }),
     vscode.commands.registerCommand('dorisSqlLite.importSqlTools', async () => {
-      await importSqlToolsConnections(manager, provider);
+      try {
+        await importSqlToolsConnections(manager, provider);
+      } catch (error) {
+        showError('导入失败', error);
+      }
     }),
     vscode.commands.registerCommand('dorisSqlLite.newQuery', async (connectionId?: string) => {
       const profile = await chooseProfile(manager, connectionId);
@@ -344,6 +352,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await manager.saveProfiles(profiles);
       await manager.deletePassword(item.profile.id);
       provider.refresh();
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.forgetPassword', async (item?: ConnectionItem) => {
+      if (!item) {
+        return;
+      }
+      const answer = await vscode.window.showWarningMessage(
+        `清除连接“${item.profile.name}”已保存的密码？下次连接时需要重新输入。`,
+        { modal: true },
+        '清除密码',
+      );
+      if (answer !== '清除密码') {
+        return;
+      }
+      await manager.deletePassword(item.profile.id);
+      vscode.window.showInformationMessage(`已清除连接“${item.profile.name}”的已保存密码。`);
     }),
   );
 }
