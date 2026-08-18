@@ -9,7 +9,7 @@ import {
   type ConnectionProfile,
   type DatabaseType,
 } from './connectionSecurity';
-import { displayValue, isExportFormat, toClipboard, toDelimited, toJson, type ExportFormat } from './exports';
+import { displayValue, isExportFormat, toTsv, type ExportFormat } from './exports';
 import { createQueryResultView, hasMultipleStatements, type Row } from './queryResults';
 
 class ConnectionManager {
@@ -239,8 +239,6 @@ class ResultPanel {
 <body>
   <div class="toolbar">
     <span class="summary">${this.rows.length} rows · ${this.columns.length} columns</span>
-    <button data-format="csv">Export CSV</button>
-    <button data-format="json">Export JSON</button>
     <button data-format="tsv">Export TSV</button>
     <button data-action="copy">Copy to Clipboard</button>
   </div>
@@ -274,15 +272,13 @@ class ResultPanel {
       return;
     }
 
-    const content = format === 'json'
-      ? toJson(this.rows)
-      : toDelimited(this.rows, this.columns, format === 'csv' ? ',' : '\t');
+    const content = toTsv(this.rows, this.columns);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
     vscode.window.showInformationMessage(`已导出 ${this.rows.length} 行到 ${uri.fsPath}`);
   }
 
   public async copyToClipboard(): Promise<void> {
-    await vscode.env.clipboard.writeText(toClipboard(this.rows, this.columns));
+    await vscode.env.clipboard.writeText(toTsv(this.rows, this.columns));
     vscode.window.showInformationMessage(`已复制 ${this.rows.length} 行结果到剪贴板（TSV）。`);
   }
 }
