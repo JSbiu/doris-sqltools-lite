@@ -12,10 +12,9 @@ import {
   type DatabaseType,
   type SqlToolsConnection,
 } from './connectionSecurity';
+import { createQueryResultView, hasMultipleStatements, type Row } from './queryResults';
 
 type ExportFormat = 'csv' | 'json' | 'tsv';
-
-type Row = Record<string, unknown>;
 
 class ConnectionManager {
   private readonly secretPrefix = 'dorisSqlLite.password.';
@@ -118,7 +117,7 @@ class ConnectionManager {
         database: profile.database || undefined,
         ssl: profile.ssl ? {} : undefined,
         connectTimeout: 10_000,
-        multipleStatements: true,
+        multipleStatements: false,
         dateStrings: true,
         supportBigNumbers: true,
         bigNumberStrings: true,
@@ -466,6 +465,10 @@ async function runQuery(
     vscode.window.showInformationMessage('没有可执行的 SQL。');
     return;
   }
+  if (hasMultipleStatements(sql)) {
+    vscode.window.showInformationMessage('当前一次只支持执行一条 SQL，请分开选择后再执行。');
+    return;
+  }
 
   const id = requestedConnectionId ?? documentConnections.get(editor.document.uri.toString());
   const profile = await chooseProfile(manager, id);
@@ -483,15 +486,15 @@ async function runQuery(
         const maxRows = vscode.workspace
           .getConfiguration('dorisSqlLite')
           .get<number>('maxResultRows', 1000);
-        const rows = normalizeRows(rawResult).slice(0, maxRows);
-        const fields = normalizeFields(rawFields);
-        const columns = fields.length > 0 ? fields : Object.keys(rows[0] ?? {});
-        const resultRows = rows.length > 0
-          ? rows
-          : [{ affectedRows: getAffectedRows(rawResult), message: 'Statement executed.' }];
-        const resultColumns = columns.length > 0 ? columns : Object.keys(resultRows[0]);
+        const result = createQueryResultView(rawResult, rawFields, maxRows);
+        const resultRows = result.rows.length > 0 || result.columns.length > 0
+          ? result.rows
+          : [{ affectedRows: result.affectedRows, message: 'Statement executed.' }];
+        const resultColumns = result.columns.length > 0
+          ? result.columns
+          : Object.keys(resultRows[0]);
         ResultPanel.open(resultRows, resultColumns, profile.name);
-        if (rows.length === maxRows) {
+        if (result.truncated) {
           vscode.window.showInformationMessage(`结果已限制为 ${maxRows} 行，可在设置中调整 dorisSqlLite.maxResultRows。`);
         }
       } catch (error) {
@@ -536,31 +539,6 @@ async function requiredInput(prompt: string, value?: string): Promise<string | u
 
 async function optionalInput(prompt: string, value?: string): Promise<string | undefined> {
   return vscode.window.showInputBox({ title: prompt, value, ignoreFocusOut: true });
-}
-
-function normalizeRows(value: unknown): Row[] {
-  const candidate = Array.isArray(value) && Array.isArray(value[0]) ? value[0] : value;
-  if (!Array.isArray(candidate)) {
-    return [];
-  }
-  return candidate.filter((row): row is Row => Boolean(row && typeof row === 'object' && !Array.isArray(row)));
-}
-
-function normalizeFields(value: unknown): string[] {
-  const candidate = Array.isArray(value) && Array.isArray(value[0]) ? value[0] : value;
-  if (!Array.isArray(candidate)) {
-    return [];
-  }
-  return candidate
-    .map((field) => (field && typeof field === 'object' ? String((field as { name?: unknown }).name ?? '') : ''))
-    .filter(Boolean);
-}
-
-function getAffectedRows(value: unknown): number {
-  if (value && typeof value === 'object' && 'affectedRows' in value) {
-    return Number((value as { affectedRows?: unknown }).affectedRows ?? 0);
-  }
-  return 0;
 }
 
 function displayValue(value: unknown): string {
