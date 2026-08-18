@@ -312,7 +312,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('dorisSqlLite.addConnection', async () => {
       await addConnection(manager, provider);
     }),
-    vscode.commands.registerCommand('dorisSqlLite.newQuery', async (connectionId?: string) => {
+    vscode.commands.registerCommand('dorisSqlLite.newQuery', async (commandArgument?: unknown) => {
+      const connectionId = normalizeCommandConnectionId(commandArgument);
       const profile = await chooseProfile(manager, connectionId ?? connectionSession.defaultConnectionId);
       if (!profile) {
         return;
@@ -339,8 +340,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       connectionSession.defaultConnectionId = profile.id;
       vscode.window.showInformationMessage(`已为当前文件指定连接：${profile.name}`);
     }),
-    vscode.commands.registerCommand('dorisSqlLite.runQuery', async (connectionId?: string) => {
-      await runQuery(manager, connectionSession, connectionId);
+    vscode.commands.registerCommand('dorisSqlLite.runQuery', async (commandArgument?: unknown) => {
+      await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument));
     }),
     vscode.commands.registerCommand('dorisSqlLite.testConnection', async (item?: ConnectionItem) => {
       const profile = await chooseProfile(manager, item?.profile.id);
@@ -580,6 +581,10 @@ function getConfigurationTarget(
 function showError(prefix: string, error: unknown): void {
   const message = redactErrorMessage(error instanceof Error ? error.message : String(error));
   vscode.window.showErrorMessage(`${prefix}：${message}`);
+}
+
+function normalizeCommandConnectionId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
 export function deactivate(): void {
