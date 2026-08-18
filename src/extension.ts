@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
 import {
+  connectionProfileKey,
   isSupportedSqlToolsDriver,
   normalizeConnectionProfiles,
   prepareLegacyConnection,
@@ -193,7 +194,11 @@ class ResultPanel {
     panel.onDidDispose(() => ResultPanel.panels.delete(resultPanel));
     panel.webview.onDidReceiveMessage(async (message: { type?: unknown; format?: unknown }) => {
       if (message.type === 'export' && isExportFormat(message.format)) {
-        await resultPanel.export(message.format);
+        try {
+          await resultPanel.export(message.format);
+        } catch (error) {
+          showError('导出失败', error);
+        }
       }
     });
   }
@@ -278,6 +283,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('dorisSqlLiteExplorer', provider),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('dorisSqlLite.connections')) {
+        provider.refresh();
+      }
+    }),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      documentConnections.delete(document.uri.toString());
+    }),
     vscode.commands.registerCommand('dorisSqlLite.addConnection', async () => {
       await addConnection(manager, provider);
     }),
@@ -413,7 +426,10 @@ async function importSqlToolsConnections(
     return;
   }
 
+  const existingProfiles = manager.getProfiles();
+  const profilesByKey = new Map(existingProfiles.map((profile) => [connectionProfileKey(profile), profile]));
   const imported: ConnectionProfile[] = [];
+  let reused = 0;
   for (const sourceConnection of mysqlConnections) {
     const id = randomUUID();
     const port = Number(sourceConnection.port ?? 3306);
@@ -428,13 +444,20 @@ async function importSqlToolsConnections(
       username: sourceConnection.username ?? 'root',
       ssl: sourceConnection.mysqlOptions?.enableSsl === 'Enabled',
     };
-    imported.push(profile);
+    const existing = profilesByKey.get(connectionProfileKey(profile));
+    const target = existing ?? profile;
+    if (existing) {
+      reused += 1;
+    } else {
+      imported.push(profile);
+      profilesByKey.set(connectionProfileKey(profile), profile);
+    }
     if (sourceConnection.password !== undefined) {
-      await manager.savePassword(id, sourceConnection.password);
+      await manager.savePassword(target.id, sourceConnection.password);
     }
   }
 
-  await manager.saveProfiles([...manager.getProfiles(), ...imported]);
+  await manager.saveProfiles([...existingProfiles, ...imported]);
   const cleaned = stripSupportedSqlToolsPasswords(source);
   await sqlToolsConfig.update(
     'connections',
@@ -443,7 +466,7 @@ async function importSqlToolsConnections(
   );
   provider.refresh();
   vscode.window.showInformationMessage(
-    `已导入 ${imported.length} 个连接；可导入 SQLTools 连接中的 password 字段已清理。`,
+    `已导入 ${imported.length} 个新连接，复用 ${reused} 个已有连接；可导入 SQLTools 连接中的 password 字段已清理。`,
   );
 }
 

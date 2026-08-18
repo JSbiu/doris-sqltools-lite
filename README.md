@@ -30,6 +30,7 @@
 - 复制 SQLTools 的 MySQL/MariaDB/TiDB 连接元数据；
 - 把已有明文密码迁移进 SecretStorage；
 - 只从可导入的 SQLTools 连接中删除 `password` 字段，其他驱动的配置不会修改。
+- 重复执行导入时会复用相同连接，不会不断创建重复项。
 
 迁移前会弹窗确认。Doris 连接会根据端口 `9030` 或连接名自动标记为 Doris。
 

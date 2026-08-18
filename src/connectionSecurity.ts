@@ -97,6 +97,18 @@ export function serializeConnectionProfile(profile: ConnectionProfile): Connecti
   return serialized;
 }
 
+export function connectionProfileKey(profile: ConnectionProfile): string {
+  return JSON.stringify([
+    profile.name.trim().toLowerCase(),
+    profile.type,
+    profile.host.trim().toLowerCase(),
+    profile.port,
+    profile.database ?? '',
+    profile.username,
+    profile.ssl === true,
+  ]);
+}
+
 export function prepareLegacyConnection(value: unknown): LegacyConnectionMigration | undefined {
   if (!isRecord(value)) {
     return undefined;
