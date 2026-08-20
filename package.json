@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -19,6 +19,7 @@
     "onView:dorisSqlLiteExplorer",
     "onCommand:dorisSqlLite.addConnection",
     "onCommand:dorisSqlLite.setConnection",
+    "onCommand:dorisSqlLite.editConnection",
     "onLanguage:sql"
   ],
   "main": "./out/extension.js",
@@ -35,6 +36,10 @@
       {
         "command": "dorisSqlLite.setConnection",
         "title": "Doris SQL Lite: Set Connection"
+      },
+      {
+        "command": "dorisSqlLite.editConnection",
+        "title": "Doris SQL Lite: Edit Connection"
       },
       {
         "command": "dorisSqlLite.runQuery",
@@ -102,6 +107,11 @@
           "command": "dorisSqlLite.newQuery",
           "when": "view == dorisSqlLiteExplorer && viewItem == dorisSqlLite.connection",
           "group": "inline"
+        },
+        {
+          "command": "dorisSqlLite.editConnection",
+          "when": "view == dorisSqlLiteExplorer && viewItem == dorisSqlLite.connection",
+          "group": "database@0"
         },
         {
           "command": "dorisSqlLite.testConnection",

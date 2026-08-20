@@ -340,6 +340,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       connectionSession.defaultConnectionId = profile.id;
       vscode.window.showInformationMessage(`已为当前文件指定连接：${profile.name}`);
     }),
+    vscode.commands.registerCommand('dorisSqlLite.editConnection', async (item?: ConnectionItem) => {
+      try {
+        await editConnection(manager, provider, item);
+      } catch (error) {
+        showError('修改连接失败', error);
+      }
+    }),
     vscode.commands.registerCommand('dorisSqlLite.runQuery', async (commandArgument?: unknown) => {
       await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument));
     }),
@@ -446,6 +453,93 @@ async function addConnection(manager: ConnectionManager, provider: ConnectionPro
   await manager.savePassword(profile.id, password);
   provider.refresh();
   vscode.window.showInformationMessage(`已添加连接：${name}`);
+}
+
+async function editConnection(
+  manager: ConnectionManager,
+  provider: ConnectionProvider,
+  item?: ConnectionItem,
+): Promise<void> {
+  if (!item) {
+    return;
+  }
+
+  const current = item.profile;
+  const typePick = await vscode.window.showQuickPick(['Doris', 'MySQL'], {
+    title: `Database type for ${current.name}`,
+    placeHolder: `当前：${current.type}`,
+  });
+  const type = typePick as DatabaseType | undefined;
+  if (!type) {
+    return;
+  }
+
+  const name = await requiredInput('Connection name', current.name);
+  if (!name) {
+    return;
+  }
+  const host = await requiredInput('Host', current.host);
+  if (!host) {
+    return;
+  }
+  const portText = await requiredInput('Port', String(current.port));
+  const port = portText ? Number(portText) : NaN;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    vscode.window.showErrorMessage('端口必须是 1 到 65535 之间的整数。');
+    return;
+  }
+  const database = await optionalInput('Database', current.database ?? '');
+  if (database === undefined) {
+    return;
+  }
+  const username = await requiredInput('Username', current.username);
+  if (!username) {
+    return;
+  }
+
+  const passwordAction = await vscode.window.showQuickPick(
+    ['Keep current password', 'Change password'],
+    {
+      title: `Password for ${name}`,
+      placeHolder: '选择是否更新已保存的密码',
+    },
+  );
+  if (!passwordAction) {
+    return;
+  }
+
+  let newPassword: string | undefined;
+  if (passwordAction === 'Change password') {
+    newPassword = await vscode.window.showInputBox({
+      title: `New password for ${name}`,
+      prompt: '输入新密码；密码只会保存到 VS Code SecretStorage，不写入 settings.json。留空表示空密码。',
+      password: true,
+      ignoreFocusOut: true,
+    });
+    if (newPassword === undefined) {
+      return;
+    }
+  }
+
+  const updated: ConnectionProfile = {
+    id: current.id,
+    name,
+    type,
+    host,
+    port,
+    database: database || undefined,
+    username,
+    ssl: current.ssl,
+  };
+  const profiles = manager.getProfiles().map((profile) =>
+    profile.id === current.id ? updated : profile,
+  );
+  await manager.saveProfiles(profiles);
+  if (newPassword !== undefined) {
+    await manager.savePassword(current.id, newPassword);
+  }
+  provider.refresh();
+  vscode.window.showInformationMessage(`已更新连接：${name}`);
 }
 
 async function runQuery(

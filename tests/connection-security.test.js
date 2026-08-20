@@ -63,6 +63,22 @@ test('serializes only supported connection metadata fields', () => {
   assert.equal(Object.prototype.hasOwnProperty.call(serialized, 'password'), false);
 });
 
+test('omits an empty database from connection metadata', () => {
+  const profile = normalizeConnectionProfile({
+    id: 'doris-local',
+    name: 'Local Doris',
+    type: 'Doris',
+    host: '127.0.0.1',
+    port: 9030,
+    username: 'root',
+    database: '   ',
+  });
+
+  assert.ok(profile);
+  assert.equal(profile.database, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(serializeConnectionProfile(profile), 'database'), false);
+});
+
 test('redacts credential-shaped error text', () => {
   const safe = redactErrorMessage(
     'connect failed: password=VALUE; mysql://root:VALUE@127.0.0.1:3306/demo',

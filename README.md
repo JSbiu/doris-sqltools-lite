@@ -23,6 +23,10 @@
 
 如果要更换当前文件的连接，在 SQL 编辑器中右键选择 `Doris SQL Lite: Set Connection`。连接选择只保存在当前扩展会话内，不会写入工作区配置。
 
+在连接列表中右键选择 `Doris SQL Lite: Edit Connection`，可以修改连接类型、名称、主机、端口、database、用户名和密码。修改密码时仍只保存到 VS Code SecretStorage。
+
+database 可以留空，连接和 `Test Connection` 仍可用；但查询未限定库名的表时可能出现 `No database selected`。由于每次查询都会新建连接，建议配置默认 database 或使用 `库名.表名`。
+
 如果数据库密码发生变化，可在连接右键菜单执行 `Forget Saved Password`，下次连接时重新输入。
 
 结果导出或复制只包含当前结果面板中的数据，不包含连接信息或密码；TSV 会处理字段中的引号、换行和制表符。
