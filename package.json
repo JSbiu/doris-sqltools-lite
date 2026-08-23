@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -27,35 +27,43 @@
     "commands": [
       {
         "command": "dorisSqlLite.addConnection",
-        "title": "Doris SQL Lite: Add Connection"
+        "title": "Doris SQL Lite: Add Connection",
+        "icon": "$(add)"
       },
       {
         "command": "dorisSqlLite.newQuery",
-        "title": "Doris SQL Lite: New Query"
+        "title": "Doris SQL Lite: New Query",
+        "icon": "$(new-file)"
       },
       {
         "command": "dorisSqlLite.setConnection",
-        "title": "Doris SQL Lite: Set Connection"
+        "title": "Doris SQL Lite: Set Connection",
+        "icon": "$(database)"
       },
       {
         "command": "dorisSqlLite.editConnection",
-        "title": "Doris SQL Lite: Edit Connection"
+        "title": "Doris SQL Lite: Edit Connection",
+        "icon": "$(edit)"
       },
       {
         "command": "dorisSqlLite.runQuery",
-        "title": "Doris SQL Lite: Run Query"
+        "title": "Doris SQL Lite: Run Query at Cursor",
+        "icon": "$(play)"
       },
       {
         "command": "dorisSqlLite.testConnection",
-        "title": "Doris SQL Lite: Test Connection"
+        "title": "Doris SQL Lite: Test Connection",
+        "icon": "$(debug-disconnect)"
       },
       {
         "command": "dorisSqlLite.removeConnection",
-        "title": "Doris SQL Lite: Remove Connection"
+        "title": "Doris SQL Lite: Remove Connection",
+        "icon": "$(trash)"
       },
       {
         "command": "dorisSqlLite.forgetPassword",
-        "title": "Doris SQL Lite: Forget Saved Password"
+        "title": "Doris SQL Lite: Forget Saved Password",
+        "icon": "$(key)"
       }
     ],
     "keybindings": [
@@ -91,7 +99,7 @@
         },
         {
           "command": "dorisSqlLite.runQuery",
-          "when": "editorTextFocus && editorHasSelection && resourceLangId == sql",
+          "when": "editorTextFocus && resourceLangId == sql",
           "group": "navigation@1"
         }
       ],
@@ -130,6 +138,12 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "dorisSqlLiteExplorer",
+        "contents": "还没有数据库连接。\n[添加 Doris / MySQL 连接](command:dorisSqlLite.addConnection)"
+      }
+    ],
     "configuration": {
       "title": "Doris SQL Lite",
       "properties": {

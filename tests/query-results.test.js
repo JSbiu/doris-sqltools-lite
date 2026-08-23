@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const {
   createQueryResultView,
+  findSqlStatementAtOffset,
   hasMultipleStatements,
 } = require('../out/queryResults.js');
 
@@ -45,4 +46,46 @@ test('detects a second SQL statement outside strings and comments', () => {
   assert.equal(hasMultipleStatements('SELECT 1; SELECT 2'), true);
   assert.equal(hasMultipleStatements('SELECT 1; /* comment */ UPDATE demo SET value = 2'), true);
   assert.equal(hasMultipleStatements('SELECT 1;\n# comment\nDELETE FROM demo'), true);
+});
+
+test('finds the SQL statement at the cursor without requiring a selection', () => {
+  const sql = [
+    'SELECT 1;',
+    '',
+    '-- inspect the second result',
+    "SELECT 'a;b' AS value;",
+    '',
+    'SELECT 3;',
+  ].join('\n');
+
+  assert.equal(findSqlStatementAtOffset(sql, sql.indexOf('value')), "-- inspect the second result\nSELECT 'a;b' AS value;");
+  assert.equal(findSqlStatementAtOffset(sql, sql.indexOf('SELECT 3')), 'SELECT 3;');
+});
+
+test('uses the nearest statement when the cursor is in surrounding whitespace', () => {
+  const sql = 'SELECT 1;\n\n\nSELECT 2;';
+
+  assert.equal(findSqlStatementAtOffset(sql, 0), 'SELECT 1;');
+  assert.equal(findSqlStatementAtOffset(sql, sql.length), 'SELECT 2;');
+});
+
+test('selects the next statement when it starts immediately after a separator', () => {
+  const sql = 'SELECT 1;SELECT 2;';
+
+  assert.equal(findSqlStatementAtOffset(sql, sql.indexOf('SELECT 2')), 'SELECT 2;');
+});
+
+
+test('ignores semicolons in quoted identifiers, strings, and comments', () => {
+  const sql = [
+    "SELECT 'it''s;fine' AS text;",
+    '/* ; ignored */ SELECT `semi;colon` FROM demo;',
+  ].join('\n');
+
+  assert.equal(findSqlStatementAtOffset(sql, sql.indexOf('demo')), '/* ; ignored */ SELECT `semi;colon` FROM demo;');
+  assert.equal(hasMultipleStatements(sql), true);
+});
+
+test('returns no statement for whitespace and comments only', () => {
+  assert.equal(findSqlStatementAtOffset('  -- note\n /* another note */ ', 4), undefined);
 });
