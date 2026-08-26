@@ -20,9 +20,17 @@ import {
 
 type ConnectionSessionState = {
   documentConnections: Map<string, string>;
+  liveConnections: Map<string, LiveDocumentConnection>;
   runningDocuments: Set<string>;
   defaultConnectionId?: string;
 };
+
+type LiveDocumentConnection = {
+  profileId: string;
+  connection: mysql.Connection;
+};
+
+let activeConnectionSession: ConnectionSessionState | undefined;
 
 interface ResultPanelMetadata {
   connectionName: string;
@@ -146,6 +154,59 @@ class ConnectionManager {
   private secretKey(id: string): string {
     return `${this.secretPrefix}${id}`;
   }
+}
+
+async function closeDocumentConnection(
+  session: ConnectionSessionState,
+  documentKey: string,
+): Promise<void> {
+  const active = session.liveConnections.get(documentKey);
+  if (!active) {
+    return;
+  }
+
+  session.liveConnections.delete(documentKey);
+  await active.connection.end().catch(() => undefined);
+}
+
+async function closeConnectionsForProfile(
+  session: ConnectionSessionState,
+  profileId: string,
+): Promise<void> {
+  const documentKeys = [...session.liveConnections.entries()]
+    .filter(([, active]) => active.profileId === profileId)
+    .map(([documentKey]) => documentKey);
+  await Promise.all(documentKeys.map((documentKey) => closeDocumentConnection(session, documentKey)));
+}
+
+async function closeAllDocumentConnections(session: ConnectionSessionState): Promise<void> {
+  await Promise.all(
+    [...session.liveConnections.keys()].map((documentKey) =>
+      closeDocumentConnection(session, documentKey),
+    ),
+  );
+}
+
+function isConnectionFailure(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return false;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && [
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ENOTFOUND',
+    'EPIPE',
+    'ETIMEDOUT',
+    'PROTOCOL_CONNECTION_LOST',
+    'PROTOCOL_ENQUEUE_AFTER_QUIT',
+    'PROTOCOL_ENQUEUE_AFTER_DESTROY',
+    'PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR',
+    'PROTOCOL_SEQUENCE_TIMEOUT',
+  ].includes(code);
 }
 
 class ConnectionItem extends vscode.TreeItem {
@@ -425,8 +486,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Kept only for the current extension host session; never persisted to settings.
   const connectionSession: ConnectionSessionState = {
     documentConnections: new Map(),
+    liveConnections: new Map(),
     runningDocuments: new Set(),
   };
+  activeConnectionSession = connectionSession;
   const connectionStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   connectionStatus.name = 'Doris SQL Lite Connection';
   connectionStatus.command = 'dorisSqlLite.setConnection';
@@ -443,6 +506,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     connectionStatus,
     vscode.window.registerTreeDataProvider('dorisSqlLiteExplorer', provider),
     vscode.window.onDidChangeActiveTextEditor(refreshConnectionStatus),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      void closeDocumentConnection(connectionSession, document.uri.toString());
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('dorisSqlLite.connections')) {
         provider.refresh();
@@ -481,14 +547,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!profile) {
         return;
       }
-      connectionSession.documentConnections.set(editor.document.uri.toString(), profile.id);
+      const documentKey = editor.document.uri.toString();
+      const active = connectionSession.liveConnections.get(documentKey);
+      if (active && active.profileId !== profile.id) {
+        await closeDocumentConnection(connectionSession, documentKey);
+      }
+      connectionSession.documentConnections.set(documentKey, profile.id);
       connectionSession.defaultConnectionId = profile.id;
       refreshConnectionStatus();
       vscode.window.showInformationMessage(`已为当前文件指定连接：${profile.name}`);
     }),
     vscode.commands.registerCommand('dorisSqlLite.editConnection', async (item?: ConnectionItem) => {
       try {
-        await editConnection(manager, provider, item);
+        await editConnection(manager, provider, connectionSession, item);
         refreshConnectionStatus();
       } catch (error) {
         showError('修改连接失败', error);
@@ -526,6 +597,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (answer !== '删除') {
         return;
       }
+      await closeConnectionsForProfile(connectionSession, profile.id);
       const profiles = manager.getProfiles().filter((candidate) => candidate.id !== profile.id);
       await manager.saveProfiles(profiles);
       await manager.deletePassword(profile.id);
@@ -620,6 +692,7 @@ async function addConnection(manager: ConnectionManager, provider: ConnectionPro
 async function editConnection(
   manager: ConnectionManager,
   provider: ConnectionProvider,
+  connectionSession: ConnectionSessionState,
   item?: ConnectionItem,
 ): Promise<void> {
   const current = item?.profile ?? await chooseProfile(manager);
@@ -697,8 +770,12 @@ async function editConnection(
     profile.id === current.id ? updated : profile,
   );
   await manager.saveProfiles(profiles);
-  if (newPassword !== undefined) {
-    await manager.savePassword(current.id, newPassword);
+  try {
+    if (newPassword !== undefined) {
+      await manager.savePassword(current.id, newPassword);
+    }
+  } finally {
+    await closeConnectionsForProfile(connectionSession, current.id);
   }
   provider.refresh();
   vscode.window.showInformationMessage(`已更新连接：${name}`);
@@ -742,6 +819,10 @@ async function runQuery(
   if (!profile) {
     return;
   }
+  const active = connectionSession.liveConnections.get(documentKey);
+  if (active && active.profileId !== profile.id) {
+    await closeDocumentConnection(connectionSession, documentKey);
+  }
   connectionSession.documentConnections.set(documentKey, profile.id);
   connectionSession.defaultConnectionId = profile.id;
   onConnectionChanged?.();
@@ -756,22 +837,40 @@ async function runQuery(
       },
       async (progress, token) => {
         const startedAt = Date.now();
-        let connection: mysql.Connection | undefined;
+        let connection: mysql.Connection | undefined =
+          connectionSession.liveConnections.get(documentKey)?.connection;
+        let connectionInvalid = false;
         let cancelled = false;
         const cancellation = token.onCancellationRequested(() => {
           cancelled = true;
+          connectionInvalid = true;
           connection?.destroy();
         });
         try {
-          progress.report({ message: '正在连接…' });
-          connection = await manager.open(profile);
+          if (!connection) {
+            progress.report({ message: '正在建立连接…' });
+            connection = await manager.open(profile);
+            if (token.isCancellationRequested) {
+              connectionInvalid = true;
+              connection.destroy();
+              return;
+            }
+            connectionSession.liveConnections.set(documentKey, {
+              profileId: profile.id,
+              connection,
+            });
+          } else {
+            progress.report({ message: '复用当前文件连接…' });
+          }
           if (token.isCancellationRequested) {
+            connectionInvalid = true;
             connection.destroy();
             return;
           }
           progress.report({ message: '正在执行…' });
           const [rawResult, rawFields] = await connection.query(sql);
           if (token.isCancellationRequested) {
+            connectionInvalid = true;
             return;
           }
           const maxRows = vscode.workspace
@@ -786,13 +885,21 @@ async function runQuery(
           });
         } catch (error) {
           if (cancelled || token.isCancellationRequested) {
+            connectionInvalid = true;
             vscode.window.showInformationMessage(`已取消 ${profile.name} 上的查询。`);
           } else {
+            connectionInvalid = isConnectionFailure(error);
             showError(`执行失败（${profile.name}）`, error);
           }
         } finally {
           cancellation.dispose();
-          await connection?.end().catch(() => undefined);
+          if (connectionInvalid && connection) {
+            const activeConnection = connectionSession.liveConnections.get(documentKey);
+            if (activeConnection?.connection === connection) {
+              connectionSession.liveConnections.delete(documentKey);
+            }
+            await connection.end().catch(() => undefined);
+          }
         }
       },
     );
@@ -919,6 +1026,10 @@ function normalizeCommandConnectionId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
-export function deactivate(): void {
-  // Connections are opened per query and closed immediately, so there is no pool to dispose.
+export async function deactivate(): Promise<void> {
+  const session = activeConnectionSession;
+  activeConnectionSession = undefined;
+  if (session) {
+    await closeAllDocumentConnections(session);
+  }
 }
