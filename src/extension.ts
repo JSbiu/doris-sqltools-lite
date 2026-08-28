@@ -214,10 +214,12 @@ class ConnectionItem extends vscode.TreeItem {
 
   public constructor(public readonly profile: ConnectionProfile) {
     super(profile.name, vscode.TreeItemCollapsibleState.None);
-    this.description = `${profile.type} · ${profile.host}:${profile.port}`;
+    this.description = `${profile.type} · ${profile.host}:${profile.port}${
+      profile.ssl ? ' · SSL' : ''
+    }`;
     this.tooltip = `${profile.name}\n${profile.username}@${profile.host}:${profile.port}${
       profile.database ? `/${profile.database}` : ''
-    }`;
+    }${profile.ssl ? '\nSSL (TLS) 已启用' : '\n未启用 SSL'}`;
     this.iconPath = new vscode.ThemeIcon('database');
     this.command = {
       command: 'dorisSqlLite.newQuery',
@@ -949,7 +951,7 @@ async function chooseProfile(
     profiles.map((profile) => ({
       label: profile.name,
       description: `${profile.type} · ${profile.host}:${profile.port}`,
-      detail: `${profile.username}${profile.database ? ` · ${profile.database}` : ' · 未指定 database'}`,
+      detail: `${profile.username}${profile.database ? ` · ${profile.database}` : ' · 未指定 database'}${profile.ssl ? ' · SSL' : ''}`,
       profile,
     })),
     { title: '选择数据库连接' },
