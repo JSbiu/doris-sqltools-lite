@@ -5,6 +5,10 @@ node_modules/
 out/
 *.tsbuildinfo
 *.vsix
+.packaging/
+
+# Lint cache
+.eslintcache
 
 # Test and coverage output
 .vscode-test/
@@ -13,6 +17,7 @@ coverage/
 # Local Codex/agent state
 .agents/
 .codex/
+.workbuddy/
 
 # Local secrets and environment files
 .env

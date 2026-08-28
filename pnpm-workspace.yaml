@@ -1,3 +1,13 @@
+# Use a hoisted (flat) node_modules layout.
+# The default isolated layout relies on fs.symlink, which intermittently fails
+# on this Windows machine (UNKNOWN for existing targets), breaking installs.
+# A flat layout uses file copies and installs reliably here.
+nodeLinker: hoisted
+
+# Do not auto-run `pnpm install` before scripts (it can fail on flaky network
+# fetches of optional platform packages and blocks `pnpm test`).
+verifyDepsBeforeRun: false
+
 allowBuilds:
-  '@vscode/vsce-sign': set this to true or false
-  keytar: set this to true or false
+  '@vscode/vsce-sign': true
+  keytar: false
