@@ -1,7 +1,9 @@
 .agents/**
 .vscode/**
 .packaging/**
+.workbuddy/**
 scripts/**
+eslint.config.mjs
 !node_modules/
 !node_modules/mysql2/
 !node_modules/mysql2/**
