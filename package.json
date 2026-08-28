@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -208,7 +208,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "lint": "eslint src",
-    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/query-results.test.js tests/exports.test.js",
+    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/connection-form.test.js tests/query-results.test.js tests/exports.test.js",
     "watch": "tsc -p ./ -w",
     "package": "node scripts/package-runtime.js"
   },

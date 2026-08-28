@@ -1,14 +1,9 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
-import {
-  normalizeConnectionProfiles,
-  prepareLegacyConnection,
-  redactErrorMessage,
-  serializeConnectionProfile,
-  type ConnectionProfile,
-  type DatabaseType,
-} from './connectionSecurity';
+import { type ConnectionProfile } from './connectionSecurity';
+import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
+import { openConnectionForm } from './connectionForm';
 import { displayValue, isExportFormat, toTsv, type ExportFormat } from './exports';
 import {
   createQueryResultView,
@@ -37,123 +32,6 @@ interface ResultPanelMetadata {
   database?: string;
   durationMs: number;
   maxRows: number;
-}
-
-class ConnectionManager {
-  private readonly secretPrefix = 'dorisSqlLite.password.';
-
-  public constructor(private readonly context: vscode.ExtensionContext) {}
-
-  public getProfiles(): ConnectionProfile[] {
-    const raw = vscode.workspace
-      .getConfiguration('dorisSqlLite')
-      .get<unknown>('connections', []);
-
-    return normalizeConnectionProfiles(raw);
-  }
-
-  public async saveProfiles(profiles: ConnectionProfile[]): Promise<void> {
-    const configuration = vscode.workspace.getConfiguration('dorisSqlLite');
-    await configuration.update(
-      'connections',
-      profiles.map((profile) => serializeConnectionProfile(profile)),
-      getConfigurationTarget(configuration, 'connections'),
-    );
-  }
-
-  public async migrateLegacyPasswords(): Promise<void> {
-    const configuration = vscode.workspace.getConfiguration('dorisSqlLite');
-    const raw = configuration.get<unknown>('connections', []);
-    if (!Array.isArray(raw)) {
-      return;
-    }
-
-    let changed = false;
-    const cleaned: unknown[] = [];
-    for (const item of raw) {
-      const migration = prepareLegacyConnection(item);
-      if (!migration || !migration.hadPasswordField) {
-        cleaned.push(item);
-        continue;
-      }
-
-      if (migration.password !== undefined) {
-        const existing = await this.context.secrets.get(this.secretKey(migration.profile.id));
-        if (existing === undefined) {
-          await this.savePassword(migration.profile.id, migration.password);
-        }
-      }
-      cleaned.push(serializeConnectionProfile(migration.profile));
-      changed = true;
-    }
-
-    if (changed) {
-      await configuration.update(
-        'connections',
-        cleaned,
-        getConfigurationTarget(configuration, 'connections'),
-      );
-    }
-  }
-
-  public async savePassword(id: string, password: string): Promise<void> {
-    await this.context.secrets.store(this.secretKey(id), password);
-  }
-
-  public async deletePassword(id: string): Promise<void> {
-    await this.context.secrets.delete(this.secretKey(id));
-  }
-
-  public async getPassword(profile: ConnectionProfile): Promise<string | undefined> {
-    let password = await this.context.secrets.get(this.secretKey(profile.id));
-    if (password !== undefined) {
-      return password;
-    }
-
-    password = await vscode.window.showInputBox({
-      title: `Password for ${profile.name}`,
-      prompt: '首次连接请输入密码；密码只会保存到 VS Code SecretStorage。留空表示空密码。',
-      password: true,
-      ignoreFocusOut: true,
-    });
-
-    if (password === undefined) {
-      return undefined;
-    }
-
-    await this.savePassword(profile.id, password);
-    return password;
-  }
-
-  public async open(profile: ConnectionProfile): Promise<mysql.Connection> {
-    const password = await this.getPassword(profile);
-    if (password === undefined) {
-      throw new Error('已取消密码输入。');
-    }
-
-    try {
-      return await mysql.createConnection({
-        host: profile.host,
-        port: profile.port,
-        user: profile.username,
-        password,
-        database: profile.database || undefined,
-        ssl: profile.ssl ? {} : undefined,
-        connectTimeout: 10_000,
-        multipleStatements: false,
-        dateStrings: true,
-        supportBigNumbers: true,
-        bigNumberStrings: true,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(redactErrorMessage(message, [password]), { cause: error });
-    }
-  }
-
-  private secretKey(id: string): string {
-    return `${this.secretPrefix}${id}`;
-  }
 }
 
 async function closeDocumentConnection(
@@ -517,12 +395,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         refreshConnectionStatus();
       }
     }),
-    vscode.commands.registerCommand('dorisSqlLite.addConnection', async () => {
-      try {
-        await addConnection(manager, provider);
-      } catch (error) {
-        showError('添加连接失败', error);
-      }
+    vscode.commands.registerCommand('dorisSqlLite.addConnection', () => {
+      openConnectionForm({
+        context,
+        manager,
+        mode: 'add',
+        onSaved: async (profile, info) => {
+          provider.refresh();
+          refreshConnectionStatus();
+          const passwordNote = info.passwordSaved ? '' : '；未保存密码，首次连接时会提示输入';
+          vscode.window.showInformationMessage(`已添加连接：${profile.name}${passwordNote}`);
+        },
+      });
     }),
     vscode.commands.registerCommand('dorisSqlLite.newQuery', async (commandArgument?: unknown) => {
       const connectionId = normalizeCommandConnectionId(commandArgument);
@@ -560,12 +444,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage(`已为当前文件指定连接：${profile.name}`);
     }),
     vscode.commands.registerCommand('dorisSqlLite.editConnection', async (item?: ConnectionItem) => {
-      try {
-        await editConnection(manager, provider, connectionSession, item);
-        refreshConnectionStatus();
-      } catch (error) {
-        showError('修改连接失败', error);
+      const existing = item?.profile ?? await chooseProfile(manager);
+      if (!existing) {
+        return;
       }
+      openConnectionForm({
+        context,
+        manager,
+        mode: 'edit',
+        existing,
+        onSaved: async (profile, info) => {
+          let sessionClosed = false;
+          if (!sameConnectionTarget(existing, profile)) {
+            sessionClosed = [...connectionSession.liveConnections.values()].some(
+              (active) => active.profileId === existing.id,
+            );
+            await closeConnectionsForProfile(connectionSession, existing.id);
+          }
+          provider.refresh();
+          refreshConnectionStatus();
+          const notes: string[] = [];
+          if (info.passwordSaved) {
+            notes.push('已更新密码');
+          } else if (info.passwordCleared) {
+            notes.push('已清除已保存的密码');
+          }
+          if (sessionClosed) {
+            notes.push('已关闭该连接的活动会话');
+          }
+          const suffix = notes.length > 0 ? `（${notes.join('；')}）` : '';
+          vscode.window.showInformationMessage(`已更新连接：${profile.name}${suffix}`);
+        },
+      });
     }),
     vscode.commands.registerCommand('dorisSqlLite.runQuery', async (commandArgument?: unknown) => {
       await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument), refreshConnectionStatus);
@@ -634,176 +544,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 }
 
-async function addConnection(manager: ConnectionManager, provider: ConnectionProvider): Promise<void> {
-  const typePick = await vscode.window.showQuickPick(['Doris', 'MySQL'], {
-    title: 'Database type',
-    placeHolder: 'Doris uses the MySQL protocol on port 9030',
-  });
-  const type = typePick as DatabaseType | undefined;
-  if (!type) {
-    return;
-  }
 
-  const name = await requiredInput('Connection name', type);
-  if (!name) {
-    return;
-  }
-  const host = await requiredInput('Host', '127.0.0.1');
-  if (!host) {
-    return;
-  }
-  const portText = await requiredInput('Port', type === 'Doris' ? '9030' : '3306');
-  const port = portText ? Number(portText) : NaN;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    vscode.window.showErrorMessage('端口必须是 1 到 65535 之间的整数。');
-    return;
-  }
-  const database = await optionalInput('Database（可留空）', '');
-  if (database === undefined) {
-    return;
-  }
-  const username = await requiredInput('Username', 'root');
-  if (!username) {
-    return;
-  }
-  const password = await vscode.window.showInputBox({
-    title: `Password for ${name}`,
-    prompt: '只输入一次，密码将保存到 VS Code SecretStorage，不写入 settings.json。留空表示空密码。',
-    password: true,
-    ignoreFocusOut: true,
-  });
-  if (password === undefined) {
-    return;
-  }
-  const sslPick = await vscode.window.showQuickPick(
-    [
-      { label: '不使用 SSL', description: '适用于内网或不要求加密的环境' },
-      { label: '使用 SSL (TLS)', description: '加密客户端与服务器之间的连接' },
-    ],
-    { title: `SSL for ${name}`, placeHolder: '生产环境通常建议启用' },
-  );
-  if (!sslPick) {
-    return;
-  }
-
-  const profile: ConnectionProfile = {
-    id: randomUUID(),
-    name,
-    type,
-    host,
-    port,
-    database: database || undefined,
-    username,
-    ssl: sslPick.label.startsWith('使用'),
-  };
-  await manager.saveProfiles([...manager.getProfiles(), profile]);
-  await manager.savePassword(profile.id, password);
-  provider.refresh();
-  vscode.window.showInformationMessage(`已添加连接：${name}`);
-}
-
-async function editConnection(
-  manager: ConnectionManager,
-  provider: ConnectionProvider,
-  connectionSession: ConnectionSessionState,
-  item?: ConnectionItem,
-): Promise<void> {
-  const current = item?.profile ?? await chooseProfile(manager);
-  if (!current) {
-    return;
-  }
-
-  const typePick = await vscode.window.showQuickPick(['Doris', 'MySQL'], {
-    title: `Database type for ${current.name}`,
-    placeHolder: `当前：${current.type}`,
-  });
-  const type = typePick as DatabaseType | undefined;
-  if (!type) {
-    return;
-  }
-
-  const name = await requiredInput('Connection name', current.name);
-  if (!name) {
-    return;
-  }
-  const host = await requiredInput('Host', current.host);
-  if (!host) {
-    return;
-  }
-  const portText = await requiredInput('Port', String(current.port));
-  const port = portText ? Number(portText) : NaN;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    vscode.window.showErrorMessage('端口必须是 1 到 65535 之间的整数。');
-    return;
-  }
-  const database = await optionalInput('Database', current.database ?? '');
-  if (database === undefined) {
-    return;
-  }
-  const username = await requiredInput('Username', current.username);
-  if (!username) {
-    return;
-  }
-
-  const passwordAction = await vscode.window.showQuickPick(
-    ['Keep current password', 'Change password'],
-    {
-      title: `Password for ${name}`,
-      placeHolder: '选择是否更新已保存的密码',
-    },
-  );
-  if (!passwordAction) {
-    return;
-  }
-
-  let newPassword: string | undefined;
-  if (passwordAction === 'Change password') {
-    newPassword = await vscode.window.showInputBox({
-      title: `New password for ${name}`,
-      prompt: '输入新密码；密码只会保存到 VS Code SecretStorage，不写入 settings.json。留空表示空密码。',
-      password: true,
-      ignoreFocusOut: true,
-    });
-    if (newPassword === undefined) {
-      return;
-    }
-  }
-
-  const sslPick = await vscode.window.showQuickPick(
-    [
-      { label: '不使用 SSL', description: '适用于内网或不要求加密的环境', picked: current.ssl !== true },
-      { label: '使用 SSL (TLS)', description: '加密客户端与服务器之间的连接', picked: current.ssl === true },
-    ],
-    { title: `SSL for ${name}`, placeHolder: `当前：${current.ssl ? '使用 SSL' : '不使用 SSL'}` },
-  );
-  if (!sslPick) {
-    return;
-  }
-
-  const updated: ConnectionProfile = {
-    id: current.id,
-    name,
-    type,
-    host,
-    port,
-    database: database || undefined,
-    username,
-    ssl: sslPick.label.startsWith('使用'),
-  };
-  const profiles = manager.getProfiles().map((profile) =>
-    profile.id === current.id ? updated : profile,
-  );
-  await manager.saveProfiles(profiles);
-  try {
-    if (newPassword !== undefined) {
-      await manager.savePassword(current.id, newPassword);
-    }
-  } finally {
-    await closeConnectionsForProfile(connectionSession, current.id);
-  }
-  provider.refresh();
-  vscode.window.showInformationMessage(`已更新连接：${name}`);
-}
 
 async function runQuery(
   manager: ConnectionManager,
@@ -994,21 +735,6 @@ function formatDuration(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 2 : 1)} s`;
 }
 
-async function requiredInput(prompt: string, value?: string): Promise<string | undefined> {
-  const result = await vscode.window.showInputBox({
-    title: prompt,
-    value,
-    ignoreFocusOut: true,
-    validateInput: (input) => input.trim() ? undefined : `${prompt} 不能为空。`,
-  });
-  return result?.trim();
-}
-
-async function optionalInput(prompt: string, value?: string): Promise<string | undefined> {
-  const result = await vscode.window.showInputBox({ title: prompt, value, ignoreFocusOut: true });
-  return result?.trim();
-}
-
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -1020,30 +746,6 @@ function escapeHtml(value: string): string {
 
 function nonce(): string {
   return randomUUID().replace(/-/g, '');
-}
-
-function getConfigurationTarget(
-  configuration: vscode.WorkspaceConfiguration,
-  key: string,
-): vscode.ConfigurationTarget {
-  const inspected = configuration.inspect<unknown>(key);
-  if (inspected?.workspaceFolderValue !== undefined) {
-    return vscode.ConfigurationTarget.WorkspaceFolder;
-  }
-  if (inspected?.workspaceValue !== undefined) {
-    return vscode.ConfigurationTarget.Workspace;
-  }
-  if (inspected?.globalValue !== undefined) {
-    return vscode.ConfigurationTarget.Global;
-  }
-  return vscode.workspace.workspaceFolders
-    ? vscode.ConfigurationTarget.Workspace
-    : vscode.ConfigurationTarget.Global;
-}
-
-function showError(prefix: string, error: unknown): void {
-  const message = redactErrorMessage(error instanceof Error ? error.message : String(error));
-  vscode.window.showErrorMessage(`${prefix}：${message}`);
 }
 
 function normalizeCommandConnectionId(value: unknown): string | undefined {
