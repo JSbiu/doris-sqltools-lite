@@ -89,3 +89,34 @@ test('redacts credential-shaped error text', () => {
   assert.match(safe, /password=\[redacted\]/);
   assert.match(safe, /mysql:\/\/root:\[redacted\]@/);
 });
+
+test('keeps an explicit ssl flag in connection metadata', () => {
+  const withSsl = normalizeConnectionProfile({
+    id: 'doris-ssl',
+    name: 'SSL Doris',
+    type: 'Doris',
+    host: '127.0.0.1',
+    port: 9030,
+    username: 'root',
+    ssl: true,
+  });
+
+  assert.ok(withSsl);
+  assert.equal(withSsl.ssl, true);
+  assert.equal(serializeConnectionProfile(withSsl).ssl, true);
+});
+
+test('omits ssl from metadata when it is not explicitly set', () => {
+  const plain = normalizeConnectionProfile({
+    id: 'mysql-plain',
+    name: 'Plain MySQL',
+    type: 'MySQL',
+    host: '127.0.0.1',
+    port: 3306,
+    username: 'root',
+  });
+
+  assert.ok(plain);
+  assert.equal(plain.ssl, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(serializeConnectionProfile(plain), 'ssl'), false);
+});

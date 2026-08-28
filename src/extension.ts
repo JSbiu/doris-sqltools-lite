@@ -673,6 +673,16 @@ async function addConnection(manager: ConnectionManager, provider: ConnectionPro
   if (password === undefined) {
     return;
   }
+  const sslPick = await vscode.window.showQuickPick(
+    [
+      { label: '不使用 SSL', description: '适用于内网或不要求加密的环境' },
+      { label: '使用 SSL (TLS)', description: '加密客户端与服务器之间的连接' },
+    ],
+    { title: `SSL for ${name}`, placeHolder: '生产环境通常建议启用' },
+  );
+  if (!sslPick) {
+    return;
+  }
 
   const profile: ConnectionProfile = {
     id: randomUUID(),
@@ -682,6 +692,7 @@ async function addConnection(manager: ConnectionManager, provider: ConnectionPro
     port,
     database: database || undefined,
     username,
+    ssl: sslPick.label.startsWith('使用'),
   };
   await manager.saveProfiles([...manager.getProfiles(), profile]);
   await manager.savePassword(profile.id, password);
@@ -756,6 +767,17 @@ async function editConnection(
     }
   }
 
+  const sslPick = await vscode.window.showQuickPick(
+    [
+      { label: '不使用 SSL', description: '适用于内网或不要求加密的环境', picked: current.ssl !== true },
+      { label: '使用 SSL (TLS)', description: '加密客户端与服务器之间的连接', picked: current.ssl === true },
+    ],
+    { title: `SSL for ${name}`, placeHolder: `当前：${current.ssl ? '使用 SSL' : '不使用 SSL'}` },
+  );
+  if (!sslPick) {
+    return;
+  }
+
   const updated: ConnectionProfile = {
     id: current.id,
     name,
@@ -764,7 +786,7 @@ async function editConnection(
     port,
     database: database || undefined,
     username,
-    ssl: current.ssl,
+    ssl: sslPick.label.startsWith('使用'),
   };
   const profiles = manager.getProfiles().map((profile) =>
     profile.id === current.id ? updated : profile,

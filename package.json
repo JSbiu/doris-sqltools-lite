@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "local",
   "license": "MIT",
   "repository": {

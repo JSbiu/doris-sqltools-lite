@@ -17,7 +17,7 @@
 
 1. 打开扩展开发主机或安装打包出的 `.vsix`。
 2. 在活动栏打开 `Doris SQL Lite`。
-3. 点击 `Add Connection`，选择 `Doris` 或 `MySQL`，首次输入密码。
+3. 点击 `Add Connection`，选择 `Doris` 或 `MySQL`，首次输入密码（可按需启用 SSL）。
 4. 右键连接创建 SQL 查询。第一次执行当前文件时选择连接；同一文件后续语句会复用这条活动连接，因此 `USE`、临时表和会话变量会继续生效。第一次选择的连接也会作为本次 VS Code 会话的默认连接；当前文件如果已指定连接，则优先使用当前文件的连接。
 5. 按 `Ctrl+Enter` 或右键 `Doris SQL Lite: Run Query at Cursor`：有选区时执行选中的单条 SQL；没有选区时自动执行光标所在或最近的一条 SQL。
 6. 查询进度通知支持取消；同一 SQL 文件不会并发启动重复查询。
@@ -25,7 +25,7 @@
 
 当前 SQL 文件使用的连接会显示在 VS Code 状态栏，点击即可切换。也可以在 SQL 编辑器中右键选择 `Doris SQL Lite: Set Connection`。连接选择和活动连接只保存在当前扩展会话内，不会写入工作区配置；关闭 SQL 文件、切换连接、修改/删除连接或扩展停用时会释放活动连接。
 
-在连接列表中右键选择 `Doris SQL Lite: Edit Connection`，可以修改连接类型、名称、主机、端口、database、用户名和密码。修改密码时仍只保存到 VS Code SecretStorage。
+在连接列表中右键选择 `Doris SQL Lite: Edit Connection`，可以修改连接类型、名称、主机、端口、database、用户名、密码和 SSL。修改密码时仍只保存到 VS Code SecretStorage。
 
 database 默认留空且不是必填项，连接和 `Test Connection` 仍可用；但首次查询未限定库名的表时可能出现 `No database selected`。可以在当前文件先执行 `USE hue`，后续语句会复用同一条连接；也可以按需配置默认 database 或使用 `库名.表名`。
 
