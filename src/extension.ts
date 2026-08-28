@@ -147,7 +147,7 @@ class ConnectionManager {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(redactErrorMessage(message, [password]));
+      throw new Error(redactErrorMessage(message, [password]), { cause: error });
     }
   }
 
