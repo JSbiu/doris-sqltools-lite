@@ -1,4 +1,4 @@
-.agents/**
+.local/**
 .vscode/**
 .packaging/**
 .workbuddy/**

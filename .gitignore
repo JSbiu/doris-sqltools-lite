@@ -14,9 +14,11 @@ out/
 .vscode-test/
 coverage/
 
-# Local Codex/agent state
-.agents/
+# Local agent context（三层机制第三层：.local/memory.md + .local/archive/）
+.local/
 .codex/
+
+# WorkBuddy 应用数据目录，非项目上下文
 .workbuddy/
 
 # Local secrets and environment files
