@@ -1,6 +1,10 @@
 import * as vscode from 'vscode';
 import mysql from 'mysql2/promise';
 import {
+  classifyDatabaseError,
+  formatDatabaseError,
+} from './connectionDiagnostics';
+import {
   normalizeConnectionProfiles,
   prepareLegacyConnection,
   redactErrorMessage,
@@ -82,46 +86,66 @@ export class ConnectionManager {
     return this.context.secrets.get(this.secretKey(id));
   }
 
-  public async getPassword(profile: ConnectionProfile): Promise<string | undefined> {
-    let password = await this.readPassword(profile.id);
-    if (password !== undefined) {
-      return password;
+  // Opens a session connection, asking for the password only when nothing is
+  // stored. A wrong stored password is dropped and re-asked once, and a typed
+  // password is only persisted after the handshake actually succeeded.
+  public async open(profile: ConnectionProfile): Promise<mysql.Connection> {
+    const stored = await this.readPassword(profile.id);
+    if (stored !== undefined) {
+      try {
+        return await this.connect(profile, stored);
+      } catch (error) {
+        if (classifyDatabaseError(error).kind !== 'auth') {
+          throw error;
+        }
+        await this.deletePassword(profile.id);
+        vscode.window.showWarningMessage(
+          `连接“${profile.name}”已保存的密码认证失败，已清除，请重新输入密码。`,
+        );
+      }
     }
 
-    password = await vscode.window.showInputBox({
+    return this.promptAndConnect(profile);
+  }
+
+  private async promptAndConnect(profile: ConnectionProfile): Promise<mysql.Connection> {
+    const password = await vscode.window.showInputBox({
       title: `Password for ${profile.name}`,
-      prompt: '首次连接请输入密码；密码只会保存到 VS Code SecretStorage。留空表示空密码。',
+      prompt:
+        '首次连接请输入密码；连接成功后才会保存到 VS Code SecretStorage，密码输错不会被记住。留空表示空密码。',
       password: true,
       ignoreFocusOut: true,
     });
 
     if (password === undefined) {
-      return undefined;
-    }
-
-    await this.savePassword(profile.id, password);
-    return password;
-  }
-
-  public async open(profile: ConnectionProfile): Promise<mysql.Connection> {
-    const password = await this.getPassword(profile);
-    if (password === undefined) {
       throw new Error('已取消密码输入。');
     }
 
-    return this.connect(profile, password);
+    // Connect first, persist second: a rejected password must never be stored.
+    const connection = await this.connect(profile, password);
+    try {
+      await this.savePassword(profile.id, password);
+    } catch (error) {
+      await connection.end().catch(() => undefined);
+      throw error;
+    }
+    return connection;
   }
 
   // Used by the connection form's "test connection" button: never prompts,
   // never persists.
-  public async connect(profile: ConnectionProfile, password: string): Promise<mysql.Connection> {
+  public async connect(
+    profile: ConnectionProfile,
+    password: string,
+    options: { omitDatabase?: boolean } = {},
+  ): Promise<mysql.Connection> {
     try {
       return await mysql.createConnection({
         host: profile.host,
         port: profile.port,
         user: profile.username,
         password,
-        database: profile.database || undefined,
+        database: options.omitDatabase ? undefined : profile.database || undefined,
         ssl: profile.ssl ? {} : undefined,
         connectTimeout: 10_000,
         multipleStatements: false,
@@ -133,6 +157,16 @@ export class ConnectionManager {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(redactErrorMessage(message, [password]), { cause: error });
     }
+  }
+
+  // A short-lived second connection used to KILL a running query without
+  // tearing down the session the user is working in. Skips the default
+  // database so a missing/unreadable database cannot block the kill.
+  public async openControlConnection(
+    profile: ConnectionProfile,
+    password: string,
+  ): Promise<mysql.Connection> {
+    return this.connect(profile, password, { omitDatabase: true });
   }
 
   private secretKey(id: string): string {
@@ -171,6 +205,5 @@ export function getConfigurationTarget(
 }
 
 export function showError(prefix: string, error: unknown): void {
-  const message = redactErrorMessage(error instanceof Error ? error.message : String(error));
-  vscode.window.showErrorMessage(`${prefix}：${message}`);
+  vscode.window.showErrorMessage(`${prefix}：${formatDatabaseError(error)}`);
 }

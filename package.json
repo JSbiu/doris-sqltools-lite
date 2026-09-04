@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -20,6 +20,7 @@
     "onCommand:dorisSqlLite.addConnection",
     "onCommand:dorisSqlLite.setConnection",
     "onCommand:dorisSqlLite.editConnection",
+    "onCommand:dorisSqlLite.cancelQuery",
     "onLanguage:sql"
   ],
   "main": "./out/extension.js",
@@ -49,6 +50,11 @@
         "command": "dorisSqlLite.runQuery",
         "title": "Doris SQL Lite: Run Query at Cursor",
         "icon": "$(play)"
+      },
+      {
+        "command": "dorisSqlLite.cancelQuery",
+        "title": "Doris SQL Lite: Cancel Query",
+        "icon": "$(stop-circle)"
       },
       {
         "command": "dorisSqlLite.testConnection",
@@ -208,7 +214,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "lint": "eslint src",
-    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/connection-form.test.js tests/query-results.test.js tests/exports.test.js",
+    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js",
     "watch": "tsc -p ./ -w",
     "package": "node scripts/package-runtime.js"
   },

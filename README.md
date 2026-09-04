@@ -7,6 +7,8 @@
 - 工作区配置只保存连接名称、主机、端口、数据库和用户名。
 - 密码只保存到 VS Code `ExtensionContext.secrets`（SecretStorage），不会写进 `settings.json`。
 - 添加连接时密码留空表示「先不保存」，首次连接时会提示输入一次；之后连接自动读取密码。
+- 手动输入的密码只在连接成功后才写入 SecretStorage，输错不会被记住。
+- 已保存的密码如果认证失败会被自动清除并重新询问一次，不会反复用错误密码重试。
 - 扩展启动时会把可识别的旧连接配置中的 `password` 迁移到 SecretStorage，并从连接元数据中清理。
 - `Doris` 使用 MySQL 协议连接 FE 的 `9030` 端口。
 - 扩展不记录密码、连接字符串或查询结果到日志。
@@ -20,7 +22,7 @@
 3. 点击 `Add Connection`，在弹出的连接表单里一次填完类型、名称、主机、端口、database、用户名、密码和 SSL。可以先点 `测试连接` 验证，再点 `保存`。
 4. 右键连接创建 SQL 查询。第一次执行当前文件时选择连接；同一文件后续语句会复用这条活动连接，因此 `USE`、临时表和会话变量会继续生效。第一次选择的连接也会作为本次 VS Code 会话的默认连接；当前文件如果已指定连接，则优先使用当前文件的连接。
 5. 按 `Ctrl+Enter` 或右键 `Doris SQL Lite: Run Query at Cursor`：有选区时执行选中的单条 SQL；没有选区时自动执行光标所在或最近的一条 SQL。
-6. 查询进度通知支持取消；同一 SQL 文件不会并发启动重复查询。
+6. 查询可以取消：进度通知上的取消按钮，或命令面板执行 `Doris SQL Lite: Cancel Query`。取消走 `KILL QUERY`，活动连接会保留，`USE`、临时表和会话变量继续生效；服务端不响应时会退化为断开该连接。同一 SQL 文件不会并发启动重复查询。
 7. 结果复用同一个面板，可查看连接、database、耗时、行列数和截断提示，并支持行号、筛选、TSV 导出和复制。
 
 当前 SQL 文件使用的连接会显示在 VS Code 状态栏，点击即可切换。也可以在 SQL 编辑器中右键选择 `Doris SQL Lite: Set Connection`。连接选择和活动连接只保存在当前扩展会话内，不会写入工作区配置；关闭 SQL 文件、切换连接、修改/删除连接或扩展停用时会释放活动连接。
@@ -36,9 +38,17 @@
 
 database 默认留空且不是必填项，连接和 `Test Connection` 仍可用；但首次查询未限定库名的表时可能出现 `No database selected`。可以在当前文件先执行 `USE hue`，后续语句会复用同一条连接；也可以按需配置默认 database 或使用 `库名.表名`。
 
-如果数据库密码发生变化，可在连接右键菜单执行 `Forget Saved Password`，下次连接时重新输入。
+如果数据库密码发生变化，可在连接右键菜单执行 `Forget Saved Password`，下次连接时重新输入；密码输错时也会自动清除并重新询问一次。连接与查询失败的报错会转成中文说明并给出下一步建议（端口不通、主机不可解析、database 不存在、账号无权限等），原始报错与错误码保留在消息尾部，密码仍会脱敏。
 
 结果导出或复制只包含当前结果面板中的数据，不包含连接信息或密码；TSV 会处理字段中的引号、换行和制表符。结果页中的 `NULL` 会明确显示，TSV 中仍按空字段导出。
+
+## v0.4 连接诊断与查询取消
+
+- 密码不再被错误地记住：手动输入的密码只在握手成功后写入 SecretStorage；已保存的密码认证失败时自动清除并重新询问一次。
+- 错误信息中文化：按 `error.code` 与消息特征归类为认证、网络、database、权限、SSL、服务端、SQL 等，并附带「建议」。
+- 取消查询不再拆连接：额外开一条控制连接执行 `KILL QUERY <thread id>`，原连接保留，会话状态不丢；没有可用密码或服务端不响应时回退为断开连接（5 秒兜底）。
+- 新增 `Doris SQL Lite: Cancel Query` 命令，除进度通知的取消按钮外多一个入口，可自行绑定快捷键。
+- 新增 `tests/connection-diagnostics.test.js`（15 例）。
 
 ## v0.3 连接表单
 
@@ -62,7 +72,7 @@ database 默认留空且不是必填项，连接和 `Test Connection` 仍可用�
 ## 本地验证与打包
 
 - 编译：`node_modules/.bin/tsc.CMD -p .`
-- 测试：`node --test tests/connection-security.test.js tests/connection-form.test.js tests/query-results.test.js tests/exports.test.js`
+- 测试：`node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js`
 - 打包：`node scripts/package-runtime.js`
 
 打包脚本会把 `mysql2` 及其生产依赖一并放入 VSIX；安装后的扩展不依赖本机的 npm 或 SQLTools。

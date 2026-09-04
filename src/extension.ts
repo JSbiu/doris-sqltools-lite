@@ -17,8 +17,13 @@ type ConnectionSessionState = {
   documentConnections: Map<string, string>;
   liveConnections: Map<string, LiveDocumentConnection>;
   runningDocuments: Set<string>;
+  cancellationSources: Map<string, vscode.CancellationTokenSource>;
   defaultConnectionId?: string;
 };
+
+// If the server never acknowledges a KILL QUERY (Doris KILL semantics vary by
+// version), fall back to tearing the socket down after this long.
+const CANCEL_FALLBACK_TIMEOUT_MS = 5_000;
 
 type LiveDocumentConnection = {
   profileId: string;
@@ -368,6 +373,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     documentConnections: new Map(),
     liveConnections: new Map(),
     runningDocuments: new Set(),
+    cancellationSources: new Map(),
   };
   activeConnectionSession = connectionSession;
   const connectionStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -480,6 +486,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('dorisSqlLite.runQuery', async (commandArgument?: unknown) => {
       await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument), refreshConnectionStatus);
     }),
+    vscode.commands.registerCommand('dorisSqlLite.cancelQuery', async () => {
+      const documentKey = vscode.window.activeTextEditor?.document.uri.toString();
+      const source = documentKey ? connectionSession.cancellationSources.get(documentKey) : undefined;
+      if (!source) {
+        vscode.window.showInformationMessage('当前 SQL 文件没有正在执行的查询。');
+        return;
+      }
+      source.cancel();
+    }),
     vscode.commands.registerCommand('dorisSqlLite.testConnection', async (item?: ConnectionItem) => {
       const profile = await chooseProfile(manager, item?.profile.id);
       if (!profile) {
@@ -574,7 +589,9 @@ async function runQuery(
 
   const documentKey = editor.document.uri.toString();
   if (connectionSession.runningDocuments.has(documentKey)) {
-    vscode.window.showInformationMessage('当前 SQL 文件已有查询正在执行；可先从进度通知中取消。');
+    vscode.window.showInformationMessage(
+      '当前 SQL 文件已有查询正在执行；可从进度通知取消，或执行 Doris SQL Lite: Cancel Query。',
+    );
     return;
   }
   const id = requestedConnectionId
@@ -593,6 +610,56 @@ async function runQuery(
   onConnectionChanged?.();
 
   connectionSession.runningDocuments.add(documentKey);
+  const cancelSource = new vscode.CancellationTokenSource();
+  connectionSession.cancellationSources.set(documentKey, cancelSource);
+
+  const startedAt = Date.now();
+  let progressHandle: vscode.Progress<{ message?: string }> | undefined;
+  let connection: mysql.Connection | undefined =
+    connectionSession.liveConnections.get(documentKey)?.connection;
+  let connectionInvalid = false;
+  let cancelled = false;
+  let settled = false;
+  let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const isCancelled = (token?: vscode.CancellationToken): boolean =>
+    cancelled || cancelSource.token.isCancellationRequested || token?.isCancellationRequested === true;
+
+  const requestCancel = (): void => {
+    if (cancelled) {
+      return;
+    }
+    cancelled = true;
+    progressHandle?.report({ message: '正在取消…' });
+
+    const target = connection;
+    if (!target) {
+      // 连接还没建好，等它建好后立刻销毁。
+      connectionInvalid = true;
+      return;
+    }
+    if (!target.threadId) {
+      connectionInvalid = true;
+      target.destroy();
+      return;
+    }
+
+    void killRunningQuery(manager, profile, target).then((killed) => {
+      if (!killed) {
+        connectionInvalid = true;
+        target.destroy();
+        return;
+      }
+      killFallbackTimer = setTimeout(() => {
+        if (!settled) {
+          connectionInvalid = true;
+          target.destroy();
+        }
+      }, CANCEL_FALLBACK_TIMEOUT_MS);
+    });
+  };
+
+  const subscriptions = [cancelSource.token.onCancellationRequested(requestCancel)];
   try {
     await vscode.window.withProgress(
       {
@@ -601,21 +668,13 @@ async function runQuery(
         cancellable: true,
       },
       async (progress, token) => {
-        const startedAt = Date.now();
-        let connection: mysql.Connection | undefined =
-          connectionSession.liveConnections.get(documentKey)?.connection;
-        let connectionInvalid = false;
-        let cancelled = false;
-        const cancellation = token.onCancellationRequested(() => {
-          cancelled = true;
-          connectionInvalid = true;
-          connection?.destroy();
-        });
+        progressHandle = progress;
+        subscriptions.push(token.onCancellationRequested(requestCancel));
         try {
           if (!connection) {
             progress.report({ message: '正在建立连接…' });
             connection = await manager.open(profile);
-            if (token.isCancellationRequested) {
+            if (isCancelled(token)) {
               connectionInvalid = true;
               connection.destroy();
               return;
@@ -627,14 +686,14 @@ async function runQuery(
           } else {
             progress.report({ message: '复用当前文件连接…' });
           }
-          if (token.isCancellationRequested) {
+          if (isCancelled(token)) {
             connectionInvalid = true;
             connection.destroy();
             return;
           }
           progress.report({ message: '正在执行…' });
           const [rawResult, rawFields] = await connection.query(sql);
-          if (token.isCancellationRequested) {
+          if (isCancelled(token)) {
             connectionInvalid = true;
             return;
           }
@@ -649,27 +708,63 @@ async function runQuery(
             maxRows,
           });
         } catch (error) {
-          if (cancelled || token.isCancellationRequested) {
-            connectionInvalid = true;
+          if (isCancelled(token)) {
             vscode.window.showInformationMessage(`已取消 ${profile.name} 上的查询。`);
           } else {
             connectionInvalid = isConnectionFailure(error);
             showError(`执行失败（${profile.name}）`, error);
           }
-        } finally {
-          cancellation.dispose();
-          if (connectionInvalid && connection) {
-            const activeConnection = connectionSession.liveConnections.get(documentKey);
-            if (activeConnection?.connection === connection) {
-              connectionSession.liveConnections.delete(documentKey);
-            }
-            await connection.end().catch(() => undefined);
-          }
         }
       },
     );
   } finally {
+    settled = true;
+    if (killFallbackTimer !== undefined) {
+      clearTimeout(killFallbackTimer);
+    }
+    for (const subscription of subscriptions) {
+      subscription.dispose();
+    }
+    cancelSource.dispose();
+    connectionSession.cancellationSources.delete(documentKey);
     connectionSession.runningDocuments.delete(documentKey);
+    if (connectionInvalid && connection) {
+      const activeConnection = connectionSession.liveConnections.get(documentKey);
+      if (activeConnection?.connection === connection) {
+        connectionSession.liveConnections.delete(documentKey);
+      }
+      await connection.end().catch(() => undefined);
+    }
+  }
+}
+
+// Cancels the statement on a separate control connection so the session the
+// user is working in (USE / temp tables / session variables) survives.
+// Returns false when the caller must fall back to destroying the connection.
+async function killRunningQuery(
+  manager: ConnectionManager,
+  profile: ConnectionProfile,
+  target: mysql.Connection,
+): Promise<boolean> {
+  const threadId = target.threadId;
+  if (!threadId) {
+    return false;
+  }
+
+  const password = await manager.readPassword(profile.id);
+  if (password === undefined) {
+    return false;
+  }
+
+  let control: mysql.Connection | undefined;
+  try {
+    control = await manager.openControlConnection(profile, password);
+    await control.query(`KILL QUERY ${threadId}`);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await control?.end().catch(() => undefined);
   }
 }
 
@@ -756,6 +851,9 @@ export async function deactivate(): Promise<void> {
   const session = activeConnectionSession;
   activeConnectionSession = undefined;
   if (session) {
+    for (const source of session.cancellationSources.values()) {
+      source.cancel();
+    }
     await closeAllDocumentConnections(session);
   }
 }
