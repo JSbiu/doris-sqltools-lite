@@ -142,7 +142,7 @@ export function draftToProfile(draft: ConnectionDraft, id: string): ConnectionPr
 }
 
 export function parseConnectionUrl(input: string): ParsedConnectionUrl | undefined {
-  const raw = input.trim();
+  const raw = stripInvisible(input).trim();
   if (!raw) {
     return undefined;
   }
@@ -154,33 +154,47 @@ export function parseConnectionUrl(input: string): ParsedConnectionUrl | undefin
 
   let url: URL;
   try {
-    url = new URL(normalized);
+    url = new URL(encodeUrlCredentials(normalized));
   } catch {
     return undefined;
   }
 
-  const host = url.hostname;
+  const host = halfWidth(url.hostname);
   if (!host) {
     return undefined;
   }
 
   const parsed: ParsedConnectionUrl = { host };
   if (url.port) {
-    parsed.port = url.port;
+    parsed.port = halfWidth(url.port);
   }
   if (url.username) {
-    parsed.username = safeDecode(url.username);
+    parsed.username = halfWidth(safeDecode(url.username));
   }
   if (url.password) {
     parsed.password = safeDecode(url.password);
   }
-  const database = safeDecode(url.pathname.replace(/^\/+/, '').split('/')[0] ?? '');
+  const database = halfWidth(safeDecode(url.pathname.replace(/^\/+/, '').split('/')[0] ?? ''));
   if (database) {
     parsed.database = database;
   } else {
     const queryDatabase = url.searchParams.get('database');
     if (queryDatabase) {
       parsed.database = queryDatabase;
+    }
+  }
+  // JDBC tooling emits `?user=...&password=...` instead of userinfo, so accept
+  // that form too. Real userinfo wins when both are present.
+  if (!parsed.username) {
+    const queryUser = url.searchParams.get('user') ?? url.searchParams.get('username');
+    if (queryUser) {
+      parsed.username = halfWidth(queryUser);
+    }
+  }
+  if (!parsed.password) {
+    const queryPassword = url.searchParams.get('password') ?? url.searchParams.get('pwd');
+    if (queryPassword) {
+      parsed.password = queryPassword;
     }
   }
   if (url.searchParams.get('useSSL') === 'true' || url.searchParams.get('ssl') === 'true') {
@@ -195,6 +209,61 @@ function safeDecode(value: string): string {
   } catch {
     return value;
   }
+}
+
+// Characters that survive a copy from a web page or a chat client but are
+// invisible, so nothing in the form can explain why the paste did not match.
+const INVISIBLE = /[\u180E\u200B-\u200D\u2060\uFEFF]/g;
+
+// Word and Chinese IMEs happily substitute these for the ASCII hyphen that
+// every option starts with.
+const DASH_LIKE = /^[\u2010-\u2015\u2212\uFF0D]/;
+
+// Smart quotes are what you get when a command is copied out of a document.
+const SMART_QUOTES: Record<string, '"' | "'" | undefined> = {
+  '\u201C': '"',
+  '\u201D': '"',
+  '\u201E': '"',
+  '\u2018': "'",
+  '\u2019': "'",
+  '\u201A': "'",
+};
+
+function stripInvisible(raw: string): string {
+  return raw.replace(INVISIBLE, '');
+}
+
+// Full-width ASCII (U+FF01–U+FF5E) back to its half-width form. Applied to
+// every field except the password, where the user's characters are sacred.
+function halfWidth(value: string): string {
+  return value.replace(/[\uFF01-\uFF5E]/g, (char) =>
+    String.fromCharCode(char.charCodeAt(0) - 0xfee0),
+  );
+}
+
+// `new URL` reads `#` and `?` as the start of the fragment or query, so a
+// password like `pa#ss` silently truncates the whole string and the parse
+// fails. A legal userinfo never carries `/`, `#` or `?`, so any of those
+// before the last `@` can only be part of the credentials — encode them.
+function encodeUrlCredentials(value: string): string {
+  const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.exec(value);
+  if (!scheme) {
+    return value;
+  }
+  const rest = value.slice(scheme[0].length);
+  const at = rest.lastIndexOf('@');
+  if (at <= 0) {
+    return value;
+  }
+  const userinfo = rest.slice(0, at);
+  if (!/[/#?]/.test(userinfo)) {
+    return value;
+  }
+  const encoded = userinfo.replace(
+    /[/#?]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return scheme[0] + encoded + rest.slice(at);
 }
 
 // ------------------------------------------------------ mysql CLI commands
@@ -253,7 +322,7 @@ export function parseConnectionInput(raw: string): ParsedConnectionUrl | undefin
 }
 
 function mysqlCommand(raw: string): { tokens: string[]; start: number } | undefined {
-  const tokens = tokenizeCommand(raw);
+  const tokens = tokenizeCommand(stripInvisible(raw));
   if (tokens.length === 0) {
     return undefined;
   }
@@ -275,14 +344,24 @@ function readMysqlOptions(command: { tokens: string[]; start: number }): ParsedC
   let recognized = false;
 
   const take = (field: TextField, value: string): void => {
-    if (value.length > 0) {
-      parsed[field] = value;
+    let text = field === 'password' ? value : halfWidth(value);
+    if (field === 'host') {
+      const split = splitHostPort(text);
+      if (split) {
+        text = split.host;
+        if (parsed.port === undefined) {
+          parsed.port = halfWidth(split.port);
+        }
+      }
+    }
+    if (text.length > 0) {
+      parsed[field] = text;
       recognized = true;
     }
   };
 
   for (let index = start; index < tokens.length; index += 1) {
-    const token = tokens[index];
+    const token = normalizeOptionToken(tokens[index]);
 
     const long = /^--([A-Za-z][A-Za-z-]*)(?:=(.*))?$/.exec(token);
     if (long) {
@@ -328,14 +407,37 @@ function readMysqlOptions(command: { tokens: string[]; start: number }): ParsedC
 // means the password was omitted, matching mysql's own behaviour).
 function optionValue(tokens: string[], index: number): string | undefined {
   const value = tokens[index];
-  if (value === undefined || value.startsWith('-')) {
+  if (value === undefined || normalizeOptionToken(value).startsWith('-')) {
     return undefined;
   }
   return value;
 }
 
+// Rewrites only the marker at the head of an option word: a Unicode dash
+// becomes `-`, a full-width option letter becomes its ASCII form. Values are
+// never touched, so a password keeps exactly what the user typed.
+function normalizeOptionToken(token: string): string {
+  const dashed = DASH_LIKE.test(token) ? `-${token.slice(1)}` : token;
+  if (!dashed.startsWith('-') || dashed.length < 2) {
+    return dashed;
+  }
+  return halfWidth(dashed.slice(0, 2)) + dashed.slice(2);
+}
+
+// `-h 10.0.0.5:3306` is a common shorthand. A bracketed IPv6 host keeps its
+// brackets; a bare IPv6 literal has no unambiguous split and is left alone.
+function splitHostPort(value: string): { host: string; port: string } | undefined {
+  const bracketed = /^\[([^\]]+)\]:(\d{1,5})$/.exec(value);
+  if (bracketed) {
+    return { host: bracketed[1], port: bracketed[2] };
+  }
+  const plain = /^([^:\s]+):(\d{1,5})$/.exec(value);
+  return plain ? { host: plain[1], port: plain[2] } : undefined;
+}
+
 // Splits a shell-ish command line, honouring quotes so a password with spaces
-// survives (`-p"my pass"`).
+// survives (`-p"my pass"`). Smart quotes count as quotes too — documents and
+// chat clients swap `"` for `“`/`”` without telling anyone.
 function tokenizeCommand(raw: string): string[] {
   const tokens: string[] = [];
   let current = '';
@@ -344,9 +446,10 @@ function tokenizeCommand(raw: string): string[] {
 
   for (let index = 0; index < raw.length; index += 1) {
     const char = raw[index];
+    const quoteMark = char === '"' || char === "'" ? char : SMART_QUOTES[char];
 
     if (quote !== undefined) {
-      if (char === quote) {
+      if (quoteMark === quote) {
         quote = undefined;
         continue;
       }
@@ -359,8 +462,8 @@ function tokenizeCommand(raw: string): string[] {
       continue;
     }
 
-    if (char === '"' || char === "'") {
-      quote = char;
+    if (quoteMark !== undefined) {
+      quote = quoteMark;
       started = true;
     } else if (/\s/.test(char)) {
       if (started) {

@@ -252,3 +252,105 @@ test('parseConnectionInput dispatches between urls and mysql commands', () => {
   assert.deepEqual(parseConnectionInput('127.0.0.1:9030'), { host: '127.0.0.1', port: '9030' });
   assert.equal(parseConnectionInput(''), undefined);
 });
+
+test('strips invisible characters that survive a web copy', () => {
+  // Zero-width space, joiner and a stray BOM all render as nothing, so the
+  // form could never explain why the paste did not match.
+  assert.deepEqual(parseConnectionInput('mysql -h 10.0.0.5 -u\u200Broot -psecret -D dw'), {
+    host: '10.0.0.5',
+    username: 'root',
+    password: 'secret',
+    database: 'dw',
+  });
+  assert.equal(parseMysqlCommand('my\u200Bsql -h host -u root').host, 'host');
+  assert.equal(parseConnectionInput('mysql -h host\u200D -u root').host, 'host');
+  assert.equal(parseConnectionInput('\uFEFFmysql -h host -u root').host, 'host');
+});
+
+test('accepts smart quotes, unicode dashes and full-width option letters', () => {
+  assert.deepEqual(parseMysqlCommand('mysql -h 10.0.0.5 -uroot -p\u201Cmy pass\u201D -D dw'), {
+    host: '10.0.0.5',
+    username: 'root',
+    password: 'my pass',
+    database: 'dw',
+  });
+
+  // en dash and full-width hyphen-minus, as substituted by Word and IMEs
+  assert.deepEqual(parseMysqlCommand('mysql \u2013h 10.0.0.5 \u2013P 3306 \u2013uroot'), {
+    host: '10.0.0.5',
+    port: '3306',
+    username: 'root',
+  });
+  assert.deepEqual(parseMysqlCommand('mysql \uFF0Dh host \uFF0DP 3306'), {
+    host: 'host',
+    port: '3306',
+  });
+
+  // A full-width option letter: `-ｕroot`.
+  assert.equal(parseMysqlCommand('mysql -h host -\uFF55root').username, 'root');
+});
+
+test('converts full-width values but never the password', () => {
+  const parsed = parseMysqlCommand(
+    'mysql -h 10.0.0.5 -P \uFF13\uFF13\uFF10\uFF16 -u\uFF52oot -p\uFF21\uFF22\uFF23',
+  );
+  assert.equal(parsed.port, '3306');
+  assert.equal(parsed.username, 'root');
+  // The password is deliberately left untouched: what the user typed is what
+  // gets sent, even when it looks like a full-width character.
+  assert.equal(parsed.password, '\uFF21\uFF22\uFF23');
+});
+
+test('splits a port smuggled into the host field', () => {
+  assert.deepEqual(parseMysqlCommand('mysql -h 10.0.0.5:3306 -uroot -psecret'), {
+    host: '10.0.0.5',
+    port: '3306',
+    username: 'root',
+    password: 'secret',
+  });
+
+  // IPv6 keeps its brackets, so the split stays unambiguous.
+  const v6 = parseMysqlCommand('mysql -h [::1]:9030 -uroot');
+  assert.equal(v6.host, '::1');
+  assert.equal(v6.port, '9030');
+
+  // A bare IPv6 literal has no unambiguous split and is left whole.
+  const bare = parseMysqlCommand('mysql -h ::1 -uroot');
+  assert.equal(bare.host, '::1');
+  assert.equal('port' in bare, false);
+
+  // An explicit -P wins over the one embedded in the host.
+  assert.equal(parseMysqlCommand('mysql -h 10.0.0.5:3306 -P 9030 -uroot').port, '9030');
+});
+
+test('keeps url credentials that contain url syntax', () => {
+  const host = '10.0.0.5:3306/dw';
+  assert.equal(parseConnectionUrl(`mysql://root:pa#ss@${host}`).password, 'pa#ss');
+  assert.equal(parseConnectionUrl(`mysql://root:pa/ss@${host}`).password, 'pa/ss');
+  assert.equal(parseConnectionUrl(`mysql://root:pa?ss@${host}`).password, 'pa?ss');
+
+  // Without userinfo the fragment and query keep their normal meaning.
+  assert.deepEqual(parseConnectionUrl('jdbc:mysql://10.0.0.5:3306/app?useSSL=true'), {
+    host: '10.0.0.5',
+    port: '3306',
+    database: 'app',
+    ssl: true,
+  });
+});
+
+test('reads jdbc user and password query parameters', () => {
+  assert.deepEqual(
+    parseConnectionUrl('jdbc:mysql://10.0.0.5:3306/app?user=root&password=p%40ss&useSSL=true'),
+    {
+      host: '10.0.0.5',
+      port: '3306',
+      username: 'root',
+      password: 'p@ss',
+      database: 'app',
+      ssl: true,
+    },
+  );
+
+  // Real userinfo still wins when both forms are present.
+  assert.equal(parseConnectionUrl('mysql://alice:pw@10.0.0.5:3306/app?user=bob').username, 'alice');
+});
