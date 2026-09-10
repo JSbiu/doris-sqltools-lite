@@ -1,0 +1,17 @@
+# 行尾策略显式声明在仓库里，不再依赖各台机器的 core.autocrlf。
+# 索引中现存文本文件本来就全是 LF，这里只是把既成事实固定下来：
+# 换机器、换协作者、重装 git 都不会再出现工作区 CRLF / LF 混用。
+* text=auto eol=lf
+
+# Windows 批处理必须保留 CRLF，否则可能直接跑不起来。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制类型不做任何换行转换。
+*.vsix binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.xlsx binary
+*.zip binary
