@@ -23,4 +23,4 @@
 
 ## 工程约定
 - 新增 `src/` 模块若含纯逻辑，务必**不 import vscode**，否则 `node --test` 无法直接 require（tests/ 引的是 `out/*.js`）。
-- 改动后除编译/测试/lint 外，对 Webview 内联脚本做一次语法与 id 引用冒烟检查（提取 `<script>` 内容用 `vm.Script` 校验）。
+- 改动后除编译/测试/lint 外，跑 `node scripts/check-webview.js`（已挂在 `npm test` 链里）：校验 Webview 内联 `<script>` 能解析、nonce 与 CSP 声明一致、脚本引用的 id 与 `[attr="value"]` 选择器在 HTML 里确有声明。
