@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { createWriteStream } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
@@ -7,6 +9,7 @@ import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
 import { openConnectionForm } from './connectionForm';
 import { displayValue, isExportFormat, toTsv, toTsvBlocks, type ExportFormat } from './exports';
+import { buildExportFileName, normalizeExportDirectory } from './exportPath';
 import {
   createQueryResultView,
   findSqlStatementAtOffset,
@@ -29,6 +32,14 @@ const CANCEL_FALLBACK_TIMEOUT_MS = 5_000;
 
 // Export writes the whole result set, so ask before producing a huge file.
 const EXPORT_CONFIRM_ROW_THRESHOLD = 100_000;
+
+// A missing or blank setting means "ask every time", so clearing the setting
+// degrades gracefully instead of writing to an unexpected location.
+function configuredExportDirectory(): string | undefined {
+  return normalizeExportDirectory(
+    vscode.workspace.getConfiguration('dorisSqlLite').get<unknown>('exportDirectory'),
+  );
+}
 
 type LiveDocumentConnection = {
   profileId: string;
@@ -176,7 +187,7 @@ class ResultPanel {
         ResultPanel.current = undefined;
       }
     });
-    panel.webview.onDidReceiveMessage(async (message: { type?: unknown; format?: unknown }) => {
+    panel.webview.onDidReceiveMessage(async (message: { type?: unknown; format?: unknown; chooseLocation?: unknown }) => {
       if (message.type === 'copy') {
         try {
           await resultPanel.copyToClipboard();
@@ -189,7 +200,9 @@ class ResultPanel {
       }
       if (message.type === 'export' && isExportFormat(message.format)) {
         try {
-          const exported = await resultPanel.export(message.format);
+          const exported = await resultPanel.export(message.format, {
+            chooseLocation: message.chooseLocation === true,
+          });
           await panel.webview.postMessage({ type: exported ? 'actionComplete' : 'actionCancelled', action: 'export' });
         } catch (error) {
           showError('导出失败', error);
@@ -242,6 +255,8 @@ class ResultPanel {
       .map((cells, index) => `<tr data-row><td class="row-number">${index + 1}</td>${cells.map((cell) => `<td>${cell}</td>`).join('')}</tr>`)
       .join('');
     const hasTable = this.columns.length > 0;
+    const exportDirectory = configuredExportDirectory();
+    const exportHint = exportDirectory ? `导出到默认目录：${exportDirectory}` : '选择导出位置';
     const databaseLabel = this.metadata.database
       ? `<span class="meta">${escapeHtml(this.metadata.database)}</span>`
       : '';
@@ -272,6 +287,8 @@ class ResultPanel {
     button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
     button:hover { background: var(--vscode-button-hoverBackground); }
     button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    button.ghost { color: var(--vscode-textLink-foreground); background: transparent; border-color: var(--vscode-panel-border); }
+    button.ghost:hover { background: var(--vscode-list-hoverBackground); }
     button:disabled { cursor: default; opacity: .65; }
     .notice { margin-bottom: 10px; padding: 8px 10px; color: var(--vscode-editorWarning-foreground); background: var(--vscode-inputValidation-warningBackground); border-left: 3px solid var(--vscode-editorWarning-foreground); }
     .table-wrap { overflow: auto; max-height: calc(100vh - 92px); border: 1px solid var(--vscode-panel-border); }
@@ -301,7 +318,8 @@ class ResultPanel {
     </span>
     ${hasTable ? `
       <input id="result-filter" class="filter" type="search" placeholder="筛选当前结果…" aria-label="筛选当前结果" title="仅筛选显示，不改变复制和导出内容" />
-      <button class="secondary" data-format="tsv" data-default-label="导出 TSV">导出 TSV</button>
+      <button class="secondary" data-export="default" data-format="tsv" data-default-label="导出 TSV" title="${escapeHtml(exportHint)}">导出 TSV</button>
+      <button class="ghost" data-export="custom" data-format="tsv" data-default-label="其他位置…" title="这次导出时弹出位置选择">其他位置…</button>
       <button data-action="copy" data-default-label="复制 TSV">复制 TSV</button>
     ` : ''}
   </div>
@@ -310,19 +328,28 @@ class ResultPanel {
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
     const copyButton = document.querySelector('button[data-action="copy"]');
-    const exportButton = document.querySelector('button[data-format="tsv"]');
+    const exportButton = document.querySelector('button[data-export="default"]');
+    const exportElsewhereButton = document.querySelector('button[data-export="custom"]');
+    let pendingButton;
     const setPending = (button, label) => {
       if (!button) return;
       button.disabled = true;
       button.textContent = label;
     };
     copyButton?.addEventListener('click', () => {
+      pendingButton = copyButton;
       setPending(copyButton, '正在复制…');
       api.postMessage({ type: 'copy' });
     });
     exportButton?.addEventListener('click', () => {
+      pendingButton = exportButton;
       setPending(exportButton, '正在导出…');
       api.postMessage({ type: 'export', format: exportButton.dataset.format });
+    });
+    exportElsewhereButton?.addEventListener('click', () => {
+      pendingButton = exportElsewhereButton;
+      setPending(exportElsewhereButton, '正在导出…');
+      api.postMessage({ type: 'export', format: exportElsewhereButton.dataset.format, chooseLocation: true });
     });
     const filter = document.getElementById('result-filter');
     const rows = [...document.querySelectorAll('tbody tr[data-row]')];
@@ -337,7 +364,8 @@ class ResultPanel {
       document.getElementById('visible-count').textContent = String(visible);
     });
     window.addEventListener('message', ({ data }) => {
-      const button = data.action === 'copy' ? copyButton : exportButton;
+      const button = pendingButton ?? (data.action === 'copy' ? copyButton : exportButton);
+      pendingButton = undefined;
       if (!button) return;
       const completed = data.type === 'actionComplete';
       button.textContent = completed ? (data.action === 'copy' ? '已复制' : '已导出') : button.dataset.defaultLabel;
@@ -351,7 +379,7 @@ class ResultPanel {
 </html>`;
   }
 
-  private async export(format: ExportFormat): Promise<boolean> {
+  private async export(format: ExportFormat, options: { chooseLocation?: boolean } = {}): Promise<boolean> {
     const extension = format;
     const title = this.title;
     const rows = this.exportRows;
@@ -367,9 +395,22 @@ class ResultPanel {
       }
     }
 
-    const safeTitle = title.replace(/[^a-z0-9_-]+/gi, '_') || 'query';
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const defaultName = `query_${safeTitle}_${timestamp}.${extension}`;
+    const defaultName = buildExportFileName(title, extension, new Date());
+    const directory = options.chooseLocation ? undefined : configuredExportDirectory();
+    if (directory) {
+      const target = join(directory, defaultName);
+      try {
+        await mkdir(directory, { recursive: true });
+        await writeTsvFile(vscode.Uri.file(target), rows, columns);
+        vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${target}`);
+        return true;
+      } catch (error) {
+        // A stale or unwritable default directory must never block the export.
+        const reason = error instanceof Error ? error.message : String(error);
+        void vscode.window.showWarningMessage(`写入默认导出目录失败（${reason}），请选择其他位置。`);
+      }
+    }
+
     const defaultUri = vscode.workspace.workspaceFolders?.[0]
       ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, defaultName)
       : undefined;
@@ -612,6 +653,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       await manager.deletePassword(profile.id);
       vscode.window.showInformationMessage(`已清除连接“${profile.name}”的已保存密码。`);
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.setExportDirectory', async () => {
+      const current = configuredExportDirectory();
+      const picked = await vscode.window.showOpenDialog({
+        title: '选择默认导出目录',
+        openLabel: '设为默认导出目录',
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        defaultUri: current ? vscode.Uri.file(current) : undefined,
+      });
+      const directory = picked?.[0];
+      if (!directory) {
+        return;
+      }
+      await vscode.workspace
+        .getConfiguration('dorisSqlLite')
+        .update('exportDirectory', directory.fsPath, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(`已设置默认导出目录：${directory.fsPath}`);
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.clearExportDirectory', async () => {
+      const current = configuredExportDirectory();
+      if (!current) {
+        vscode.window.showInformationMessage('当前没有设置默认导出目录，每次导出都会弹出位置选择。');
+        return;
+      }
+      await vscode.workspace
+        .getConfiguration('dorisSqlLite')
+        .update('exportDirectory', '', vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(`已清除默认导出目录（原：${current}），导出时将重新弹出位置选择。`);
     }),
   );
 }

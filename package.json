@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -70,6 +70,16 @@
         "command": "dorisSqlLite.forgetPassword",
         "title": "Doris SQL Lite: Forget Saved Password",
         "icon": "$(key)"
+      },
+      {
+        "command": "dorisSqlLite.setExportDirectory",
+        "title": "Doris SQL Lite: Set Default Export Directory",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "dorisSqlLite.clearExportDirectory",
+        "title": "Doris SQL Lite: Clear Default Export Directory",
+        "icon": "$(close)"
       }
     ],
     "keybindings": [
@@ -207,6 +217,12 @@
           "minimum": 1,
           "maximum": 100000,
           "description": "Maximum number of rows rendered in the result panel and used by the clipboard copy. Exporting always writes the full result set."
+        },
+        "dorisSqlLite.exportDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Directory that TSV exports are written to without prompting. Leave empty to be asked for a location on every export."
         }
       }
     }
@@ -214,7 +230,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "lint": "eslint src",
-    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js",
+    "test": "tsc -p ./ && node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js tests/export-path.test.js",
     "watch": "tsc -p ./ -w",
     "package": "node scripts/package-runtime.js"
   },
