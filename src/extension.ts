@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
+import { createWriteStream } from 'node:fs';
+import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
 import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
 import { openConnectionForm } from './connectionForm';
-import { displayValue, isExportFormat, toTsv, type ExportFormat } from './exports';
+import { displayValue, isExportFormat, toTsv, toTsvBlocks, type ExportFormat } from './exports';
 import {
   createQueryResultView,
   findSqlStatementAtOffset,
@@ -24,6 +26,9 @@ type ConnectionSessionState = {
 // If the server never acknowledges a KILL QUERY (Doris KILL semantics vary by
 // version), fall back to tearing the socket down after this long.
 const CANCEL_FALLBACK_TIMEOUT_MS = 5_000;
+
+// Export writes the whole result set, so ask before producing a huge file.
+const EXPORT_CONFIRM_ROW_THRESHOLD = 100_000;
 
 type LiveDocumentConnection = {
   profileId: string;
@@ -133,7 +138,14 @@ class ConnectionProvider implements vscode.TreeDataProvider<ConnectionItem> {
 
 class ResultPanel {
   private static current: ResultPanel | undefined;
-  private result: QueryResultView = { rows: [], columns: [], affectedRows: 0, truncated: false };
+  private result: QueryResultView = {
+    rows: [],
+    allRows: [],
+    columns: [],
+    affectedRows: 0,
+    truncated: false,
+    totalRows: 0,
+  };
   private metadata: ResultPanelMetadata = {
     connectionName: '',
     durationMs: 0,
@@ -198,6 +210,12 @@ class ResultPanel {
     return this.result.rows;
   }
 
+  // Export covers the full result set; the panel and the clipboard copy only
+  // ever deal with the capped view.
+  private get exportRows(): Row[] {
+    return this.result.allRows;
+  }
+
   private get columns(): string[] {
     return this.result.columns;
   }
@@ -228,7 +246,7 @@ class ResultPanel {
       ? `<span class="meta">${escapeHtml(this.metadata.database)}</span>`
       : '';
     const truncatedNotice = this.result.truncated
-      ? `<div class="notice">仅显示前 ${this.metadata.maxRows} 行；导出和复制也基于当前显示结果。</div>`
+      ? `<div class="notice">共 ${this.result.totalRows} 行，显示前 ${this.metadata.maxRows} 行。导出为全部 ${this.result.totalRows} 行；复制为当前显示的 ${this.rows.length} 行。</div>`
       : '';
     const resultContent = hasTable
       ? `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，未返回数据</td></tr>`}</tbody></table></div>`
@@ -336,9 +354,19 @@ class ResultPanel {
   private async export(format: ExportFormat): Promise<boolean> {
     const extension = format;
     const title = this.title;
-    const rows = this.rows;
+    const rows = this.exportRows;
     const columns = this.columns;
-    const content = toTsv(rows, columns);
+    if (rows.length > EXPORT_CONFIRM_ROW_THRESHOLD) {
+      const answer = await vscode.window.showWarningMessage(
+        `将导出 ${rows.length} 行，文件可能很大。确认继续？`,
+        { modal: true },
+        '继续导出',
+      );
+      if (answer !== '继续导出') {
+        return false;
+      }
+    }
+
     const safeTitle = title.replace(/[^a-z0-9_-]+/gi, '_') || 'query';
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const defaultName = `query_${safeTitle}_${timestamp}.${extension}`;
@@ -355,13 +383,42 @@ class ResultPanel {
       return false;
     }
 
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+    await writeTsvFile(uri, rows, columns);
     vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${uri.fsPath}`);
     return true;
   }
 
   public async copyToClipboard(): Promise<void> {
-    await vscode.env.clipboard.writeText(toTsv(this.rows, this.columns));
+    const rows = this.rows;
+    await vscode.env.clipboard.writeText(toTsv(rows, this.columns));
+    if (this.result.truncated) {
+      vscode.window.showInformationMessage(
+        `已复制当前显示的 ${rows.length} 行（共 ${this.result.totalRows} 行）；需要全部数据请用导出。`,
+      );
+    }
+  }
+}
+
+// Writes TSV in bounded blocks so a large export never has to materialise one
+// huge string. Non-file targets fall back to a single buffered write.
+async function writeTsvFile(uri: vscode.Uri, rows: Row[], columns: string[]): Promise<void> {
+  if (uri.scheme !== 'file') {
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(toTsv(rows, columns), 'utf8'));
+    return;
+  }
+
+  const stream = createWriteStream(uri.fsPath, { encoding: 'utf8' });
+  try {
+    for (const block of toTsvBlocks(rows, columns)) {
+      if (!stream.write(block)) {
+        await once(stream, 'drain');
+      }
+    }
+    stream.end();
+    await once(stream, 'finish');
+  } catch (error) {
+    stream.destroy();
+    throw error;
   }
 }
 

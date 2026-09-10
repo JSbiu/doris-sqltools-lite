@@ -133,7 +133,35 @@ test('accepts a final statement without a trailing semicolon', () => {
   assert.equal(findSqlStatementAtOffset('SELECT 1', 0), 'SELECT 1');
 });
 
+test('keeps the full result set for export while capping the rendered rows', () => {
+  const result = createQueryResultView(
+    [{ id: 1 }, { id: 2 }, { id: 3 }],
+    [{ name: 'id' }],
+    2,
+  );
+
+  assert.deepEqual(result.rows, [{ id: 1 }, { id: 2 }]);
+  assert.deepEqual(result.allRows, [{ id: 1 }, { id: 2 }, { id: 3 }]);
+  assert.equal(result.totalRows, 3);
+  assert.equal(result.truncated, true);
+});
+
+test('totalRows matches the shown rows when nothing was truncated', () => {
+  const result = createQueryResultView([{ id: 1 }], [{ name: 'id' }], 1000);
+
+  assert.equal(result.totalRows, 1);
+  assert.deepEqual(result.allRows, result.rows);
+  assert.equal(result.truncated, false);
+});
+
 test('falls back to 1000 rows for an invalid maxRows', () => {
   assert.equal(createQueryResultView([{ id: 1 }], [{ name: 'id' }], 0).truncated, false);
   assert.equal(createQueryResultView([{ id: 1 }], [{ name: 'id' }], Number.NaN).truncated, false);
+});
+
+test('affected-row statements expose an empty full row set', () => {
+  const result = createQueryResultView({ affectedRows: 2 }, undefined, 1000);
+
+  assert.deepEqual(result.allRows, []);
+  assert.equal(result.totalRows, 0);
 });

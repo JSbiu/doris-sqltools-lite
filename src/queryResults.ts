@@ -1,10 +1,14 @@
 export type Row = Record<string, unknown>;
 
 export interface QueryResultView {
+  // Rows shown in the panel, capped by maxResultRows. Copy uses these.
   rows: Row[];
+  // The full result set, used by export. mysql2 already buffered it in memory.
+  allRows: Row[];
   columns: string[];
   affectedRows: number;
   truncated: boolean;
+  totalRows: number;
 }
 
 interface SqlStatementRange {
@@ -22,9 +26,11 @@ export function createQueryResultView(
   const fields = normalizeFields(rawFields);
   return {
     rows: allRows.slice(0, safeMaxRows),
+    allRows,
     columns: fields.length > 0 ? fields : Object.keys(allRows[0] ?? {}),
     affectedRows: getAffectedRows(rawResult),
     truncated: allRows.length > safeMaxRows,
+    totalRows: allRows.length,
   };
 }
 

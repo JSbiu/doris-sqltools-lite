@@ -5,6 +5,7 @@ const {
   displayValue,
   isExportFormat,
   toTsv,
+  toTsvBlocks,
 } = require('../out/exports.js');
 
 test('accepts only supported export formats', () => {
@@ -31,4 +32,31 @@ test('formats TSV with headers', () => {
 test('serializes binary values without connection metadata', () => {
   assert.equal(displayValue(Buffer.from([0, 255])), '0x00ff');
   assert.equal(displayValue(null), '');
+});
+
+test('streams TSV as a header block plus bounded row blocks', () => {
+  const rows = [{ id: 1 }, { id: 2 }, { id: 3 }];
+  const blocks = [...toTsvBlocks(rows, ['id'], 2)];
+
+  assert.deepEqual(blocks, ['id\r\n', '1\r\n2\r\n', '3\r\n']);
+});
+
+test('empty result still emits the header block only', () => {
+  assert.deepEqual([...toTsvBlocks([], ['id'], 2)], ['id\r\n']);
+});
+
+test('reassembled blocks equal the clipboard payload plus a trailing separator', () => {
+  const rows = [{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }];
+  const columns = ['id', 'name'];
+
+  const streamed = [...toTsvBlocks(rows, columns, 1)].join('');
+
+  assert.equal(streamed, `${toTsv(rows, columns)}\r\n`);
+});
+
+test('block quoting matches the non-streaming encoder', () => {
+  const rows = [{ note: 'x\ty\nz', quote: 'a"b' }];
+  const columns = ['note', 'quote'];
+
+  assert.equal([...toTsvBlocks(rows, columns)].join(''), `${toTsv(rows, columns)}\r\n`);
 });
