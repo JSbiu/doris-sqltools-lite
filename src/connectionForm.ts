@@ -9,7 +9,7 @@ import {
   draftFromProfile,
   draftToProfile,
   emptyDraft,
-  parseConnectionUrl,
+  parseConnectionInput,
   validateDraft,
   type ConnectionDraft,
   type ConnectionFormMode,
@@ -68,8 +68,8 @@ export function openConnectionForm(options: ConnectionFormOptions): void {
       return;
     }
 
-    if (message.type === 'parseUrl') {
-      const parsed = parseConnectionUrl(text(message.url));
+    if (message.type === 'parseInput') {
+      const parsed = parseConnectionInput(text(message.input));
       await post({ type: 'parsed', parsed });
       return;
     }
@@ -143,7 +143,7 @@ type FormOutbound =
 
 type FormInbound =
   | { type: 'cancel' }
-  | { type: 'parseUrl'; url?: unknown }
+  | { type: 'parseInput'; input?: unknown }
   | { type: 'test'; draft?: unknown }
   | { type: 'save'; draft?: unknown };
 
@@ -272,12 +272,12 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
   <p class="sub">${escapeHtml(subtitle)}</p>
 
   <section class="card">
-    <label for="f-url">从连接串导入<span class="hint">可选</span></label>
+    <label for="f-input">从连接串或 mysql 命令导入<span class="hint">可选</span></label>
     <div class="inline">
-      <input id="f-url" type="text" spellcheck="false" autocomplete="off" placeholder="mysql://user:password@host:9030/db" />
+      <input id="f-input" type="text" spellcheck="false" autocomplete="off" placeholder="mysql -h 127.0.0.1 -P 9030 -uroot -p密码 -D db" />
       <button class="secondary" id="b-parse">解析并填充</button>
     </div>
-    <p class="hint">支持 mysql://、jdbc:mysql:// 或直接粘贴 host:port；密码只留在 SecretStorage。</p>
+    <p class="hint">支持 mysql://、jdbc:mysql://、host:port，或 mysql -h HOST -P 3306 -uUSER -pPASS -D DB 命令行；密码只留在 SecretStorage。</p>
   </section>
 
   <section class="card">
@@ -404,7 +404,7 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
     });
 
     id('b-parse').addEventListener('click', () => {
-      api.postMessage({ type: 'parseUrl', url: id('f-url').value });
+      api.postMessage({ type: 'parseInput', input: id('f-input').value });
     });
 
     id('b-cancel').addEventListener('click', () => api.postMessage({ type: 'cancel' }));
@@ -451,7 +451,7 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
       if (data.type === 'parsed') {
         const parsed = data.parsed;
         if (!parsed) {
-          setStatus('没能识别这个连接串，请检查格式。', 'bad');
+          setStatus('没能识别这个连接串或 mysql 命令，请检查格式。', 'bad');
           return;
         }
         if (parsed.host) id('f-host').value = parsed.host;
@@ -461,9 +461,9 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
         if (parsed.database) id('f-database').value = parsed.database;
         if (parsed.ssl) id('f-ssl').checked = true;
         if (!id('f-name').value.trim()) id('f-name').value = parsed.host;
-        id('f-url').value = '';
+        id('f-input').value = '';
         paint(localErrors());
-        setStatus('已从连接串填充字段。', 'ok');
+        setStatus('已用导入的内容填充字段。', 'ok');
         return;
       }
       if (data.type === 'testing') {

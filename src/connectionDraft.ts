@@ -196,3 +196,186 @@ function safeDecode(value: string): string {
     return value;
   }
 }
+
+// ------------------------------------------------------ mysql CLI commands
+
+// `mysql -h HOST -P 3306 -uUSER -pPASS -D DB` is the form people copy out of
+// runbooks and chat messages, so the import box accepts it next to URLs.
+
+type TextField = 'host' | 'port' | 'username' | 'password' | 'database';
+
+// `mysql`, `mysql.exe`, or a path to either. A leading wrapper command
+// (`docker exec -it db mysql ...`) is skipped by mysqlCommand below.
+const MYSQL_BINARY = /^(?:.*[\\/])?(?:mysql|mariadb)(?:\.exe)?$/i;
+
+const LONG_OPTIONS: Record<string, TextField> = {
+  host: 'host',
+  port: 'port',
+  user: 'username',
+  password: 'password',
+  database: 'database',
+  schema: 'database',
+};
+
+// Short flags are case sensitive: -P is the port, -p is the password.
+const SHORT_OPTIONS: Record<string, TextField> = {
+  h: 'host',
+  P: 'port',
+  u: 'username',
+  p: 'password',
+  D: 'database',
+};
+
+// A bare argument is mysql's default database, but commands also carry values of
+// options we ignore (sockets, -e statements). Only identifier-shaped tokens are
+// taken as a database name so those never leak into the form.
+const DATABASE_NAME = /^[A-Za-z0-9_$.-]+$/;
+
+export function isMysqlCommand(raw: string): boolean {
+  return mysqlCommand(raw) !== undefined;
+}
+
+export function parseMysqlCommand(raw: string): ParsedConnectionUrl | undefined {
+  const command = mysqlCommand(raw);
+  return command ? readMysqlOptions(command) : undefined;
+}
+
+// Accepts either a URL/JDBC string or a mysql CLI command.
+export function parseConnectionInput(raw: string): ParsedConnectionUrl | undefined {
+  const command = mysqlCommand(raw);
+  if (command) {
+    const parsed = readMysqlOptions(command);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return parseConnectionUrl(raw);
+}
+
+function mysqlCommand(raw: string): { tokens: string[]; start: number } | undefined {
+  const tokens = tokenizeCommand(raw);
+  if (tokens.length === 0) {
+    return undefined;
+  }
+
+  const binary = tokens.findIndex((token) => MYSQL_BINARY.test(token));
+  if (binary >= 0) {
+    return { tokens, start: binary + 1 };
+  }
+  // A bare option list (`-h host -u root -p...`) is accepted too.
+  if (tokens[0].startsWith('-')) {
+    return { tokens, start: 0 };
+  }
+  return undefined;
+}
+
+function readMysqlOptions(command: { tokens: string[]; start: number }): ParsedConnectionUrl | undefined {
+  const { tokens, start } = command;
+  const parsed: ParsedConnectionUrl = {};
+  let recognized = false;
+
+  const take = (field: TextField, value: string): void => {
+    if (value.length > 0) {
+      parsed[field] = value;
+      recognized = true;
+    }
+  };
+
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index];
+
+    const long = /^--([A-Za-z][A-Za-z-]*)(?:=(.*))?$/.exec(token);
+    if (long) {
+      const field = LONG_OPTIONS[long[1].toLowerCase()];
+      if (field && long[2] !== undefined) {
+        take(field, long[2]);
+      } else if (field) {
+        const value = optionValue(tokens, index + 1);
+        if (value !== undefined) {
+          take(field, value);
+          index += 1;
+        }
+      }
+      // Unknown long options are assumed to take no value, so `--batch db`
+      // still leaves `db` as the positional database below.
+      continue;
+    }
+
+    const short = /^-([A-Za-z])(.*)$/.exec(token);
+    if (short) {
+      const field = SHORT_OPTIONS[short[1]];
+      if (field && short[2].length > 0) {
+        take(field, short[2]);
+      } else if (field) {
+        const value = optionValue(tokens, index + 1);
+        if (value !== undefined) {
+          take(field, value);
+          index += 1;
+        }
+      }
+      continue;
+    }
+
+    if (parsed.database === undefined && DATABASE_NAME.test(token)) {
+      take('database', token);
+    }
+  }
+
+  return recognized ? parsed : undefined;
+}
+
+// An option value is the next token, unless it is itself a flag (`-p -h host`
+// means the password was omitted, matching mysql's own behaviour).
+function optionValue(tokens: string[], index: number): string | undefined {
+  const value = tokens[index];
+  if (value === undefined || value.startsWith('-')) {
+    return undefined;
+  }
+  return value;
+}
+
+// Splits a shell-ish command line, honouring quotes so a password with spaces
+// survives (`-p"my pass"`).
+function tokenizeCommand(raw: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let started = false;
+  let quote: '"' | "'" | undefined;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+
+    if (quote !== undefined) {
+      if (char === quote) {
+        quote = undefined;
+        continue;
+      }
+      if (char === '\\' && quote === '"' && index + 1 < raw.length) {
+        index += 1;
+        current += raw[index];
+        continue;
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+    } else if (/\s/.test(char)) {
+      if (started) {
+        tokens.push(current);
+        current = '';
+        started = false;
+      }
+    } else {
+      current += char;
+      started = true;
+    }
+  }
+
+  if (started) {
+    tokens.push(current);
+  }
+  return tokens;
+}

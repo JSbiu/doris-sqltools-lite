@@ -6,7 +6,10 @@ const {
   draftFromProfile,
   draftToProfile,
   emptyDraft,
+  isMysqlCommand,
+  parseConnectionInput,
   parseConnectionUrl,
+  parseMysqlCommand,
   validateDraft,
 } = require('../out/connectionDraft.js');
 
@@ -140,4 +143,112 @@ test('returns undefined for an unparseable connection string', () => {
   assert.equal(parseConnectionUrl(''), undefined);
   assert.equal(parseConnectionUrl('   '), undefined);
   assert.equal(parseConnectionUrl('mysql://'), undefined);
+});
+
+test('parses a mysql command line with separated values', () => {
+  assert.deepEqual(parseMysqlCommand('mysql -h xxx -P 3306 -uxxx -pxxx -D xxx'), {
+    host: 'xxx',
+    port: '3306',
+    username: 'xxx',
+    password: 'xxx',
+    database: 'xxx',
+  });
+});
+
+test('parses a mysql command line with attached values', () => {
+  assert.deepEqual(parseMysqlCommand('mysql -hdb.internal -P3306 -uroot -psecret -Dhue'), {
+    host: 'db.internal',
+    port: '3306',
+    username: 'root',
+    password: 'secret',
+    database: 'hue',
+  });
+});
+
+test('parses long options in both =value and spaced forms', () => {
+  assert.deepEqual(
+    parseMysqlCommand('mysql --host=10.0.0.5 --port=3306 --user=root --password=p@ss --database=app'),
+    { host: '10.0.0.5', port: '3306', username: 'root', password: 'p@ss', database: 'app' },
+  );
+  assert.deepEqual(
+    parseMysqlCommand('mysql --host 10.0.0.5 --password "spaced pass" --schema app'),
+    { host: '10.0.0.5', password: 'spaced pass', database: 'app' },
+  );
+});
+
+test('keeps a quoted password intact and honours an attached quote', () => {
+  assert.equal(parseMysqlCommand('mysql -u root -p"my pass" -D db').password, 'my pass');
+  assert.equal(parseMysqlCommand("mysql -u root --password='my pass'").password, 'my pass');
+});
+
+test('leaves the password out when -p carries no value', () => {
+  const prompted = parseMysqlCommand('mysql -h host -u root -p');
+  assert.equal(prompted.host, 'host');
+  assert.equal(prompted.username, 'root');
+  assert.equal('password' in prompted, false);
+
+  // `-p -h host` matches mysql: the password was omitted, -h is a flag again.
+  const reordered = parseMysqlCommand('mysql -p -h host -u root');
+  assert.equal(reordered.host, 'host');
+  assert.equal('password' in reordered, false);
+});
+
+test('takes a bare argument as the default database', () => {
+  assert.equal(parseMysqlCommand('mysql -h host -u root hue').database, 'hue');
+});
+
+test('ignores options it does not know without stealing their neighbours', () => {
+  const parsed = parseMysqlCommand('mysql --batch -h host -u root db1');
+  assert.equal(parsed.host, 'host');
+  assert.equal(parsed.username, 'root');
+  assert.equal(parsed.database, 'db1');
+
+  // A socket path must never be mistaken for a database name.
+  const socket = parseMysqlCommand('mysql -h host -S /tmp/mysql.sock -u root');
+  assert.equal(socket.host, 'host');
+  assert.equal(socket.username, 'root');
+  assert.equal('database' in socket, false);
+});
+
+test('accepts a bare option list and a wrapped command', () => {
+  assert.deepEqual(parseMysqlCommand('-h host -P 3306 -u root'), {
+    host: 'host',
+    port: '3306',
+    username: 'root',
+  });
+  assert.equal(parseMysqlCommand('docker exec -it db1 mysql -h host -u root -px').host, 'host');
+  assert.equal(parseMysqlCommand('mysql.exe -h host -u root').host, 'host');
+});
+
+test('returns undefined when a mysql command carries nothing usable', () => {
+  assert.equal(parseMysqlCommand('mysql'), undefined);
+  assert.equal(parseMysqlCommand('mysql -x'), undefined);
+  assert.equal(parseMysqlCommand(''), undefined);
+});
+
+test('recognises mysql commands without swallowing urls or host:port', () => {
+  assert.equal(isMysqlCommand('  mysql -h host -u root  '), true);
+  assert.equal(isMysqlCommand('-h host'), true);
+  assert.equal(isMysqlCommand('mysql://root:secret@db.internal:9030/hue'), false);
+  assert.equal(isMysqlCommand('127.0.0.1:9030'), false);
+  assert.equal(isMysqlCommand('jdbc:mysql://10.0.0.5:3306/app'), false);
+});
+
+test('parseConnectionInput dispatches between urls and mysql commands', () => {
+  assert.deepEqual(parseConnectionInput('mysql -h host -P 3306 -u root -psecret -D hue'), {
+    host: 'host',
+    port: '3306',
+    username: 'root',
+    password: 'secret',
+    database: 'hue',
+  });
+  assert.deepEqual(parseConnectionInput('mysql://root:secret@db.internal:9030/hue'), {
+    host: 'db.internal',
+    port: '9030',
+    username: 'root',
+    password: 'secret',
+    database: 'hue',
+  });
+  assert.deepEqual(parseConnectionInput('127.0.0.1:9030'), { host: '127.0.0.1', port: '9030' });
+  assert.equal(parseConnectionInput(''), undefined);
 });
