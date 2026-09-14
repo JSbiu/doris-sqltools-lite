@@ -1,8 +1,15 @@
 # 项目规则 — doris-sqltools-lite
 
+## 协作与文档分工
+
+- 开始工作时读取本文件及根目录 `.local/memory.md`（如存在），再按任务范围查阅 README 和相关文件。
+- 用户级 AGENTS.md 保存跨项目规则；本文件保存项目导航与技术约束；本机记忆不覆盖当前用户指令或适用的 AGENTS.md。
+- README 和项目文档保存已核验的共享知识；需求范围、进度、验收与待办放在对应需求或交付文档。本机记忆保留个人偏好、环境事实和必要入口。
+- 长任务按需使用 `.local/checkpoints/`，历史过程放 `.local/archive/`；先沉淀稳定知识，再收敛记忆。易变事实标明日期、范围与来源，旧验证不代表本轮验证。
+- Git 操作遵循当前用户级约定：提供本次精确文件的 add/commit 命令，由用户执行；不沿用历史记忆中的自动提交或推送授权。保留已有暂存、未暂存及未跟踪改动。
+
 ## 项目定位
 - 独立的 VS Code 扩展，支持 MySQL 与 Apache Doris。
-- 项目根：`D:/workspace/Projects/doris-sqltools-lite`
 
 ## 安全模型
 - 连接元数据可存于 VS Code settings。
@@ -20,10 +27,16 @@
   - 已发布的版本号原则上不回溯；但**版本号与本节规则不符时，把号改回来**（不必另开新号凑一个版本）。
   - 反例（勿重犯）：给已有"从连接串导入"入口增加一种可解析格式，被判成新功能升到 0.7.0（按本节应为 0.6.1）；给内部检查脚本升到 0.7.1（按本节应完全不动版本——那次已撤回，0.7.1 后来给了别的改动）。
   - 无 git tag 惯例，版本体现在 `package.json` + vsix 文件名。
-- 用户授权验证后自动逻辑 Git 提交并推送 `origin/main`；完成的请求改动不遗留未提交。
-- 除非用户显式要求，不修改 `D:/work/program/etl-welove-sparksql`。
+- Git 提交与推送按上方协作约定处理；历史自动提交授权不替代当前用户要求。
+- 修改范围限于本仓库；涉及其他仓库时按用户明确范围处理。
 - 未经显式确认，不连接真实生产数据库。
 
 ## 工程约定
 - 新增 `src/` 模块若含纯逻辑，务必**不 import vscode**，否则 `node --test` 无法直接 require（tests/ 引的是 `out/*.js`）。
-- 改动后除编译/测试/lint 外，跑 `node scripts/check-webview.js`（已挂在 `npm test` 链里）：校验 Webview 内联 `<script>` 能解析、nonce 与 CSP 声明一致、脚本引用的 id 与 `[attr="value"]` 选择器在 HTML 里确有声明。
+- Webview 相关改动除编译/测试/lint 外，跑 `node scripts/check-webview.js`（已挂在 `npm test` 链里）：校验 Webview 内联 `<script>` 能解析、nonce 与 CSP 声明一致、脚本引用的 id 与 `[attr="value"]` 选择器在 HTML 里确有声明。
+
+## 代码与文档入口
+
+- [README.md](README.md)：使用、构建与验证；`src/extension.ts`：扩展入口；`src/connectionDraft.ts`、`src/connectionManager.ts`：输入解析及连接；`src/queryResults.ts`、`src/exports.ts`：结果展示与导出。
+- 功能状态与已发布变更以 README 和版本文件为准；个人产品偏好与尚未验证的环境问题见 `.local/memory.md`。
+- 仅协作文档修改检查内容、链接、忽略规则和差异，不改变扩展版本，也不触发数据库连接或安装发布。

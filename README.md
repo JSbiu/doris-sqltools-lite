@@ -2,6 +2,10 @@
 
 一个面向 Windows + VS Code 的极简 MySQL/Doris 查询插件 MVP。
 
+## 协作入口
+
+项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`（如存在），历史记录按需放在 `.local/archive/` 或 `.local/checkpoints/`，均不进入 Git。共享知识与具体需求记录以项目文档为准。
+
 ## 安全模型
 
 - 工作区配置只保存连接名称、主机、端口、数据库和用户名。
