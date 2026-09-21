@@ -159,8 +159,7 @@ export class ConnectionManager {
   private async promptAndOpen(profile: ConnectionProfile): Promise<QuerySession> {
     const password = await vscode.window.showInputBox({
       title: `Password for ${profile.name}`,
-      prompt:
-        '首次连接请输入密码；连接成功后才会保存到 VS Code SecretStorage，密码输错不会被记住。留空表示空密码。',
+      prompt: passwordPromptFor(profile),
       password: true,
       ignoreFocusOut: true,
     });
@@ -198,6 +197,25 @@ export function sameConnectionTarget(a: ConnectionProfile, b: ConnectionProfile)
     (a.database ?? '') === (b.database ?? '') &&
     (a.ssl ?? false) === (b.ssl ?? false)
   );
+}
+
+// Spark Thrift Server's default NONE mode never checks the value, but
+// HiveServer2 still rejects blank credentials -- verified against Spark 3.2.0:
+// `password=""` fails with "Error validating the login" while any non-empty
+// string succeeds. Telling the user "leave it empty" would be actively wrong
+// here, and telling them "enter your password" is useless when they have none.
+export function passwordPromptFor(profile: ConnectionProfile): string {
+  if (profile.type === 'Spark') {
+    if (profile.hiveAuth === 'nosasl') {
+      return 'NOSASL 模式不使用密码，直接回车或随便填一个值即可。连接成功后才会保存到 VS Code SecretStorage。';
+    }
+    return (
+      'Spark Thrift Server 默认的 NONE 模式不校验密码内容，但空密码会被服务端拒绝 —— ' +
+      '随便填一个非空值即可（例如与用户名相同）。' +
+      '只有在使用 LDAP 时才需要填真实密码。连接成功后才会保存到 VS Code SecretStorage。'
+    );
+  }
+  return '首次连接请输入密码；连接成功后才会保存到 VS Code SecretStorage，密码输错不会被记住。留空表示空密码。';
 }
 
 export function showError(prefix: string, error: unknown): void {

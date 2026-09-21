@@ -3,17 +3,30 @@ const test = require('node:test');
 
 const { decodeHiveResult, decodeHiveRowSet, decodeHiveValue } = require('../out/hiveResult.js');
 
-// node-int64 instances are Buffer subclasses whose toString() yields the decimal
-// digits; only that contract is needed here, so a stub keeps the test dependency
-// free while still exercising the real code path.
-class Int64Stub {
-  constructor(text) {
-    this.text = text;
-  }
+// Faithful stand-in for node-int64. It wraps an 8-byte big-endian buffer, and
+// its toString() -> valueOf() -> toNumber(false) chain deliberately returns
+// Infinity once integer precision is lost rather than an inexact number.
+//
+// The previous stub here returned the correct digits from toString(), which is
+// exactly what hid the real "Infinity" bug from this suite: the driver's own
+// types are what the decoder has to survive, so the stub has to reproduce their
+// behaviour, not the behaviour we wish they had.
+const INT64_LOSES_PRECISION_AT = BigInt(2) ** BigInt(53);
 
-  toString() {
-    return this.text;
-  }
+function int64(value) {
+  const big = BigInt(value);
+  const buffer = Buffer.alloc(8);
+  buffer.writeBigInt64BE(big);
+  const magnitude = big < BigInt(0) ? -big : big;
+  const imprecise = magnitude >= INT64_LOSES_PRECISION_AT;
+  return {
+    buffer,
+    offset: 0,
+    toString: () => (imprecise ? (big < BigInt(0) ? '-Infinity' : 'Infinity') : big.toString()),
+    valueOf() {
+      return this.toString();
+    },
+  };
 }
 
 function primitive(columnName, position, typeId) {
@@ -30,7 +43,7 @@ test('decodes a column-oriented row set with typed values', () => {
       startRowOffset: 0,
       // `t.id` keeps its table prefix on the wire; the panel shows the bare name.
       columns: [
-        { i64Val: { values: [new Int64Stub('1'), new Int64Stub('2')], nulls: Buffer.from([0]) } },
+        { i64Val: { values: [int64('1'), int64('2')], nulls: Buffer.from([0]) } },
         { stringVal: { values: ['alice', 'bob'], nulls: Buffer.from([0]) } },
         { doubleVal: { values: [1.5, 2.5], nulls: Buffer.from([0]) } },
         { boolVal: { values: [true, false], nulls: Buffer.from([0]) } },
@@ -50,7 +63,7 @@ test('reads nulls from the bitmap instead of from the values array', () => {
   const result = decodeHiveResult(SCHEMA, [
     {
       columns: [
-        { i64Val: { values: [new Int64Stub('7'), new Int64Stub('0')], nulls: Buffer.from([0b00000010]) } },
+        { i64Val: { values: [int64('7'), int64('0')], nulls: Buffer.from([0b00000010]) } },
         { stringVal: { values: ['x', ''], nulls: Buffer.from([0b00000010]) } },
         { doubleVal: { values: [0, 0], nulls: Buffer.from([0b00000010]) } },
         { boolVal: { values: [false, false], nulls: Buffer.from([0b00000010]) } },
@@ -63,11 +76,40 @@ test('reads nulls from the bitmap instead of from the values array', () => {
 });
 
 test('keeps a BIGINT beyond Number.MAX_SAFE_INTEGER as a string', () => {
-  assert.equal(decodeHiveValue('i64Val', new Int64Stub('9007199254740993')), '9007199254740993');
-  assert.equal(decodeHiveValue('i64Val', new Int64Stub('-9007199254740993')), '-9007199254740993');
-  assert.equal(decodeHiveValue('i64Val', new Int64Stub('42')), 42);
+  assert.equal(decodeHiveValue('i64Val', int64('9007199254740993')), '9007199254740993');
+  assert.equal(decodeHiveValue('i64Val', int64('-9007199254740993')), '-9007199254740993');
+  assert.equal(decodeHiveValue('i64Val', int64('42')), 42);
   // Thrift hands back plain decimal strings for i64 in some paths.
   assert.equal(decodeHiveValue('i64Val', '123'), 123);
+});
+
+test('reads a large i64 from the buffer, never from the Int64 toString() chain', () => {
+  // This is the regression guard for a real bug: the driver's Int64 answers
+  // String() with "Infinity" once precision is lost, so stringifying it turned
+  // an 18-digit id into the text "Infinity" in the result grid and the export.
+  const huge = int64('9223372036854775807');
+  assert.equal(String(huge), 'Infinity', 'the stub must reproduce the driver behaviour');
+  assert.equal(decodeHiveValue('i64Val', huge), '9223372036854775807');
+
+  assert.equal(decodeHiveValue('i64Val', int64('-9223372036854775808')), '-9223372036854775808');
+  // 2^53 itself is already beyond what node-int64 will report as a number.
+  assert.equal(decodeHiveValue('i64Val', int64('9007199254740992')), '9007199254740992');
+  // Inside the safe range the panel still gets a number, not a string.
+  assert.equal(decodeHiveValue('i64Val', int64('9007199254740991')), Number.MAX_SAFE_INTEGER);
+});
+
+test('accepts the offset the driver stores alongside the buffer', () => {
+  const backing = Buffer.alloc(24);
+  backing.writeBigInt64BE(BigInt('9007199254740995'), 8);
+  const shifted = { buffer: backing, offset: 8, toString: () => 'Infinity' };
+
+  assert.equal(decodeHiveValue('i64Val', shifted), '9007199254740995');
+});
+
+test('does not invent a value for an unrecognised i64 payload', () => {
+  // Better to surface the raw payload than to claim it is Infinity.
+  assert.equal(decodeHiveValue('i64Val', 'not-a-number'), 'not-a-number');
+  assert.deepEqual(decodeHiveValue('i64Val', { offset: 0 }), { offset: 0 });
 });
 
 test('decodes a signed TINYINT from its single-byte buffer', () => {
@@ -93,7 +135,7 @@ test('falls back to the row-oriented encoding when no columns are present', () =
   const rows = decodeHiveRowSet(
     {
       rows: [
-        { colVals: [{ i64Val: { value: new Int64Stub('1') } }, { stringVal: { value: 'a' } }, {}, {}] },
+        { colVals: [{ i64Val: { value: int64('1') } }, { stringVal: { value: 'a' } }, {}, {}] },
       ],
     },
     [
@@ -112,7 +154,7 @@ test('merges several fetched batches into one row list', () => {
   const batch = (offset, values) => ({
     startRowOffset: offset,
     columns: [
-      { i64Val: { values: values.map((value) => new Int64Stub(String(value))), nulls: Buffer.from([0]) } },
+      { i64Val: { values: values.map((value) => int64(String(value))), nulls: Buffer.from([0]) } },
       { stringVal: { values: values.map((value) => `n${value}`), nulls: Buffer.from([0]) } },
       { doubleVal: { values: values.map(() => 0), nulls: Buffer.from([0]) } },
       { boolVal: { values: values.map(() => false), nulls: Buffer.from([0]) } },

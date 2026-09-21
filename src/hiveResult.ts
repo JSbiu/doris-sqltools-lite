@@ -84,21 +84,53 @@ function isNullAt(nulls: unknown, index: number): boolean {
 // BIGINT arrives as a node-int64 instance, which is a Buffer subclass whose
 // toString() is overridden to give the decimal digits. Anything wider than
 // Number.MAX_SAFE_INTEGER becomes a string rather than a lossy number.
-function decodeInt64(value: unknown): unknown {
+// thrift hands every i64 field over as a node-int64 instance, not a number or a
+// string. That type routes toString() through valueOf() -> toNumber(false), and
+// toNumber deliberately returns Infinity for anything past 2^53 rather than an
+// inexact value -- so simply stringifying an Int64 silently turns an 18-digit id
+// into "Infinity". The exact bytes are still there in the 8-byte big-endian
+// two's-complement buffer these objects wrap, so read those instead.
+function int64ToBigInt(value: unknown): bigint | undefined {
+  if (typeof value === 'bigint') {
+    return value;
+  }
   if (typeof value === 'number') {
+    return Number.isInteger(value) ? BigInt(value) : undefined;
+  }
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return /^-?\d+$/.test(text) ? BigInt(text) : undefined;
+  }
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const buffer = asByteView(value.buffer);
+  const offset = typeof value.offset === 'number' ? value.offset : 0;
+  if (!buffer || offset < 0 || offset + 8 > buffer.length) {
+    return undefined;
+  }
+  return buffer.readBigInt64BE(offset);
+}
+
+function asByteView(value: unknown): Buffer | undefined {
+  if (Buffer.isBuffer(value)) {
     return value;
   }
-  if (typeof value !== 'string' && !isRecord(value)) {
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return undefined;
+}
+
+function decodeInt64(value: unknown): unknown {
+  const exact = int64ToBigInt(value);
+  if (exact === undefined) {
+    // Unrecognised shape: hand it back untouched instead of inventing a value.
     return value;
   }
-  const text = typeof value === 'string' ? value : String(value);
-  if (!/^-?\d+$/.test(text)) {
-    return text;
-  }
-  const big = BigInt(text);
-  return big >= BigInt(Number.MIN_SAFE_INTEGER) && big <= BigInt(Number.MAX_SAFE_INTEGER)
-    ? Number(big)
-    : text;
+  return exact >= BigInt(Number.MIN_SAFE_INTEGER) && exact <= BigInt(Number.MAX_SAFE_INTEGER)
+    ? Number(exact)
+    : exact.toString();
 }
 
 // TINYINT travels as a one-byte Buffer; it is signed.

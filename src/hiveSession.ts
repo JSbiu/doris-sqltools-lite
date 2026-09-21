@@ -41,6 +41,14 @@ const FETCH_ROWS = 1_000;
 // Spark job can run for minutes, so poll on a timer instead.
 const STATUS_POLL_INTERVAL_MS = 200;
 
+// The driver's TCP transport is a bare net.createConnection with no timeout of
+// its own, so a server that accepts the socket but never completes the
+// HiveServer2 handshake leaves the promise pending forever -- the progress
+// notification just spins. The usual cause is an authentication mode mismatch:
+// against a server started with `--auth nosasl`, a SASL/PLAIN client gets no
+// reply at all rather than an error.
+const HANDSHAKE_TIMEOUT_MS = 20_000;
+
 type HiveClientInstance = InstanceType<typeof HiveClient>;
 type HiveSessionHandle = Awaited<ReturnType<HiveClientInstance['openSession']>>;
 type HiveOperation = Awaited<ReturnType<HiveSessionHandle['executeStatement']>>;
@@ -114,12 +122,18 @@ export async function openHiveSession(
       : new auth.PlainTcpAuthentication({ username: profile.username, password });
 
   try {
-    await client.connect(
-      { host: profile.host, port: profile.port },
-      new connections.TcpConnection(),
-      authProvider,
+    await withTimeout(
+      client.connect(
+        { host: profile.host, port: profile.port },
+        new connections.TcpConnection(),
+        authProvider,
+      ),
+      () => closeClient(client),
     );
-    const handle = await openSessionWithFallback(client, profile, password);
+    const handle = await withTimeout(
+      openSessionWithFallback(client, profile, password),
+      () => closeClient(client),
+    );
     const session = new HiveQuerySession(client, handle);
     relay.target = (error) => session.noteTransportError(error);
 
@@ -158,6 +172,43 @@ async function openSessionWithFallback(
     }
   }
   throw toHiveError(lastError);
+}
+
+class HandshakeTimeoutError extends Error {
+  public constructor() {
+    super(
+      `连接超时：${HANDSHAKE_TIMEOUT_MS / 1000} 秒内没有完成 HiveServer2 握手。` +
+        '请先确认主机和端口可访问。' +
+        '如果地址正确，通常意味着认证方式不匹配：Spark Thrift Server 默认使用 SASL/PLAIN' +
+        '（启动参数 --auth none），若服务端以 --auth nosasl 启动，' +
+        '需要在连接表单里把认证方式改成 NOSASL。',
+    );
+    this.name = 'HandshakeTimeoutError';
+  }
+}
+
+// Wraps a handshake step so it cannot outlive HANDSHAKE_TIMEOUT_MS. `onTimeout`
+// runs first so the half-open socket is torn down before the caller sees the
+// error; the underlying promise may still settle later, which the handler below
+// absorbs so it never becomes an unhandled rejection.
+function withTimeout<T>(action: Promise<T>, onTimeout: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout();
+      reject(new HandshakeTimeoutError());
+    }, HANDSHAKE_TIMEOUT_MS);
+
+    action.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function closeClient(client: HiveClientInstance): void {
