@@ -8,14 +8,16 @@
 
 ## 安全模型
 
-- 工作区配置只保存连接名称、主机、端口、数据库和用户名。
-- 密码只保存到 VS Code `ExtensionContext.secrets`（SecretStorage），不会写进 `settings.json`。
+- 连接元数据（名称、类型、主机、端口、database、用户名、SSL）保存在**用户设置**里（`dorisSqlLite.connections` 的 `scope` 是 `machine`）：既不会被工作区设置覆盖，也不会随 VS Code Settings Sync 上传。
+- 早期版本会把元数据写进当前工作区的 `.vscode/settings.json`，内网主机名和账号名可能跟着项目仓库走。扩展启动时会把这类条目找回并写进用户设置，连接列表不会丢；但**项目文件里那份旧副本不会被自动删除** —— VS Code 不允许对 `machine` 作用域的设置在更窄的作用域执行写入（包括删除）。需要手动到设置编辑器里删掉它，并确认项目的 `.vscode/settings.json` 已被 Git 忽略。
+- 密码只保存到 VS Code `ExtensionContext.secrets`（SecretStorage），不会写进任何 `settings.json`。
 - 添加连接时密码留空表示「先不保存」，首次连接时会提示输入一次；之后连接自动读取密码。
 - 手动输入的密码只在连接成功后才写入 SecretStorage，输错不会被记住。
 - 已保存的密码如果认证失败会被自动清除并重新询问一次，不会反复用错误密码重试。
 - 扩展启动时会把可识别的旧连接配置中的 `password` 迁移到 SecretStorage，并从连接元数据中清理。
 - `Doris` 使用 MySQL 协议连接 FE 的 `9030` 端口。
-- 扩展不记录密码、连接字符串或查询结果到日志。
+- 扩展不记录密码、连接字符串或查询结果到日志。错误提示会脱敏已知密码，以及 `password=` / `pwd:` / `token=`、`mysql://user:pass@`、`IDENTIFIED BY …`、`SET PASSWORD …` 这类写法。
+- 结果不会外发。但要知道两点：结果面板的最近一次结果会驻留在内存里（标签页隐藏时也是），`复制 TSV` 会把结果写进系统剪贴板并由其保留。共享机器上请注意剪贴板历史与其他窗口。
 
 这提供的是“安全存储 + 自动使用”，不是防御同一 Windows 用户下的恶意进程或恶意 VS Code 扩展。任何能控制当前用户的代码，最终都可能在连接时读取到解密后的密码。
 

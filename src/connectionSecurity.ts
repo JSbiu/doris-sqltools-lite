@@ -110,6 +110,19 @@ export function redactErrorMessage(message: string, knownSecrets: readonly strin
 
   return safeMessage
     .replace(/(mysql(?:s)?:\/\/[^:\s/@]+:)[^@\s]+(@)/gi, '$1[redacted]$2')
+    // A password written into the statement itself never travels through the
+    // connection options, so nothing else knows its value. Covers
+    // `IDENTIFIED BY 'x'`, `IDENTIFIED BY PASSWORD 'hash'`,
+    // `IDENTIFIED WITH mysql_native_password BY 'x'` and the `AS 'hash'` form.
+    .replace(
+      /(\bIDENTIFIED\s+(?:WITH\s+[A-Za-z0-9_]+\s+)?(?:BY\s+(?:PASSWORD\s+)?|AS\s+))(?:"[^"]*"|'[^']*'|`[^`]*`|\S+)/gi,
+      '$1[redacted]',
+    )
+    // `SET PASSWORD = 'x'` and `SET PASSWORD FOR 'u'@'h' = 'x'`.
+    .replace(
+      /(\bSET\s+PASSWORD\s*(?:FOR\s+(?:'[^']*'|"[^"]*"|\S+)\s*)?=\s*)(?:"[^"]*"|'[^']*'|`[^`]*`|\S+)/gi,
+      '$1[redacted]',
+    )
     .replace(
       /((?:\bpassword\b|\bpasswd\b|\bpwd\b|\btoken\b|\bapi[_-]?key\b)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^,;\s]+)/gi,
       '$1[redacted]',

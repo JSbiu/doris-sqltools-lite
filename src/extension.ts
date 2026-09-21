@@ -481,6 +481,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   refreshConnectionStatus();
 
   try {
+    await manager.migrateConnectionScope();
+  } catch (error) {
+    showError('迁移连接配置位置失败', error);
+  }
+
+  try {
     await manager.migrateLegacyPasswords();
   } catch (error) {
     showError('迁移旧连接密码失败', error);

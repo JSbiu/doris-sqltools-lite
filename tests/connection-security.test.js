@@ -120,3 +120,52 @@ test('omits ssl from metadata when it is not explicitly set', () => {
   assert.equal(plain.ssl, undefined);
   assert.equal(Object.prototype.hasOwnProperty.call(serializeConnectionProfile(plain), 'ssl'), false);
 });
+
+test('redacts a password carried inside the SQL itself', () => {
+  const safe = redactErrorMessage("CREATE USER 'app'@'%' IDENTIFIED BY 'hunter2' failed");
+
+  assert.equal(safe.includes('hunter2'), false);
+  assert.match(safe, /IDENTIFIED BY \[redacted\]/);
+});
+
+test('redacts every password clause MySQL accepts in a statement', () => {
+  const cases = [
+    {
+      message: "ALTER USER 'app'@'%' IDENTIFIED WITH mysql_native_password BY 'hunter2'",
+      secret: 'hunter2',
+      expected: /IDENTIFIED WITH mysql_native_password BY \[redacted\]/,
+    },
+    {
+      message: "ALTER USER 'app'@'%' IDENTIFIED BY PASSWORD '*A4B6157319038724E3560894F7F932C8886EBFCF'",
+      secret: 'A4B6157319038724E3560894F7F932C8886EBFCF',
+      expected: /IDENTIFIED BY PASSWORD \[redacted\]/,
+    },
+    {
+      message: "ALTER USER 'app'@'%' IDENTIFIED WITH sha256_password AS '$5$rounds=5000$salt$hash'",
+      secret: '$5$rounds=5000$salt$hash',
+      expected: /IDENTIFIED WITH sha256_password AS \[redacted\]/,
+    },
+    {
+      message: "SET PASSWORD FOR 'app'@'%' = 'hunter2'",
+      secret: 'hunter2',
+      expected: /SET PASSWORD FOR 'app'@'%' = \[redacted\]/,
+    },
+    {
+      message: "SET PASSWORD = 'hunter2'",
+      secret: 'hunter2',
+      expected: /SET PASSWORD = \[redacted\]/,
+    },
+  ];
+
+  for (const { message, secret, expected } of cases) {
+    const safe = redactErrorMessage(message);
+    assert.equal(safe.includes(secret), false, message);
+    assert.match(safe, expected);
+  }
+});
+
+test('leaves an ordinary SQL error readable', () => {
+  const message = 'You have an error in your SQL syntax near SELECT at line 1';
+
+  assert.equal(redactErrorMessage(message), message);
+});

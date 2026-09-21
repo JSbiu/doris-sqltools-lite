@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -165,8 +165,8 @@
       "properties": {
         "dorisSqlLite.connections": {
           "type": "array",
-          "scope": "workspace",
-          "description": "Non-sensitive MySQL/Doris connection metadata. Passwords are stored in VS Code SecretStorage.",
+          "scope": "machine",
+          "description": "Non-sensitive MySQL/Doris connection metadata. Kept in user settings so host names and account names never land in a project's .vscode/settings.json. Passwords are stored in VS Code SecretStorage.",
           "items": {
             "type": "object",
             "required": [

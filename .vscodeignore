@@ -1,8 +1,11 @@
 .local/**
 .vscode/**
+.github/**
 .packaging/**
 .workbuddy/**
 scripts/**
+AGENTS.md
+.gitignore
 eslint.config.mjs
 !node_modules/
 !node_modules/mysql2/
