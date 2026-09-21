@@ -169,3 +169,44 @@ test('leaves an ordinary SQL error readable', () => {
 
   assert.equal(redactErrorMessage(message), message);
 });
+
+test('carries the Spark authentication mode through the metadata round-trip', () => {
+  const profile = normalizeConnectionProfile({
+    id: 'spark-thrift',
+    name: 'Spark Thrift',
+    type: 'Spark',
+    host: '10.0.0.7',
+    port: 10000,
+    username: 'hive',
+    hiveAuth: 'nosasl',
+    password: 'hunter2',
+  });
+
+  assert.ok(profile);
+  assert.equal(profile.type, 'Spark');
+  assert.equal(profile.hiveAuth, 'nosasl');
+  const serialized = serializeConnectionProfile(profile);
+  assert.equal(serialized.hiveAuth, 'nosasl');
+  // The whitelist must keep dropping the password even now that a new field was
+  // added to it.
+  assert.equal(Object.prototype.hasOwnProperty.call(serialized, 'password'), false);
+});
+
+test('drops an authentication mode the driver does not implement', () => {
+  const profile = normalizeConnectionProfile({
+    id: 'spark-thrift',
+    name: 'Spark Thrift',
+    type: 'Spark',
+    host: '10.0.0.7',
+    port: 10000,
+    username: 'hive',
+    hiveAuth: 'kerberos',
+  });
+
+  assert.ok(profile);
+  assert.equal(profile.hiveAuth, undefined);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(serializeConnectionProfile(profile), 'hiveAuth'),
+    false,
+  );
+});

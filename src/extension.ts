@@ -4,19 +4,19 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import mysql from 'mysql2/promise';
 import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
 import { openConnectionForm } from './connectionForm';
 import { displayValue, isExportFormat, toTsv, toTsvBlocks, type ExportFormat } from './exports';
 import { buildExportFileName, normalizeExportDirectory } from './exportPath';
 import {
-  createQueryResultView,
+  createQueryResultViewFromOutcome,
   findSqlStatementAtOffset,
   hasMultipleStatements,
   type QueryResultView,
   type Row,
 } from './queryResults';
+import { isQueryCancelled, neverCancelled, type CancelSignal, type QuerySession } from './querySession';
 
 type ConnectionSessionState = {
   documentConnections: Map<string, string>;
@@ -25,10 +25,6 @@ type ConnectionSessionState = {
   cancellationSources: Map<string, vscode.CancellationTokenSource>;
   defaultConnectionId?: string;
 };
-
-// If the server never acknowledges a KILL QUERY (Doris KILL semantics vary by
-// version), fall back to tearing the socket down after this long.
-const CANCEL_FALLBACK_TIMEOUT_MS = 5_000;
 
 // Export writes the whole result set, so ask before producing a huge file.
 const EXPORT_CONFIRM_ROW_THRESHOLD = 100_000;
@@ -43,7 +39,7 @@ function configuredExportDirectory(): string | undefined {
 
 type LiveDocumentConnection = {
   profileId: string;
-  connection: mysql.Connection;
+  session: QuerySession;
 };
 
 let activeConnectionSession: ConnectionSessionState | undefined;
@@ -65,7 +61,7 @@ async function closeDocumentConnection(
   }
 
   session.liveConnections.delete(documentKey);
-  await active.connection.end().catch(() => undefined);
+  await active.session.close().catch(() => undefined);
 }
 
 async function closeConnectionsForProfile(
@@ -84,28 +80,6 @@ async function closeAllDocumentConnections(session: ConnectionSessionState): Pro
       closeDocumentConnection(session, documentKey),
     ),
   );
-}
-
-function isConnectionFailure(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return false;
-  }
-
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' && [
-    'ECONNREFUSED',
-    'ECONNRESET',
-    'EHOSTUNREACH',
-    'ENETUNREACH',
-    'ENOTFOUND',
-    'EPIPE',
-    'ETIMEDOUT',
-    'PROTOCOL_CONNECTION_LOST',
-    'PROTOCOL_ENQUEUE_AFTER_QUIT',
-    'PROTOCOL_ENQUEUE_AFTER_DESTROY',
-    'PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR',
-    'PROTOCOL_SEQUENCE_TIMEOUT',
-  ].includes(code);
 }
 
 class ConnectionItem extends vscode.TreeItem {
@@ -604,15 +578,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!profile) {
         return;
       }
-      let connection: mysql.Connection | undefined;
+      let session: QuerySession | undefined;
       try {
-        connection = await manager.open(profile);
-        await connection.query('SELECT 1');
+        session = await manager.open(profile);
+        await session.execute('SELECT 1', neverCancelled);
         vscode.window.showInformationMessage(`连接成功：${profile.name}`);
       } catch (error) {
         showError(`连接失败（${profile.name}）`, error);
       } finally {
-        await connection?.end().catch(() => undefined);
+        await session?.close().catch(() => undefined);
       }
     }),
     vscode.commands.registerCommand('dorisSqlLite.removeConnection', async (item?: ConnectionItem) => {
@@ -749,15 +723,37 @@ async function runQuery(
 
   const startedAt = Date.now();
   let progressHandle: vscode.Progress<{ message?: string }> | undefined;
-  let connection: mysql.Connection | undefined =
-    connectionSession.liveConnections.get(documentKey)?.connection;
-  let connectionInvalid = false;
+  let session: QuerySession | undefined =
+    connectionSession.liveConnections.get(documentKey)?.session;
   let cancelled = false;
-  let settled = false;
-  let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 
   const isCancelled = (token?: vscode.CancellationToken): boolean =>
     cancelled || cancelSource.token.isCancellationRequested || token?.isCancellationRequested === true;
+
+  // Adapters listen on this instead of on a vscode token, so the query runner no
+  // longer has to know how a given protocol interrupts a statement.
+  const cancelListeners = new Set<() => void>();
+  const signal: CancelSignal = {
+    get requested(): boolean {
+      return cancelled;
+    },
+    onRequest(listener: () => void) {
+      cancelListeners.add(listener);
+      return {
+        dispose: () => {
+          cancelListeners.delete(listener);
+        },
+      };
+    },
+  };
+
+  const dropSession = async (target: QuerySession): Promise<void> => {
+    const active = connectionSession.liveConnections.get(documentKey);
+    if (active?.session === target) {
+      connectionSession.liveConnections.delete(documentKey);
+    }
+    await target.close().catch(() => undefined);
+  };
 
   const requestCancel = (): void => {
     if (cancelled) {
@@ -765,32 +761,9 @@ async function runQuery(
     }
     cancelled = true;
     progressHandle?.report({ message: '正在取消…' });
-
-    const target = connection;
-    if (!target) {
-      // 连接还没建好，等它建好后立刻销毁。
-      connectionInvalid = true;
-      return;
+    for (const listener of [...cancelListeners]) {
+      listener();
     }
-    if (!target.threadId) {
-      connectionInvalid = true;
-      target.destroy();
-      return;
-    }
-
-    void killRunningQuery(manager, profile, target).then((killed) => {
-      if (!killed) {
-        connectionInvalid = true;
-        target.destroy();
-        return;
-      }
-      killFallbackTimer = setTimeout(() => {
-        if (!settled) {
-          connectionInvalid = true;
-          target.destroy();
-        }
-      }, CANCEL_FALLBACK_TIMEOUT_MS);
-    });
   };
 
   const subscriptions = [cancelSource.token.onCancellationRequested(requestCancel)];
@@ -805,100 +778,58 @@ async function runQuery(
         progressHandle = progress;
         subscriptions.push(token.onCancellationRequested(requestCancel));
         try {
-          if (!connection) {
+          let active = session;
+          if (!active) {
             progress.report({ message: '正在建立连接…' });
-            connection = await manager.open(profile);
-            if (isCancelled(token)) {
-              connectionInvalid = true;
-              connection.destroy();
-              return;
-            }
+            active = await manager.open(profile);
+            session = active;
             connectionSession.liveConnections.set(documentKey, {
               profileId: profile.id,
-              connection,
+              session: active,
             });
           } else {
             progress.report({ message: '复用当前文件连接…' });
           }
-          if (isCancelled(token)) {
-            connectionInvalid = true;
-            connection.destroy();
+          if (signal.requested) {
+            await dropSession(active);
             return;
           }
           progress.report({ message: '正在执行…' });
-          const [rawResult, rawFields] = await connection.query(sql);
-          if (isCancelled(token)) {
-            connectionInvalid = true;
+          const outcome = await active.execute(sql, signal);
+          if (signal.requested) {
             return;
           }
           const maxRows = vscode.workspace
             .getConfiguration('dorisSqlLite')
             .get<number>('maxResultRows', 1000);
-          const result = createQueryResultView(rawResult, rawFields, maxRows);
-          ResultPanel.open(result, {
+          ResultPanel.open(createQueryResultViewFromOutcome(outcome, maxRows), {
             connectionName: profile.name,
             database: profile.database,
             durationMs: Date.now() - startedAt,
             maxRows,
           });
         } catch (error) {
-          if (isCancelled(token)) {
+          if (isQueryCancelled(error) || isCancelled(token)) {
             vscode.window.showInformationMessage(`已取消 ${profile.name} 上的查询。`);
           } else {
-            connectionInvalid = isConnectionFailure(error);
             showError(`执行失败（${profile.name}）`, error);
           }
         }
       },
     );
   } finally {
-    settled = true;
-    if (killFallbackTimer !== undefined) {
-      clearTimeout(killFallbackTimer);
-    }
     for (const subscription of subscriptions) {
       subscription.dispose();
     }
+    cancelListeners.clear();
     cancelSource.dispose();
     connectionSession.cancellationSources.delete(documentKey);
     connectionSession.runningDocuments.delete(documentKey);
-    if (connectionInvalid && connection) {
-      const activeConnection = connectionSession.liveConnections.get(documentKey);
-      if (activeConnection?.connection === connection) {
-        connectionSession.liveConnections.delete(documentKey);
-      }
-      await connection.end().catch(() => undefined);
+    // A session that already had to be torn down (or was dropped to cancel) must
+    // not be handed to the next statement.
+    if (session?.broken) {
+      await dropSession(session);
     }
-  }
-}
-
-// Cancels the statement on a separate control connection so the session the
-// user is working in (USE / temp tables / session variables) survives.
-// Returns false when the caller must fall back to destroying the connection.
-async function killRunningQuery(
-  manager: ConnectionManager,
-  profile: ConnectionProfile,
-  target: mysql.Connection,
-): Promise<boolean> {
-  const threadId = target.threadId;
-  if (!threadId) {
-    return false;
-  }
-
-  const password = await manager.readPassword(profile.id);
-  if (password === undefined) {
-    return false;
-  }
-
-  let control: mysql.Connection | undefined;
-  try {
-    control = await manager.openControlConnection(profile, password);
-    await control.query(`KILL QUERY ${threadId}`);
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await control?.end().catch(() => undefined);
   }
 }
 

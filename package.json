@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -183,7 +183,8 @@
                 "type": "string",
                 "enum": [
                   "MySQL",
-                  "Doris"
+                  "Doris",
+                  "Spark"
                 ]
               },
               "host": {
@@ -202,6 +203,14 @@
               "ssl": {
                 "type": "boolean",
                 "default": false
+              },
+              "hiveAuth": {
+                "type": "string",
+                "enum": [
+                  "plain",
+                  "nosasl"
+                ],
+                "description": "Spark Thrift authentication: plain (SASL/PLAIN, also covers LDAP) or nosasl (no authentication). Only used when type is Spark."
               }
             }
           }
@@ -226,11 +235,12 @@
     "check:webview": "node scripts/check-webview.js",
     "compile": "tsc -p ./",
     "lint": "eslint src",
-    "test": "tsc -p ./ && node scripts/check-webview.js && node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js tests/export-path.test.js",
+    "test": "tsc -p ./ && node scripts/check-webview.js && node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js tests/export-path.test.js tests/hive-result.test.js",
     "watch": "tsc -p ./ -w",
     "package": "node scripts/package-runtime.js"
   },
   "dependencies": {
+    "hive-driver": "^1.0.1",
     "mysql2": "^3.14.3"
   },
   "devDependencies": {

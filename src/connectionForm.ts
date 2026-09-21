@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
-import type mysql from 'mysql2/promise';
-import type { ConnectionProfile } from './connectionSecurity';
+import { isHiveAuthMode, redactErrorMessage, type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, showError } from './connectionManager';
+import { testQuerySession } from './sessionFactory';
 
 import {
   DEFAULT_PORTS,
@@ -159,6 +159,9 @@ function coerceDraft(raw: unknown): ConnectionDraft {
     // Never trimmed: leading or trailing spaces can be part of a password.
     password: typeof source.password === 'string' ? source.password : '',
     ssl: source.ssl === true,
+    // Anything the driver does not understand falls back to the default rather
+    // than reaching the connection code.
+    hiveAuth: isHiveAuthMode(source.hiveAuth) ? source.hiveAuth : 'plain',
     clearSavedPassword: source.clearSavedPassword === true,
   };
 }
@@ -181,7 +184,10 @@ async function testDraft(
   if (!password && existing) {
     password = (await manager.readPassword(existing.id)) ?? '';
   }
-  if (!password) {
+  // A NOSASL Spark Thrift Server takes no credentials at all; every other mode
+  // needs them.
+  const needsPassword = profile.type !== 'Spark' || profile.hiveAuth !== 'nosasl';
+  if (!password && needsPassword) {
     return {
       ok: false,
       message: existing
@@ -190,16 +196,12 @@ async function testDraft(
     };
   }
 
-  let connection: mysql.Connection | undefined;
   try {
-    connection = await manager.connect(profile, password);
-    await connection.query('SELECT 1');
+    await testQuerySession(profile, password);
     return { ok: true, message: `连接成功：${profile.host}:${profile.port}` };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, message };
-  } finally {
-    await connection?.end().catch(() => undefined);
+    return { ok: false, message: redactErrorMessage(message, [password]) };
   }
 }
 
@@ -240,6 +242,8 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
     .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
     .field.wide { grid-column: 1 / -1; }
+    /* .field sets display:flex, which outranks the UA rule for [hidden]. */
+    .field[hidden] { display: none; }
     label { display: block; }
     .hint { color: var(--vscode-descriptionForeground); font-size: 12px; margin: 0; }
     label > .hint { display: inline; margin-left: 6px; }
@@ -277,7 +281,7 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
       <input id="f-input" type="text" spellcheck="false" autocomplete="off" placeholder="mysql -h 127.0.0.1 -P 9030 -uroot -p密码 -D db" />
       <button class="secondary" id="b-parse">解析并填充</button>
     </div>
-    <p class="hint">支持 mysql://、jdbc:mysql://、host:port，或 mysql -h HOST -P 3306 -uUSER -pPASS -D DB 命令行；密码只留在 SecretStorage。</p>
+    <p class="hint">支持 mysql://、jdbc:mysql://、jdbc:hive2://（Spark Thrift）、host:port，或 mysql -h HOST -P 3306 -uUSER -pPASS -D DB 命令行；密码只留在 SecretStorage。</p>
   </section>
 
   <section class="card">
@@ -287,7 +291,16 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
         <select id="f-type">
           <option value="Doris"${draft.type === 'Doris' ? ' selected' : ''}>Doris（默认 9030）</option>
           <option value="MySQL"${draft.type === 'MySQL' ? ' selected' : ''}>MySQL（默认 3306）</option>
+          <option value="Spark"${draft.type === 'Spark' ? ' selected' : ''}>Spark Thrift（默认 10000）</option>
         </select>
+      </div>
+      <div class="field" id="f-hive-auth-field"${draft.type === 'Spark' ? '' : ' hidden'}>
+        <label for="f-hive-auth">认证方式<span class="hint">仅 Spark</span></label>
+        <select id="f-hive-auth">
+          <option value="plain"${draft.hiveAuth === 'plain' ? ' selected' : ''}>用户名 + 密码（SASL/PLAIN、LDAP）</option>
+          <option value="nosasl"${draft.hiveAuth === 'nosasl' ? ' selected' : ''}>NOSASL（无认证，密码留空）</option>
+        </select>
+        <span class="err"></span>
       </div>
       <div class="field">
         <label for="f-name">连接名称</label>
@@ -358,6 +371,7 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
       username: id('f-username').value,
       password: id('f-password').value,
       ssl: id('f-ssl').checked,
+      hiveAuth: id('f-hive-auth').value,
       clearSavedPassword: id('f-clear-pwd') ? id('f-clear-pwd').checked : false,
     });
 
@@ -400,6 +414,7 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
       if (!currentValue || Object.values(DEFAULT_PORTS).includes(Number(currentValue))) {
         portField.value = targetDefault;
       }
+      id('f-hive-auth-field').hidden = event.target.value !== 'Spark';
       paint(localErrors());
     });
 

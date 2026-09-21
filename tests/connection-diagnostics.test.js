@@ -5,6 +5,7 @@ const {
   classifyDatabaseError,
   formatDatabaseError,
   isAuthFailure,
+  isConnectionFailure,
 } = require('../out/connectionDiagnostics.js');
 
 const errorWithCode = (code, message) => Object.assign(new Error(message), { code });
@@ -141,3 +142,62 @@ test('认证失败的建议里指向 Forget Saved Password', () => {
 
   assert.match(advice.hint, /Forget Saved Password/);
 });
+
+test('Spark Thrift 的 SASL/LDAP 登录失败也归类为 auth', () => {
+  // HiveServer2 answers a failed PLAIN/LDAP login with prose, not a MySQL code.
+  const error = new Error(
+    'Could not open client transport with JDBC Uri: jdbc:hive2://10.0.0.7:10000: Peer indicated failure: Error validating the login',
+  );
+
+  assert.equal(classifyDatabaseError(error).kind, 'auth');
+  assert.equal(isAuthFailure(error), true);
+});
+
+test('协议版本不匹配给出可操作的提示', () => {
+  const error = new Error(
+    "Required field 'client_protocol' is unset! Struct:TOpenSessionReq(client_protocol:null)",
+  );
+
+  const advice = classifyDatabaseError(error);
+  assert.equal(advice.kind, 'server');
+  assert.match(advice.summary, /协议版本/);
+  assert.match(advice.hint, /降级/);
+});
+
+test('Spark 的 AnalysisException 与 ParseException 归类为 SQL 错误', () => {
+  const messages = [
+    'org.apache.spark.sql.catalyst.parser.ParseException: Syntax error at or near "SELEC"',
+    'org.apache.spark.sql.AnalysisException: Table or view not found: dw.orders',
+  ];
+
+  for (const message of messages) {
+    assert.equal(classifyDatabaseError(new Error(message)).kind, 'sql', message);
+  }
+});
+
+test('区分 Hive/Spark 的 database 与 table 不存在措辞', () => {
+  assert.equal(
+    classifyDatabaseError(new Error('org.apache.spark.sql.AnalysisException: Database dw not found')).kind,
+    'database',
+  );
+  assert.equal(
+    classifyDatabaseError(new Error("SemanticException [Error 10001]: Table not found 'orders'")).kind,
+    'sql',
+  );
+});
+
+test('Hive 的权限异常归类为 permission', () => {
+  const error = new Error('HiveAccessControlException Permission denied: user [hive] does not have [SELECT] privilege');
+
+  assert.equal(classifyDatabaseError(error).kind, 'permission');
+});
+
+test('传输层断开被识别为连接不可用，即使没有 socket 错误码', () => {
+  assert.equal(isConnectionFailure(errorWithCode('ECONNRESET', 'read ECONNRESET')), true);
+  // A closed Thrift transport carries no code at all.
+  assert.equal(isConnectionFailure(new Error('Transport is closed')), true);
+  assert.equal(isConnectionFailure(new Error('Connection is closed')), true);
+  // A SQL-level failure must not make the caller drop a healthy session.
+  assert.equal(isConnectionFailure(new Error('SemanticException: Table not found')), false);
+});
+

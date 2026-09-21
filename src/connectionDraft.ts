@@ -1,4 +1,4 @@
-import type { ConnectionProfile, DatabaseType } from './connectionSecurity';
+import type { ConnectionProfile, DatabaseType, HiveAuthMode } from './connectionSecurity';
 
 // Pure draft logic for the connection form. Deliberately free of the `vscode`
 // import so it can be unit-tested from plain Node.
@@ -14,6 +14,9 @@ export interface ConnectionDraft {
   username: string;
   password: string;
   ssl: boolean;
+  // Only used by Spark; carried for every type so switching the type in the form
+  // never has to invent a value.
+  hiveAuth: HiveAuthMode;
   clearSavedPassword: boolean;
 }
 
@@ -33,7 +36,12 @@ export interface ParsedConnectionUrl {
   ssl?: boolean;
 }
 
-export const DEFAULT_PORTS: Record<DatabaseType, number> = { Doris: 9030, MySQL: 3306 };
+export const DEFAULT_PORTS: Record<DatabaseType, number> = {
+  Doris: 9030,
+  MySQL: 3306,
+  // Spark Thrift Server listens on HiveServer2's default port.
+  Spark: 10000,
+};
 
 export function defaultPortFor(type: DatabaseType): number {
   return DEFAULT_PORTS[type];
@@ -49,6 +57,7 @@ export function emptyDraft(type: DatabaseType = 'Doris'): ConnectionDraft {
     username: 'root',
     password: '',
     ssl: false,
+    hiveAuth: 'plain',
     clearSavedPassword: false,
   };
 }
@@ -64,6 +73,7 @@ export function draftFromProfile(profile: ConnectionProfile): ConnectionDraft {
     // Never pre-filled: the saved password is never read back into the form.
     password: '',
     ssl: profile.ssl === true,
+    hiveAuth: profile.hiveAuth ?? 'plain',
     clearSavedPassword: false,
   };
 }
@@ -138,6 +148,10 @@ export function draftToProfile(draft: ConnectionDraft, id: string): ConnectionPr
   if (database) {
     profile.database = database;
   }
+  // Left off entirely for MySQL/Doris so their settings stay unchanged.
+  if (draft.type === 'Spark') {
+    profile.hiveAuth = draft.hiveAuth;
+  }
   return profile;
 }
 
@@ -148,13 +162,17 @@ export function parseConnectionUrl(input: string): ParsedConnectionUrl | undefin
   }
 
   //jdbc: prefix must be rewritten before the scheme check, otherwise
-  // `jdbc:mysql://` looks like scheme `jdbc:` with an opaque authority.
-  const deJdbc = raw.replace(/^jdbc:(?:mysql|mariadb):\/\//i, 'mysql://');
+  // `jdbc:mysql://` looks like scheme `jdbc:` with an opaque authority. Hive's
+  // JDBC URLs use the same shape (`jdbc:hive2://host:10000/db`).
+  const deJdbc = raw.replace(/^jdbc:(?=mysql|mariadb|hive2?:\/\/)/i, '');
   const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(deJdbc) ? deJdbc : `mysql://${deJdbc}`;
+  const scheme = (/^([a-z][a-z0-9+.-]*):\/\//i.exec(normalized)?.[1] ?? '').toLowerCase();
+  const isHive = scheme === 'hive' || scheme === 'hive2';
+  const parseTarget = isHive ? stripHiveSessionProperties(normalized) : normalized;
 
   let url: URL;
   try {
-    url = new URL(encodeUrlCredentials(normalized));
+    url = new URL(encodeUrlCredentials(parseTarget));
   } catch {
     return undefined;
   }
@@ -174,6 +192,8 @@ export function parseConnectionUrl(input: string): ParsedConnectionUrl | undefin
   if (url.password) {
     parsed.password = safeDecode(url.password);
   }
+  // beeline appends session properties straight onto a Hive url
+  // (`/dw;principal=hive/_HOST@REALM`); they were already stripped above.
   const database = halfWidth(safeDecode(url.pathname.replace(/^\/+/, '').split('/')[0] ?? ''));
   if (database) {
     parsed.database = database;
@@ -239,6 +259,22 @@ function halfWidth(value: string): string {
   return value.replace(/[\uFF01-\uFF5E]/g, (char) =>
     String.fromCharCode(char.charCodeAt(0) - 0xfee0),
   );
+}
+
+// beeline tacks session properties onto a Hive JDBC url
+// (`/dw;principal=hive/_HOST@REALM`, `/;transportMode=http`). `new URL` cannot
+// digest them -- the principal carries both a slash and an `@`, which would be
+// read as path and userinfo -- so everything from the first `;` that follows the
+// authority is dropped. A `;` inside the credentials is left alone.
+function stripHiveSessionProperties(value: string): string {
+  const schemeEnd = value.indexOf('://');
+  if (schemeEnd < 0) {
+    return value;
+  }
+  const authorityEnd = value.slice(schemeEnd + 3).search(/[/?#]/);
+  const searchFrom = authorityEnd < 0 ? value.length : schemeEnd + 3 + authorityEnd;
+  const semicolon = value.indexOf(';', searchFrom);
+  return semicolon < 0 ? value : value.slice(0, semicolon);
 }
 
 // `new URL` reads `#` and `?` as the start of the fragment or query, so a

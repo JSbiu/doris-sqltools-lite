@@ -1,6 +1,6 @@
 # Doris SQLTools Lite
 
-一个面向 Windows + VS Code 的极简 MySQL/Doris 查询插件 MVP。
+一个面向 Windows + VS Code 的极简 MySQL / Doris / Spark Thrift 查询插件 MVP。
 
 ## 协作入口
 
@@ -16,6 +16,7 @@
 - 已保存的密码如果认证失败会被自动清除并重新询问一次，不会反复用错误密码重试。
 - 扩展启动时会把可识别的旧连接配置中的 `password` 迁移到 SecretStorage，并从连接元数据中清理。
 - `Doris` 使用 MySQL 协议连接 FE 的 `9030` 端口。
+- `Spark` 走的是 Spark Thrift Server 的 **HiveServer2 Thrift 协议**（默认 `10000` 端口），和 MySQL 协议无关，用的是独立驱动。认证支持 `SASL/PLAIN`（`hive.server2.authentication` 为 `none` 或 `ldap`）与 `NOSASL`；**不支持 Kerberos** —— 它依赖需要本机编译的原生模块，没法随 VSIX 分发。连接清单里不含密码，只有连接元数据；Spark 的认证方式字段同理。
 - 扩展不记录密码、连接字符串或查询结果到日志。错误提示会脱敏已知密码，以及 `password=` / `pwd:` / `token=`、`mysql://user:pass@`、`IDENTIFIED BY …`、`SET PASSWORD …` 这类写法。
 - 结果不会外发。但要知道两点：结果面板的最近一次结果会驻留在内存里（标签页隐藏时也是），`复制 TSV` 会把结果写进系统剪贴板并由其保留。共享机器上请注意剪贴板历史与其他窗口。
 
@@ -25,7 +26,7 @@
 
 1. 打开扩展开发主机或安装打包出的 `.vsix`。
 2. 在活动栏打开 `Doris SQL Lite`。
-3. 点击 `Add Connection`，在弹出的连接表单里一次填完类型、名称、主机、端口、database、用户名、密码和 SSL。可以先点 `测试连接` 验证，再点 `保存`。
+3. 点击 `Add Connection`，在弹出的连接表单里一次填完类型、名称、主机、端口、database、用户名、密码和 SSL（类型选 `Spark Thrift` 时会多出一个「认证方式」下拉）。可以先点 `测试连接` 验证，再点 `保存`。
 4. 右键连接创建 SQL 查询。第一次执行当前文件时选择连接；同一文件后续语句会复用这条活动连接，因此 `USE`、临时表和会话变量会继续生效。第一次选择的连接也会作为本次 VS Code 会话的默认连接；当前文件如果已指定连接，则优先使用当前文件的连接。
 5. 按 `Ctrl+Enter` 或右键 `Doris SQL Lite: Run Query at Cursor`：有选区时执行选中的单条 SQL；没有选区时自动执行光标所在或最近的一条 SQL。
 6. 查询可以取消：进度通知上的取消按钮，或命令面板执行 `Doris SQL Lite: Cancel Query`。取消走 `KILL QUERY`，活动连接会保留，`USE`、临时表和会话变量继续生效；服务端不响应时会退化为断开该连接。同一 SQL 文件不会并发启动重复查询。
@@ -86,17 +87,34 @@ database 默认留空且不是必填项，连接和 `Test Connection` 仍可用�
 - 连接流程更稳：database 不再带项目特定默认值，输入会自动清理首尾空格，命令面板调用编辑/删除/清除密码时也会先选择连接。
 
 
+## Spark Thrift（HiveServer2）
+
+类型选 `Spark Thrift` 后，连接走 Spark Thrift Server 的 HiveServer2 Thrift 协议，其余体验（结果面板、筛选、导出、取消、状态栏）与 MySQL/Doris 完全一致。
+
+- **端口**：默认 `10000`（HiveServer2 默认端口）。
+- **认证方式**（表单里按类型出现）：
+  - `SASL/PLAIN`（默认）—— 对应 `hive.server2.authentication=none` 或 `ldap`，填用户名和密码。
+  - `NOSASL` —— 对应 `hive.server2.authentication=nosasl`，裸 Thrift socket，不需要密码。
+  - Kerberos 不支持：它依赖需要本机编译的原生 `kerberos` 模块，没法随 VSIX 分发。
+- **协议版本**：从 `HIVE_CLI_SERVICE_PROTOCOL_V10` 起逐级向下重试到 `V6`。Spark 各版本打包的 Hive 版本不同（Spark 2.x 是 Hive 1.2，Spark 3.x/4.x 是 Hive 2.3+），协议版本不匹配时握手会直接失败，所以这里自动降级，不需要手动配置。
+- **database**：HiveServer2 的 `OpenSession` 没有「默认库」参数，因此扩展在会话建立后用 `` USE `库名` `` 选中它，和 beeline 的做法一致。留空则不执行 `USE`，后续语句写 `库名.表名` 即可。
+- **取消查询**：走 HiveServer2 的 `CancelOperation`，会话保留。这与 MySQL 那条「另开一条连接执行 `KILL QUERY`」的路径不同。
+- **连接串导入**：除 `mysql://` / `jdbc:mysql://` / `host:port` 外，也认 `jdbc:hive2://host:10000/db` 与 `hive2://`，并会剥掉 beeline 追加的会话属性（如 `;principal=hive/_HOST@REALM`）。
+- **结果类型**：`BIGINT` 超出 `Number.MAX_SAFE_INTEGER` 时以字符串返回，不丢精度（驱动自带的转换会丢）。`DECIMAL`、`DATE`、`TIMESTAMP` 以及 `ARRAY`/`MAP`/`STRUCT` 按服务端返回的原文展示与导出；`BINARY` 显示为 `0x…`。
+- **已知边界**：一次只执行一条 SQL；只支持 `binary` 传输模式（不支持 `http`）；不做连接池。
+
 ## 本地验证与打包
 
 - 编译：`node_modules/.bin/tsc.CMD -p .`
-- 测试：`node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js`
+- 测试：`node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js tests/export-path.test.js tests/hive-result.test.js`
 - 打包：`node scripts/package-runtime.js`
 
 打包脚本会把 `mysql2` 及其生产依赖一并放入 VSIX；安装后的扩展不依赖本机的 npm 或 SQLTools。
 
 ## 当前 MVP 边界
 
-- 每个 SQL 文件在当前扩展会话中最多保持一条活动 MySQL 连接；不同文件各自独立，关闭文件或扩展停用时释放，不做连接池。
+- 每个 SQL 文件在当前扩展会话中最多保持一条活动连接；不同文件各自独立，关闭文件或扩展停用时释放，不做连接池。
 - 一次执行只接受一条 SQL；无选区时自动选择光标所在语句，选区包含多条语句时仍会提示分开执行。
 - 结果面板默认最多渲染 1000 行（可通过 `dorisSqlLite.maxResultRows` 调整），面板不做虚拟滚动；导出不受此限制。
+- Spark Thrift 不支持 Kerberos 认证，也不支持 `http` 传输模式；结果集里复杂类型的展示取决于服务端返回的文本形式。
 - 目前不包含 SSH 隧道、SQL 智能补全、事务控制和可编辑表格。

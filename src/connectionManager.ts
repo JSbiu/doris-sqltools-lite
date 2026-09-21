@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import mysql from 'mysql2/promise';
 import {
   classifyDatabaseError,
   formatDatabaseError,
@@ -7,10 +6,11 @@ import {
 import {
   normalizeConnectionProfiles,
   prepareLegacyConnection,
-  redactErrorMessage,
   serializeConnectionProfile,
   type ConnectionProfile,
 } from './connectionSecurity';
+import type { QuerySession } from './querySession';
+import { openQuerySession } from './sessionFactory';
 
 // Shared connection-domain helpers. Kept in its own module so that
 // extension.ts and connectionForm.ts can both use it without a cycle.
@@ -133,14 +133,15 @@ export class ConnectionManager {
     return this.context.secrets.get(this.secretKey(id));
   }
 
-  // Opens a session connection, asking for the password only when nothing is
-  // stored. A wrong stored password is dropped and re-asked once, and a typed
-  // password is only persisted after the handshake actually succeeded.
-  public async open(profile: ConnectionProfile): Promise<mysql.Connection> {
+  // Opens a session, asking for the password only when nothing is stored. A
+  // wrong stored password is dropped and re-asked once, and a typed password is
+  // only persisted after the handshake actually succeeded. Which wire protocol
+  // is used is the session factory's business, not this class's.
+  public async open(profile: ConnectionProfile): Promise<QuerySession> {
     const stored = await this.readPassword(profile.id);
     if (stored !== undefined) {
       try {
-        return await this.connect(profile, stored);
+        return await openQuerySession(profile, stored);
       } catch (error) {
         if (classifyDatabaseError(error).kind !== 'auth') {
           throw error;
@@ -152,10 +153,10 @@ export class ConnectionManager {
       }
     }
 
-    return this.promptAndConnect(profile);
+    return this.promptAndOpen(profile);
   }
 
-  private async promptAndConnect(profile: ConnectionProfile): Promise<mysql.Connection> {
+  private async promptAndOpen(profile: ConnectionProfile): Promise<QuerySession> {
     const password = await vscode.window.showInputBox({
       title: `Password for ${profile.name}`,
       prompt:
@@ -169,52 +170,19 @@ export class ConnectionManager {
     }
 
     // Connect first, persist second: a rejected password must never be stored.
-    const connection = await this.connect(profile, password);
+    const session = await openQuerySession(profile, password);
     try {
       await this.savePassword(profile.id, password);
     } catch (error) {
-      await connection.end().catch(() => undefined);
+      await session.close();
       throw error;
     }
-    return connection;
+    return session;
   }
 
-  // Used by the connection form's "test connection" button: never prompts,
-  // never persists.
-  public async connect(
-    profile: ConnectionProfile,
-    password: string,
-    options: { omitDatabase?: boolean } = {},
-  ): Promise<mysql.Connection> {
-    try {
-      return await mysql.createConnection({
-        host: profile.host,
-        port: profile.port,
-        user: profile.username,
-        password,
-        database: options.omitDatabase ? undefined : profile.database || undefined,
-        ssl: profile.ssl ? {} : undefined,
-        connectTimeout: 10_000,
-        multipleStatements: false,
-        dateStrings: true,
-        supportBigNumbers: true,
-        bigNumberStrings: true,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(redactErrorMessage(message, [password]), { cause: error });
-    }
-  }
-
-  // A short-lived second connection used to KILL a running query without
-  // tearing down the session the user is working in. Skips the default
-  // database so a missing/unreadable database cannot block the kill.
-  public async openControlConnection(
-    profile: ConnectionProfile,
-    password: string,
-  ): Promise<mysql.Connection> {
-    return this.connect(profile, password, { omitDatabase: true });
-  }
+  // Both the raw connection options and the cancel control connection now live
+  // in the driver adapters (mysqlConnect.ts / mysqlSession.ts); the manager only
+  // deals in passwords and profiles.
 
   private secretKey(id: string): string {
     return `${this.secretPrefix}${id}`;

@@ -25,8 +25,13 @@ function findPackageRoot(filePath) {
   throw new Error(`Cannot find package root for ${filePath}`);
 }
 
+// Every runtime driver the extension can load. Anything reachable from these
+// manifests is copied into the VSIX, so a new driver must be listed here or the
+// packaged extension will fail at require time.
+const RUNTIME_ROOTS = ['mysql2', 'hive-driver'];
+
 function collectRuntimePackages() {
-  const queue = [{ name: 'mysql2', root: path.join(nodeModules, 'mysql2') }];
+  const queue = RUNTIME_ROOTS.map((name) => ({ name, root: path.join(nodeModules, name) }));
   const seen = new Set();
   const packages = [];
 

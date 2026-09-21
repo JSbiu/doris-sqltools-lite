@@ -1,4 +1,20 @@
-export type DatabaseType = 'MySQL' | 'Doris';
+export type DatabaseType = 'MySQL' | 'Doris' | 'Spark';
+
+export function isDatabaseType(value: unknown): value is DatabaseType {
+  return value === 'MySQL' || value === 'Doris' || value === 'Spark';
+}
+
+// Spark Thrift Server authenticates through HiveServer2. Its `none` (plain SASL)
+// and `ldap` settings share one code path, while `nosasl` is a raw Thrift
+// socket. Kerberos is deliberately absent: it needs a native module that cannot
+// be shipped inside a VSIX.
+export type HiveAuthMode = 'plain' | 'nosasl';
+
+export const HIVE_AUTH_MODES: readonly HiveAuthMode[] = ['plain', 'nosasl'];
+
+export function isHiveAuthMode(value: unknown): value is HiveAuthMode {
+  return value === 'plain' || value === 'nosasl';
+}
 
 export interface ConnectionProfile {
   id: string;
@@ -9,6 +25,8 @@ export interface ConnectionProfile {
   database?: string;
   username: string;
   ssl?: boolean;
+  // Only meaningful for Spark; the MySQL/Doris path ignores it.
+  hiveAuth?: HiveAuthMode;
 }
 
 type RecordValue = Record<string, unknown>;
@@ -45,7 +63,9 @@ export function normalizeConnectionProfile(value: unknown): ConnectionProfile | 
     !host ||
     !username ||
     !isValidPort(port) ||
-    (type !== 'MySQL' && type !== 'Doris')
+    // Must accept every driver type, otherwise a Spark profile is silently
+    // dropped from the connection list.
+    !isDatabaseType(type)
   ) {
     return undefined;
   }
@@ -64,6 +84,11 @@ export function normalizeConnectionProfile(value: unknown): ConnectionProfile | 
   if (typeof value.ssl === 'boolean') {
     profile.ssl = value.ssl;
   }
+  // Anything else -- including a Kerberos-ish value an edited settings file
+  // might carry -- is dropped rather than passed to the driver.
+  if (isHiveAuthMode(value.hiveAuth)) {
+    profile.hiveAuth = value.hiveAuth;
+  }
   return profile;
 }
 
@@ -81,6 +106,12 @@ export function serializeConnectionProfile(profile: ConnectionProfile): Connecti
   }
   if (profile.ssl !== undefined) {
     serialized.ssl = profile.ssl;
+  }
+  // Must be listed here too, otherwise the setting round-trip silently drops the
+  // chosen authentication mode. Note this whitelist is what keeps `password` out
+  // of settings.json -- never widen it to a spread.
+  if (profile.hiveAuth !== undefined) {
+    serialized.hiveAuth = profile.hiveAuth;
   }
   return serialized;
 }

@@ -39,6 +39,14 @@ const RULES: readonly DiagnosticRule[] = [
     summary: '查询已被服务端中断。',
   },
   {
+    // Spark Thrift Server is built on the Hive version its Spark release bundles,
+    // so a protocol version the server predates fails the handshake outright.
+    kind: 'server',
+    patterns: [/required field 'client_protocol' is unset/i, /unsupported client protocol/i],
+    summary: 'Spark Thrift 的协议版本不匹配。',
+    hint: '扩展会从高到低自动降级重试；如果仍然失败，请确认服务端的 Spark 版本是否受支持。',
+  },
+  {
     kind: 'permission',
     codes: ['ER_HOST_NOT_PRIVILEGED', 'ER_HOST_IS_BLOCKED'],
     summary: '服务端拒绝来自这台机器的连接：该账号没有授权当前来源 IP。',
@@ -47,7 +55,15 @@ const RULES: readonly DiagnosticRule[] = [
   {
     kind: 'auth',
     codes: ['ER_ACCESS_DENIED_ERROR', 'ER_ACCESS_DENIED_NO_PASSWORD_ERROR'],
-    patterns: [/access denied for user/i],
+    patterns: [
+      /access denied for user/i,
+      // HiveServer2 / Spark Thrift answers a failed SASL PLAIN or LDAP login
+      // with one of these instead of a MySQL-style error code.
+      /error validating the login/i,
+      /authentication failed/i,
+      /invalid username or password/i,
+      /peer indicated failure/i,
+    ],
     summary: '用户名或密码错误。',
     hint: '执行 Doris SQL Lite: Forget Saved Password 清除已保存的密码后重新输入。',
   },
@@ -61,7 +77,8 @@ const RULES: readonly DiagnosticRule[] = [
   {
     kind: 'database',
     codes: ['ER_BAD_DB_ERROR'],
-    patterns: [/unknown database/i],
+    // Hive/Spark report a missing database or schema in their own wording.
+    patterns: [/unknown database/i, /database .* does not exist/i, /database .* not found/i, /schema_not_found/i],
     summary: 'database 不存在，或当前账号看不到它。',
     hint: '检查连接配置里的 database 拼写，或留空后手动执行 USE。',
   },
@@ -77,6 +94,19 @@ const RULES: readonly DiagnosticRule[] = [
     codes: ['ER_DBACCESS_DENIED_ERROR', 'ER_TABLEACCESS_DENIED_ERROR', 'ER_COLUMNACCESS_DENIED_ERROR'],
     summary: '当前账号没有访问该对象的权限。',
     hint: '联系 DBA 授权，或换一个有权限的账号。',
+  },
+  {
+    kind: 'permission',
+    // HiveServer2 / Spark deny access by exception name rather than by code.
+    patterns: [
+      /permission denied/i,
+      /hiveaccesscontrolexception/i,
+      /authorization failed/i,
+      /no privileges/i,
+      /does not have .{0,40}privilege/i,
+    ],
+    summary: '当前账号没有访问该对象的权限。',
+    hint: '联系管理员授权，或换一个有权限的账号。',
   },
   {
     kind: 'network',
@@ -105,6 +135,8 @@ const RULES: readonly DiagnosticRule[] = [
   {
     kind: 'network',
     codes: ['ECONNRESET', 'EPIPE'],
+    // A closed Thrift transport surfaces as plain text, not as a socket code.
+    patterns: [/transport is closed/i, /connection is closed/i, /socket hang up/i],
     summary: '连接被对端重置。',
     hint: '可能是服务端踢掉了空闲连接或网络抖动，重跑一次即可。',
   },
@@ -141,8 +173,15 @@ const RULES: readonly DiagnosticRule[] = [
   },
   {
     kind: 'sql',
+    // Spark wraps a bad statement in these; they arrive with no usable code.
+    patterns: [/parseexception/i, /analysisexception/i, /cannot resolve/i, /undefined function/i, /mismatched input/i],
+    summary: 'Spark/Hive 无法解析这条 SQL。',
+    hint: 'Spark SQL 与 MySQL 语法并不完全兼容，检查表名、列名与函数名。',
+  },
+  {
+    kind: 'sql',
     codes: ['ER_NO_SUCH_TABLE', 'ER_UNKNOWN_TABLE'],
-    patterns: [/table .* doesn't exist/i, /unknown table/i],
+    patterns: [/table .* doesn't exist/i, /unknown table/i, /table or view not found/i, /table not found/i],
     summary: '表不存在。',
     hint: '确认 database 是否选对，可先执行 SELECT DATABASE()。',
   },
@@ -200,6 +239,45 @@ export function classifyDatabaseError(error: unknown): DatabaseErrorAdvice {
 
 export function isAuthFailure(error: unknown): boolean {
   return classifyDatabaseError(error).kind === 'auth';
+}
+
+// Socket-level failures mean the session is unusable and must be dropped rather
+// than reused. Covers the mysql2 codes plus the ones a Thrift/HiveServer2
+// transport raises, so both drivers can share one check.
+const CONNECTION_FAILURE_CODES = new Set([
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ERR_SOCKET_CLOSED',
+  'PROTOCOL_CONNECTION_LOST',
+  'PROTOCOL_ENQUEUE_AFTER_DESTROY',
+  'PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR',
+  'PROTOCOL_ENQUEUE_AFTER_QUIT',
+  'PROTOCOL_SEQUENCE_TIMEOUT',
+]);
+
+// A closed Thrift transport says so in prose rather than with a socket code, so
+// the message has to be checked too -- otherwise a Spark session whose socket
+// died would be handed to the next statement.
+const CONNECTION_FAILURE_PATTERNS: readonly RegExp[] = [
+  /transport is closed/i,
+  /connection is closed/i,
+  /socket hang up/i,
+  /connection reset/i,
+];
+
+export function isConnectionFailure(error: unknown): boolean {
+  const code = errorCode(error);
+  if (code !== undefined && CONNECTION_FAILURE_CODES.has(code)) {
+    return true;
+  }
+  const message = rawErrorMessage(error);
+  return CONNECTION_FAILURE_PATTERNS.some((pattern) => pattern.test(message));
 }
 
 // Renders a human-readable, secret-safe message for the VS Code UI. Messages

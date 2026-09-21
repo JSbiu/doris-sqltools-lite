@@ -1,5 +1,13 @@
 export type Row = Record<string, unknown>;
 
+// What every driver hands back, before the panel cap is applied. Lives here so
+// the drivers can depend on it without importing the session interfaces.
+export interface QueryOutcome {
+  rows: Row[];
+  columns: string[];
+  affectedRows: number;
+}
+
 export interface QueryResultView {
   // Rows shown in the panel, capped by maxResultRows. Copy uses these.
   rows: Row[];
@@ -16,22 +24,39 @@ interface SqlStatementRange {
   end: number;
 }
 
+// normalizes a mysql2 `[rows, fields]` pair into the driver-neutral shape.
+export function normalizeMysqlResult(rawResult: unknown, rawFields: unknown): QueryOutcome {
+  const rows = normalizeRows(rawResult);
+  const fields = normalizeFields(rawFields);
+  return {
+    rows,
+    columns: fields.length > 0 ? fields : Object.keys(rows[0] ?? {}),
+    affectedRows: getAffectedRows(rawResult),
+  };
+}
+
+export function createQueryResultViewFromOutcome(
+  outcome: QueryOutcome,
+  maxRows: number,
+): QueryResultView {
+  const safeMaxRows = Number.isInteger(maxRows) && maxRows >= 1 ? maxRows : 1000;
+  const allRows = outcome.rows;
+  return {
+    rows: allRows.slice(0, safeMaxRows),
+    allRows,
+    columns: outcome.columns,
+    affectedRows: outcome.affectedRows,
+    truncated: allRows.length > safeMaxRows,
+    totalRows: allRows.length,
+  };
+}
+
 export function createQueryResultView(
   rawResult: unknown,
   rawFields: unknown,
   maxRows: number,
 ): QueryResultView {
-  const safeMaxRows = Number.isInteger(maxRows) && maxRows >= 1 ? maxRows : 1000;
-  const allRows = normalizeRows(rawResult);
-  const fields = normalizeFields(rawFields);
-  return {
-    rows: allRows.slice(0, safeMaxRows),
-    allRows,
-    columns: fields.length > 0 ? fields : Object.keys(allRows[0] ?? {}),
-    affectedRows: getAffectedRows(rawResult),
-    truncated: allRows.length > safeMaxRows,
-    totalRows: allRows.length,
-  };
+  return createQueryResultViewFromOutcome(normalizeMysqlResult(rawResult, rawFields), maxRows);
 }
 
 export function hasMultipleStatements(sql: string): boolean {

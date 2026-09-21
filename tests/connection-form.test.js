@@ -33,8 +33,69 @@ const draft = (overrides) => ({
   username: 'root',
   password: '',
   ssl: false,
+  hiveAuth: 'plain',
   clearSavedPassword: false,
   ...overrides,
+});
+
+test('defaults Spark Thrift to the HiveServer2 port', () => {
+  assert.equal(DEFAULT_PORTS.Spark, 10000);
+  assert.equal(emptyDraft('Spark').port, '10000');
+  // Kerberos is not offered, so plain is the only sane default.
+  assert.equal(emptyDraft('Spark').hiveAuth, 'plain');
+});
+
+test('parses a beeline-style Hive JDBC url', () => {
+  assert.deepEqual(parseConnectionUrl('jdbc:hive2://10.0.0.7:10000/analytics'), {
+    host: '10.0.0.7',
+    port: '10000',
+    database: 'analytics',
+  });
+});
+
+test('strips the session properties beeline appends to a Hive url', () => {
+  const parsed = parseConnectionUrl('jdbc:hive2://10.0.0.7:10000/dw;principal=hive/_HOST@EXAMPLE.COM');
+
+  assert.equal(parsed.host, '10.0.0.7');
+  assert.equal(parsed.port, '10000');
+  assert.equal(parsed.database, 'dw');
+});
+
+test('reads credentials out of a Hive url', () => {
+  assert.deepEqual(parseConnectionUrl('hive2://hive:pw%40ss@10.0.0.7:10000/dw'), {
+    host: '10.0.0.7',
+    port: '10000',
+    username: 'hive',
+    password: 'pw@ss',
+    database: 'dw',
+  });
+});
+
+test('keeps a semicolon that belongs to the Hive credentials', () => {
+  const parsed = parseConnectionUrl('hive2://hive:pa;ss@10.0.0.7:10000/dw');
+
+  assert.equal(parsed.username, 'hive');
+  assert.equal(parsed.password, 'pa;ss');
+  assert.equal(parsed.database, 'dw');
+});
+
+test('only writes hiveAuth onto Spark profiles', () => {
+  assert.equal(draftToProfile(draft({ type: 'MySQL', port: '3306' }), 'id').hiveAuth, undefined);
+  assert.equal(draftToProfile(draft({ type: 'Doris' }), 'id').hiveAuth, undefined);
+  assert.equal(draftToProfile(draft({ type: 'Spark', port: '10000' }), 'id').hiveAuth, 'plain');
+  assert.equal(
+    draftToProfile(draft({ type: 'Spark', port: '10000', hiveAuth: 'nosasl' }), 'id').hiveAuth,
+    'nosasl',
+  );
+});
+
+test('round-trips the Spark authentication mode through edit', () => {
+  const existing = profile({ type: 'Spark', port: 10000, hiveAuth: 'nosasl' });
+
+  assert.equal(draftFromProfile(existing).hiveAuth, 'nosasl');
+  assert.equal(draftFromProfile(existing).port, '10000');
+  // The saved password still never comes back into the form.
+  assert.equal(draftFromProfile(existing).password, '');
 });
 
 test('rejects an empty required field', () => {
@@ -96,7 +157,7 @@ test('starts a new draft with type-specific defaults', () => {
   assert.equal(emptyDraft().port, '9030');
   assert.equal(emptyDraft('MySQL').port, '3306');
   assert.equal(emptyDraft().password, '');
-  assert.deepEqual(DEFAULT_PORTS, { Doris: 9030, MySQL: 3306 });
+  assert.deepEqual(DEFAULT_PORTS, { Doris: 9030, MySQL: 3306, Spark: 10000 });
 });
 
 test('never pre-fills the saved password when editing', () => {
