@@ -1,18 +1,22 @@
+# The entire runtime lives inside dist/extension.js, so only that bundle,
+# package.json, the readme, the licence and the icon are shipped. Everything a
+# developer needs stays out of the package.
+src/**
+out/**
+dist/*.map
+tests/**
+scripts/**
+node_modules/**
 .local/**
 .vscode/**
-.github/**
 .packaging/**
 .workbuddy/**
-scripts/**
+.github/**
 AGENTS.md
 .gitignore
 eslint.config.mjs
-!node_modules/
-!node_modules/mysql2/
-!node_modules/mysql2/**
-src/**
-tests/**
 tsconfig.json
 pnpm-lock.yaml
 pnpm-workspace.yaml
 *.tsbuildinfo
+*.vsix

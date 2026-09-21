@@ -109,11 +109,16 @@ database 默认留空且不是必填项，连接和 `Test Connection` 仍可用�
 
 ## 本地验证与打包
 
-- 编译：`node_modules/.bin/tsc.CMD -p .`
+- 构建 bundle：`node scripts/build.js`
+- Bundle 冒烟检查：`node scripts/check-bundle.js`（在 VS Code 之外加载 `dist/extension.js`、跑一遍 `activate()`、并验证两个驱动在 bundle 内可用）
+- Webview 检查：`node scripts/check-webview.js`
+- 编译（只有测试需要，产物在 `out/`）：`node_modules/.bin/tsc.CMD -p .`
 - 测试：`node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js tests/export-path.test.js tests/hive-result.test.js`
-- 打包：`node scripts/package-runtime.js`
+- 打包：`node scripts/package-runtime.js`（会先构建 bundle）
 
-打包脚本会把 `mysql2` 及其生产依赖一并放入 VSIX；安装后的扩展不依赖本机的 npm 或 SQLTools。
+`pnpm test` 把上面几步串成一条链。改动 `src/` 后需要重建 bundle：`pnpm run watch`，或用 `pnpm run watch:types` 只做类型检查的 watch —— **F5 调试加载的是 `dist/extension.js`，只跑 `tsc -w` 会让调试主机一直执行旧代码。**
+
+扩展的运行时是**单个 esbuild bundle**（`dist/extension.js`）。VSIX 里只有这个文件加 `package.json`、README、LICENSE 和图标，不再打包 `node_modules`（722 个文件降到 7 个）。安装后的扩展不依赖本机的 npm 或 SQLTools。
 
 ## 当前 MVP 边界
 

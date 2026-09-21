@@ -3,6 +3,7 @@ node_modules/
 
 # Generated TypeScript and extension package output
 out/
+dist/
 *.tsbuildinfo
 *.vsix
 .packaging/
