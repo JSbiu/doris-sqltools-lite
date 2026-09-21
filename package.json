@@ -16,11 +16,6 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:dorisSqlLiteExplorer",
-    "onCommand:dorisSqlLite.addConnection",
-    "onCommand:dorisSqlLite.setConnection",
-    "onCommand:dorisSqlLite.editConnection",
-    "onCommand:dorisSqlLite.cancelQuery",
     "onLanguage:sql"
   ],
   "main": "./out/extension.js",
