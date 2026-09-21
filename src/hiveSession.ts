@@ -1,3 +1,4 @@
+import { createConnection } from 'node:net';
 import { HiveClient, auth, connections, thrift } from 'hive-driver';
 import { isConnectionFailure } from './connectionDiagnostics';
 import type { ConnectionProfile } from './connectionSecurity';
@@ -48,6 +49,12 @@ const STATUS_POLL_INTERVAL_MS = 200;
 // against a server started with `--auth nosasl`, a SASL/PLAIN client gets no
 // reply at all rather than an error.
 const HANDSHAKE_TIMEOUT_MS = 20_000;
+
+// A dropped SYN and a silent server look identical to the handshake timeout, so
+// the socket is probed first and the two are reported differently. Kept under
+// the handshake timeout so a filtered port reports the network problem rather
+// than a misleading authentication one.
+const TCP_PROBE_TIMEOUT_MS = 15_000;
 
 type HiveClientInstance = InstanceType<typeof HiveClient>;
 type HiveSessionHandle = Awaited<ReturnType<HiveClientInstance['openSession']>>;
@@ -109,6 +116,8 @@ export async function openHiveSession(
   profile: ConnectionProfile,
   password: string,
 ): Promise<QuerySession> {
+  await probeTcpReachable(profile.host, profile.port);
+
   const client = new HiveClient(TCLIService, TCLIService_types);
   // EventEmitter turns an unhandled 'error' into a thrown exception, which in
   // an extension host means a crash. Keep it from ever escaping, and replay it
@@ -178,13 +187,51 @@ class HandshakeTimeoutError extends Error {
   public constructor() {
     super(
       `连接超时：${HANDSHAKE_TIMEOUT_MS / 1000} 秒内没有完成 HiveServer2 握手。` +
-        '请先确认主机和端口可访问。' +
-        '如果地址正确，通常意味着认证方式不匹配：Spark Thrift Server 默认使用 SASL/PLAIN' +
-        '（启动参数 --auth none），若服务端以 --auth nosasl 启动，' +
-        '需要在连接表单里把认证方式改成 NOSASL。',
+        '端口是通的（TCP 已经连上），所以问题几乎总是认证方式对不上：' +
+        'Spark Thrift Server 默认用 SASL/PLAIN（启动参数 --auth none），' +
+        '若服务端以 --auth nosasl 启动，需要在连接表单里把认证方式改成 NOSASL；反之亦然。',
     );
     this.name = 'HandshakeTimeoutError';
   }
+}
+
+// Probes the port before handing it to the driver. Without this, a host that
+// silently drops packets is reported by the handshake timeout as an
+// authentication problem -- verified: an unroutable address produced the
+// "认证方式不匹配" message after 20s. A plain socket also surfaces the real errno
+// (ECONNREFUSED / ETIMEDOUT / ENOTFOUND / EHOSTUNREACH), which the diagnostics
+// layer turns into accurate advice instead of a bare "connect ETIMEDOUT".
+function probeTcpReachable(host: string, port: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const socket = createConnection({ host, port });
+    let settled = false;
+
+    const finish = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+
+    socket.setTimeout(TCP_PROBE_TIMEOUT_MS);
+    socket.once('connect', () => finish());
+    socket.once('timeout', () =>
+      finish(
+        new Error(
+          `连接 ${host}:${port} 超时（${TCP_PROBE_TIMEOUT_MS / 1000} 秒内无响应）。` +
+            '地址或端口可能不对，也可能是防火墙 / 安全组把数据包丢弃了。',
+        ),
+      ),
+    );
+    socket.once('error', (error: Error) => finish(error));
+  });
 }
 
 // Wraps a handshake step so it cannot outlive HANDSHAKE_TIMEOUT_MS. `onTimeout`

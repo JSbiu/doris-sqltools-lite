@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
-import { isHiveAuthMode, redactErrorMessage, type ConnectionProfile } from './connectionSecurity';
+import { formatDatabaseError } from './connectionDiagnostics';
+import { isHiveAuthMode, type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, showError } from './connectionManager';
 import { testQuerySession } from './sessionFactory';
 
@@ -204,8 +205,10 @@ async function testDraft(
     await testQuerySession(profile, password);
     return { ok: true, message: `连接成功：${profile.host}:${profile.port}` };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, message: redactErrorMessage(message, [password]) };
+    // Route through the diagnostics layer. A bare "connect ETIMEDOUT host:port"
+    // tells the user nothing actionable; this adds the Chinese summary, the
+    // advice and the errno, and it redacts secrets on the way through.
+    return { ok: false, message: formatDatabaseError(error, [password]) };
   }
 }
 

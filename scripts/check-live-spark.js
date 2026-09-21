@@ -367,13 +367,18 @@ async function main() {
 
   // ------------------------------------------------ 10. wrong auth mode
   console.log('\n-- authentication mode mismatch --');
+  // Declared outside the try, under a deliberately distinct name. A `const`
+  // inside the try block is NOT visible from the catch block, and the reference
+  // then silently resolves to the outer `startedAt` -- which made `elapsed`
+  // measure the whole script's runtime instead of this check's. That mistake
+  // hid here for several runs before being spotted.
+  const mismatchStartedAt = Date.now();
   try {
     const wrongAuth = AUTH === 'plain' ? 'nosasl' : 'plain';
-    const startedAt = Date.now();
     await openHiveSession({ ...profile, hiveAuth: wrongAuth }, PASSWORD);
     check('a mismatched auth mode fails fast instead of hanging', false, 'connected unexpectedly');
   } catch (error) {
-    const elapsed = Date.now() - startedAt;
+    const elapsed = Date.now() - mismatchStartedAt;
     const message = String((error && error.message) || error);
     // Either direction is fine as long as it settles: a PLAIN client against a
     // NOSASL server hangs until the handshake timeout fires, while the reverse
@@ -381,7 +386,7 @@ async function main() {
     // never settles, which is what this guards.
     check(
       'a mismatched auth mode fails instead of hanging',
-      elapsed < 30000,
+      elapsed < 60000,
       `${elapsed} ms: ${message.slice(0, 70)}`,
     );
   }

@@ -125,7 +125,7 @@ database 默认留空且不是必填项，连接和 `Test Connection` 仍可用�
 - Bundle 冒烟检查：`node scripts/check-bundle.js`（在 VS Code 之外加载 `dist/extension.js`、跑一遍 `activate()`、并验证两个驱动在 bundle 内可用）
 - Webview 检查：`node scripts/check-webview.js`
 - 编译（只有测试需要，产物在 `out/`）：`node_modules/.bin/tsc.CMD -p .`
-- 测试：`node --test tests/`
+- 测试：`node --test "tests/**/*.test.js"`（glob 由 Node 自己展开。**不要写成 `node --test tests`** —— 在 Windows 上 Node 会把它当成模块路径而失败）
 - 打包：`node scripts/package-runtime.js`（会先构建 bundle）
 - 对**真实 MySQL** 跑端到端流式检查：`node scripts/check-live-mysql.js --host=127.0.0.1 --port=3306 --user=root --password=… --database=… [--seed]`
 - 对**真实 Spark Thrift Server** 跑端到端检查：`node scripts/check-live-spark.js --host=127.0.0.1 --port=10000 --auth=plain`。`--auth` 取 `plain` 或 `nosasl`，必须和服务端启动参数一致。脚本会自建 `e2e_types` 表和 `e2e_db` 库，所以只对一次性测试实例使用。

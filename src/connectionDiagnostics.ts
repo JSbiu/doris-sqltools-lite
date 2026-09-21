@@ -117,8 +117,8 @@ const RULES: readonly DiagnosticRule[] = [
   {
     kind: 'network',
     codes: ['ETIMEDOUT'],
-    summary: '连接超时：10 秒内没能连上。',
-    hint: '确认主机地址与端口，检查防火墙或安全组是否放行。',
+    summary: '连接超时：主机没有回应（TCP 握手未完成）。',
+    hint: '通常是地址或端口不对，或防火墙 / 安全组把数据包丢弃了。可在本机执行 Test-NetConnection <主机> -Port <端口>，或用 telnet <主机> <端口> 确认端口是否可达。',
   },
   {
     kind: 'network',
