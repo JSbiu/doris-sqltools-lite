@@ -9,15 +9,16 @@ import { ConnectionManager, sameConnectionTarget, showError } from './connection
 import { openConnectionForm } from './connectionForm';
 import {
   displayValue,
+  encodeTsvHeader,
+  encodeTsvRows,
   isExportFormat,
   toTsv,
-  toTsvBlocks,
   TSV_CHUNK_ROWS,
   type ExportFormat,
 } from './exports';
 import { buildExportFileName, normalizeExportDirectory } from './exportPath';
 import {
-  createQueryResultViewFromOutcome,
+  createRowCollector,
   findSqlStatementAtOffset,
   hasMultipleStatements,
   type QueryResultView,
@@ -29,6 +30,7 @@ import {
   neverCancelled,
   type CancelSignal,
   type QuerySession,
+  type RowSink,
 } from './querySession';
 
 type ConnectionSessionState = {
@@ -81,6 +83,13 @@ interface ResultPanelMetadata {
   database?: string;
   durationMs: number;
   maxRows: number;
+  // Enough to run the statement again. Rows past maxResultRows are counted but
+  // never stored, so a truncated result has no full set in memory to export.
+  rerun?: {
+    manager: ConnectionManager;
+    profile: ConnectionProfile;
+    sql: string;
+  };
 }
 
 async function closeDocumentConnection(
@@ -157,7 +166,6 @@ class ResultPanel {
   private static current: ResultPanel | undefined;
   private result: QueryResultView = {
     rows: [],
-    allRows: [],
     columns: [],
     affectedRows: 0,
     truncated: false,
@@ -227,12 +235,6 @@ class ResultPanel {
 
   private get rows(): Row[] {
     return this.result.rows;
-  }
-
-  // Export covers the full result set; the panel and the clipboard copy only
-  // ever deal with the capped view.
-  private get exportRows(): Row[] {
-    return this.result.allRows;
   }
 
   private get columns(): string[] {
@@ -388,11 +390,25 @@ class ResultPanel {
   private async export(format: ExportFormat, options: { chooseLocation?: boolean } = {}): Promise<boolean> {
     const extension = format;
     const title = this.title;
-    const rows = this.exportRows;
     const columns = this.columns;
-    if (rows.length > EXPORT_CONFIRM_ROW_THRESHOLD) {
+    const keptRows = this.rows;
+    const totalRows = this.result.totalRows;
+    // Rows past maxResultRows are counted but discarded, so a truncated result
+    // can only be exported by running the statement a second time.
+    const rerun = this.result.truncated ? this.metadata.rerun : undefined;
+
+    if (this.result.truncated && !rerun) {
+      void vscode.window.showWarningMessage(
+        `这次查询返回 ${totalRows} 行，面板只保留了前 ${keptRows.length} 行，无法导出完整结果。请重新执行一次查询后再导出。`,
+      );
+      return false;
+    }
+
+    if (totalRows > EXPORT_CONFIRM_ROW_THRESHOLD) {
       const answer = await vscode.window.showWarningMessage(
-        `将导出 ${rows.length} 行，文件可能很大。确认继续？`,
+        rerun
+          ? `将导出 ${totalRows} 行。结果超出了面板保留上限，导出会重新执行一次该查询。确认继续？`
+          : `将导出 ${totalRows} 行，文件可能很大。确认继续？`,
         { modal: true },
         '继续导出',
       );
@@ -407,11 +423,12 @@ class ResultPanel {
       const target = join(directory, defaultName);
       try {
         await mkdir(directory, { recursive: true });
-        const written = await this.exportTo(vscode.Uri.file(target), rows, columns);
-        if (written) {
-          vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${target}`);
+        const written = await this.exportTo(vscode.Uri.file(target), columns, keptRows, rerun);
+        if (written === undefined) {
+          return false;
         }
-        return written;
+        vscode.window.showInformationMessage(`已导出 ${written} 行到 ${target}`);
+        return true;
       } catch (error) {
         // A stale or unwritable default directory must never block the export.
         const reason = error instanceof Error ? error.message : String(error);
@@ -432,45 +449,69 @@ class ResultPanel {
       return false;
     }
 
-    const written = await this.exportTo(uri, rows, columns);
-    if (written) {
-      vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${uri.fsPath}`);
+    const written = await this.exportTo(uri, columns, keptRows, rerun);
+    if (written === undefined) {
+      return false;
     }
-    return written;
+    vscode.window.showInformationMessage(`已导出 ${written} 行到 ${uri.fsPath}`);
+    return true;
   }
 
-  // Writes behind a cancellable notification. The row count is already known
-  // because the whole result set is buffered, so the bar is exact rather than an
-  // indeterminate spinner.
-  private async exportTo(uri: vscode.Uri, rows: Row[], columns: string[]): Promise<boolean> {
-    const total = rows.length;
+  // Writes behind a cancellable notification. A result the panel kept in full is
+  // written straight from memory, so the bar is exact; a truncated one is
+  // re-run, and since its size cannot be known up front the bar reports the
+  // count reached instead. Returns undefined when the user cancelled.
+  private async exportTo(
+    uri: vscode.Uri,
+    columns: string[],
+    keptRows: Row[],
+    rerun: { manager: ConnectionManager; profile: ConnectionProfile; sql: string } | undefined,
+  ): Promise<number | undefined> {
     const chunkRows = configuredExportChunkRows();
     const escapeFormulas = configuredEscapeFormulas();
     let lastRatio = 0;
     let cancelled = false;
+    let written = 0;
 
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `导出 ${total} 行`,
+        title: rerun ? '导出结果（重新执行查询）' : `导出 ${keptRows.length} 行`,
         cancellable: true,
       },
       async (progress, token) => {
-        try {
-          await writeTsvFile(uri, rows, columns, {
-            chunkRows,
-            escapeFormulas,
-            token,
-            onProgress: (written) => {
-              const ratio = total === 0 ? 1 : Math.min(written / total, 1);
-              progress.report({
-                message: `${written} / ${total} 行`,
-                increment: Math.max((ratio - lastRatio) * 100, 0),
-              });
-              lastRatio = ratio;
-            },
+        const report = (rowsWritten: number): void => {
+          if (rerun) {
+            progress.report({ message: `已导出 ${rowsWritten} 行…` });
+            return;
+          }
+          const ratio = keptRows.length === 0 ? 1 : Math.min(rowsWritten / keptRows.length, 1);
+          progress.report({
+            message: `${rowsWritten} / ${keptRows.length} 行`,
+            increment: Math.max((ratio - lastRatio) * 100, 0),
           });
+          lastRatio = ratio;
+        };
+
+        const writer = createTsvWriter(uri, columns, {
+          chunkRows,
+          escapeFormulas,
+          token,
+          onProgress: report,
+        });
+
+        try {
+          await writer.begin();
+          if (rerun) {
+            await runForExport(rerun, writer, token);
+          } else {
+            for (const row of keptRows) {
+              await writer.write(row);
+            }
+          }
+          written = await writer.finish();
         } catch (error) {
+          await writer.abort();
           if (!isQueryCancelled(error)) {
             throw error;
           }
@@ -481,9 +522,9 @@ class ResultPanel {
 
     if (cancelled) {
       vscode.window.showInformationMessage('已取消导出，未写完的文件已删除。');
-      return false;
+      return undefined;
     }
-    return true;
+    return written;
   }
 
   public async copyToClipboard(): Promise<void> {
@@ -494,6 +535,52 @@ class ResultPanel {
         `已复制当前显示的 ${rows.length} 行（共 ${this.result.totalRows} 行）；需要全部数据请用导出。`,
       );
     }
+  }
+}
+
+// Runs the statement again and feeds the rows straight into the writer. Uses its
+// own connection so a long export cannot disturb the session the user is working
+// in (USE / temp tables / session variables stay put).
+async function runForExport(
+  rerun: { manager: ConnectionManager; profile: ConnectionProfile; sql: string },
+  writer: TsvWriter,
+  token: vscode.CancellationToken,
+): Promise<void> {
+  const session = await rerun.manager.open(rerun.profile);
+  const listeners = new Set<() => void>();
+  const signal: CancelSignal = {
+    get requested(): boolean {
+      return token.isCancellationRequested;
+    },
+    onRequest(listener: () => void) {
+      listeners.add(listener);
+      return {
+        dispose: () => {
+          listeners.delete(listener);
+        },
+      };
+    },
+  };
+  const subscription = token.onCancellationRequested(() => {
+    for (const listener of [...listeners]) {
+      listener();
+    }
+  });
+
+  try {
+    const sink: RowSink = {
+      onColumns: () => undefined,
+      onAffectedRows: () => undefined,
+      onRow: (row) => writer.write(row),
+    };
+    await session.execute(rerun.sql, signal, sink);
+    if (token.isCancellationRequested) {
+      throw new QueryCancelledError('导出已取消。');
+    }
+  } finally {
+    subscription.dispose();
+    listeners.clear();
+    await session.close().catch(() => undefined);
   }
 }
 
@@ -516,63 +603,97 @@ function yieldToEventLoop(): Promise<void> {
   });
 }
 
-// Writes TSV in bounded blocks so a large export never has to materialise one
-// huge string. Non-file targets have no streaming API, so the blocks are
-// collected as Buffers there -- bytes rather than a JS string, which keeps the
-// payload clear of V8's ~512MB string ceiling.
-async function writeTsvFile(
+interface TsvWriter {
+  // Writes the header row.
+  begin(): Promise<void>;
+  write(row: Row): Promise<void>;
+  // Flushes the tail, closes the target and reports how many data rows landed.
+  finish(): Promise<number>;
+  // Drops the half-written target.
+  abort(): Promise<void>;
+}
+
+// Accepts rows one at a time so a result set can be exported without being
+// materialised first: the rows a re-run produces go straight to disk. Blocks
+// stay bounded, which also keeps the intermediate string well clear of V8's
+// ~512MB ceiling. Non-file targets have no streaming API, so the blocks are
+// collected as Buffers there and written once -- bytes rather than a JS string.
+function createTsvWriter(
   uri: vscode.Uri,
-  rows: Row[],
   columns: string[],
   options: WriteTsvOptions,
-): Promise<void> {
+): TsvWriter {
   const { chunkRows, escapeFormulas, token, onProgress } = options;
   const encodeOptions = { escapeFormulas };
+  const header = encodeTsvHeader(columns, encodeOptions);
 
-  // The generator yields the header first, so only later blocks count as rows.
-  let headerPending = true;
+  let buffer: Row[] = [];
   let writtenRows = 0;
-  const reportBlock = (): void => {
-    if (headerPending) {
-      headerPending = false;
-    } else {
-      writtenRows = Math.min(writtenRows + chunkRows, rows.length);
+  let parts: Buffer[] | undefined;
+  let stream: ReturnType<typeof createWriteStream> | undefined;
+
+  const flush = async (): Promise<void> => {
+    if (buffer.length === 0) {
+      return;
+    }
+    const block = encodeTsvRows(buffer, columns, encodeOptions);
+    writtenRows += buffer.length;
+    buffer = [];
+
+    if (parts) {
+      parts.push(Buffer.from(block, 'utf8'));
+    } else if (stream) {
+      if (!stream.write(block)) {
+        await once(stream, 'drain');
+      }
+      // When the write buffer never fills there is nothing above to await, so
+      // hand the event loop a turn; otherwise a fast disk makes the whole loop
+      // synchronous and neither the progress bar nor cancellation is observed.
+      await yieldToEventLoop();
     }
     onProgress(writtenRows);
   };
 
-  if (uri.scheme !== 'file') {
-    const parts: Buffer[] = [];
-    for (const block of toTsvBlocks(rows, columns, chunkRows, encodeOptions)) {
-      throwIfCancelled(token);
-      parts.push(Buffer.from(block, 'utf8'));
-      reportBlock();
-    }
-    await vscode.workspace.fs.writeFile(uri, Buffer.concat(parts));
-    return;
-  }
-
-  const stream = createWriteStream(uri.fsPath, { encoding: 'utf8' });
-  try {
-    for (const block of toTsvBlocks(rows, columns, chunkRows, encodeOptions)) {
-      throwIfCancelled(token);
-      if (!stream.write(block)) {
+  return {
+    async begin(): Promise<void> {
+      if (uri.scheme !== 'file') {
+        parts = [Buffer.from(header, 'utf8')];
+        return;
+      }
+      stream = createWriteStream(uri.fsPath, { encoding: 'utf8' });
+      if (!stream.write(header)) {
         await once(stream, 'drain');
       }
-      reportBlock();
-      // When the write buffer never fills there is nothing above to await, so
-      // hand the event loop a turn; otherwise the whole loop is synchronous and
-      // neither the progress bar nor cancellation would ever be observed.
-      await yieldToEventLoop();
-    }
-    stream.end();
-    await once(stream, 'finish');
-  } catch (error) {
-    stream.destroy();
-    // A half-written file must not be left behind looking like a complete export.
-    await unlink(uri.fsPath).catch(() => undefined);
-    throw error;
-  }
+    },
+
+    async write(row: Row): Promise<void> {
+      throwIfCancelled(token);
+      buffer.push(row);
+      if (buffer.length >= chunkRows) {
+        await flush();
+      }
+    },
+
+    async finish(): Promise<number> {
+      throwIfCancelled(token);
+      await flush();
+      if (parts) {
+        await vscode.workspace.fs.writeFile(uri, Buffer.concat(parts));
+      } else if (stream) {
+        stream.end();
+        await once(stream, 'finish');
+      }
+      return writtenRows;
+    },
+
+    async abort(): Promise<void> {
+      stream?.destroy();
+      if (uri.scheme === 'file') {
+        // A half-written file must not be left behind looking like a complete export.
+        await unlink(uri.fsPath).catch(() => undefined);
+      }
+    },
+  };
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -719,7 +840,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       let session: QuerySession | undefined;
       try {
         session = await manager.open(profile);
-        await session.execute('SELECT 1', neverCancelled);
+        // Only connectivity matters here, so keep a single row rather than
+        // buffering whatever the probe returns.
+        await session.execute('SELECT 1', neverCancelled, createRowCollector(1));
         vscode.window.showInformationMessage(`连接成功：${profile.name}`);
       } catch (error) {
         showError(`连接失败（${profile.name}）`, error);
@@ -932,19 +1055,38 @@ async function runQuery(
             await dropSession(active);
             return;
           }
-          progress.report({ message: '正在执行…' });
-          const outcome = await active.execute(sql, signal);
-          if (signal.requested) {
-            return;
-          }
           const maxRows = vscode.workspace
             .getConfiguration('dorisSqlLite')
             .get<number>('maxResultRows', 1000);
-          ResultPanel.open(createQueryResultViewFromOutcome(outcome, maxRows), {
+          // Only the first maxRows rows are kept; every row past that is merely
+          // counted as it streams by, which is what keeps a large answer from
+          // costing hundreds of megabytes.
+          let reportedRows = 0;
+          const collector = createRowCollector(maxRows);
+          const sink: RowSink = {
+            onColumns: (columns) => collector.onColumns(columns),
+            onAffectedRows: (count) => collector.onAffectedRows(count),
+            onRow: (row) => {
+              collector.onRow(row);
+              const total = collector.totalRows();
+              if (total - reportedRows >= 1000) {
+                reportedRows = total;
+                progress.report({ message: `已读取 ${total} 行…` });
+              }
+            },
+          };
+
+          progress.report({ message: '正在执行…' });
+          await active.execute(sql, signal, sink);
+          if (signal.requested) {
+            return;
+          }
+          ResultPanel.open(collector.toView(), {
             connectionName: profile.name,
             database: profile.database,
             durationMs: Date.now() - startedAt,
             maxRows,
+            rerun: { manager, profile, sql },
           });
         } catch (error) {
           if (isQueryCancelled(error) || isCancelled(token)) {

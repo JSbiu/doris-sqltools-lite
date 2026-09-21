@@ -1,62 +1,77 @@
+import type { RowSink } from './querySession';
+
 export type Row = Record<string, unknown>;
 
-// What every driver hands back, before the panel cap is applied. Lives here so
-// the drivers can depend on it without importing the session interfaces.
-export interface QueryOutcome {
-  rows: Row[];
-  columns: string[];
-  affectedRows: number;
-}
-
 export interface QueryResultView {
-  // Rows shown in the panel, capped by maxResultRows. Copy uses these.
+  // Rows kept for the panel, capped by maxResultRows. Copy uses these.
   rows: Row[];
-  // The full result set, used by export. mysql2 already buffered it in memory.
-  allRows: Row[];
   columns: string[];
   affectedRows: number;
   truncated: boolean;
   totalRows: number;
 }
 
+// A sink that keeps the first maxResultRows rows and counts the rest. Rows past
+// the cap are never stored, so a result set costs memory in proportion to the
+// cap rather than to the number of rows the server sent.
+export interface RowCollector extends RowSink {
+  // Rows read so far, including the discarded ones -- drives the progress line.
+  totalRows(): number;
+  toView(): QueryResultView;
+}
+
+export function createRowCollector(maxRows: number): RowCollector {
+  const safeMaxRows = Number.isInteger(maxRows) && maxRows >= 1 ? maxRows : 1000;
+  const kept: Row[] = [];
+  let total = 0;
+  let columns: string[] = [];
+  let affectedRows = 0;
+
+  return {
+    onColumns(next) {
+      columns = next;
+    },
+    onRow(row) {
+      total += 1;
+      if (kept.length < safeMaxRows) {
+        kept.push(row);
+      }
+    },
+    onAffectedRows(count) {
+      affectedRows = count;
+    },
+    totalRows() {
+      return total;
+    },
+    toView() {
+      return {
+        rows: kept,
+        columns: columns.length > 0 ? columns : Object.keys(kept[0] ?? {}),
+        affectedRows,
+        truncated: total > kept.length,
+        totalRows: total,
+      };
+    },
+  };
+}
+
+// mysql2 carries column metadata as FieldPacket[] and raises its `fields` event
+// before the first row. A statement that returns no result set raises it with
+// `undefined` instead, which is how the MySQL adapter tells the two apart.
+export function columnNamesFromFields(fields: unknown): string[] {
+  if (!Array.isArray(fields)) {
+    return [];
+  }
+  return fields
+    .map((field) =>
+      field && typeof field === 'object' ? String((field as { name?: unknown }).name ?? '') : '',
+    )
+    .filter(Boolean);
+}
+
 interface SqlStatementRange {
   start: number;
   end: number;
-}
-
-// normalizes a mysql2 `[rows, fields]` pair into the driver-neutral shape.
-export function normalizeMysqlResult(rawResult: unknown, rawFields: unknown): QueryOutcome {
-  const rows = normalizeRows(rawResult);
-  const fields = normalizeFields(rawFields);
-  return {
-    rows,
-    columns: fields.length > 0 ? fields : Object.keys(rows[0] ?? {}),
-    affectedRows: getAffectedRows(rawResult),
-  };
-}
-
-export function createQueryResultViewFromOutcome(
-  outcome: QueryOutcome,
-  maxRows: number,
-): QueryResultView {
-  const safeMaxRows = Number.isInteger(maxRows) && maxRows >= 1 ? maxRows : 1000;
-  const allRows = outcome.rows;
-  return {
-    rows: allRows.slice(0, safeMaxRows),
-    allRows,
-    columns: outcome.columns,
-    affectedRows: outcome.affectedRows,
-    truncated: allRows.length > safeMaxRows,
-    totalRows: allRows.length,
-  };
-}
-
-export function createQueryResultView(
-  rawResult: unknown,
-  rawFields: unknown,
-  maxRows: number,
-): QueryResultView {
-  return createQueryResultViewFromOutcome(normalizeMysqlResult(rawResult, rawFields), maxRows);
 }
 
 export function hasMultipleStatements(sql: string): boolean {
@@ -216,32 +231,6 @@ function distanceFromRange(offset: number, range: SqlStatementRange): number {
   }
   if (offset >= range.end) {
     return offset - range.end;
-  }
-  return 0;
-}
-
-function normalizeRows(value: unknown): Row[] {
-  const candidate = Array.isArray(value) && Array.isArray(value[0]) ? value[0] : value;
-  if (!Array.isArray(candidate)) {
-    return [];
-  }
-  return candidate.filter((row): row is Row => Boolean(row && typeof row === 'object' && !Array.isArray(row)));
-}
-
-function normalizeFields(value: unknown): string[] {
-  const candidate = Array.isArray(value) && Array.isArray(value[0]) ? value[0] : value;
-  if (!Array.isArray(candidate)) {
-    return [];
-  }
-  return candidate
-    .map((field) => (field && typeof field === 'object' ? String((field as { name?: unknown }).name ?? '') : ''))
-    .filter(Boolean);
-}
-
-function getAffectedRows(value: unknown): number {
-  if (value && typeof value === 'object' && !Array.isArray(value) && 'affectedRows' in value) {
-    const affectedRows = Number((value as { affectedRows?: unknown }).affectedRows ?? 0);
-    return Number.isFinite(affectedRows) ? affectedRows : 0;
   }
   return 0;
 }

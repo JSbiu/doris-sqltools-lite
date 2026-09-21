@@ -1,13 +1,19 @@
-import { HiveClient, HiveUtils, auth, connections, thrift } from 'hive-driver';
+import { HiveClient, auth, connections, thrift } from 'hive-driver';
 import { isConnectionFailure } from './connectionDiagnostics';
 import type { ConnectionProfile } from './connectionSecurity';
-import { decodeHiveResult, decodeHiveValue } from './hiveResult';
+import {
+  decodeHiveRowSet,
+  decodeHiveValue,
+  hiveColumnDescriptors,
+  type ColumnDescriptor,
+} from './hiveResult';
 import {
   QueryCancelledError,
   neverCancelled,
   type CancelSignal,
-  type QueryOutcome,
   type QuerySession,
+  type QuerySummary,
+  type RowSink,
 } from './querySession';
 
 // Spark Thrift Server speaks HiveServer2's TCLIService over Thrift, not the
@@ -28,8 +34,7 @@ const PROTOCOL_VERSIONS: number[] = [
   TCLIService_types.TProtocolVersion.HIVE_CLI_SERVICE_PROTOCOL_V6,
 ];
 
-// Rows per FetchResults round trip. The panel only renders maxResultRows, but
-// export needs everything, so this stays a transport-level knob.
+// Rows per FetchResults round trip.
 const FETCH_ROWS = 1_000;
 
 // The driver's own waitUntilReady() polls as fast as the server answers. A
@@ -40,6 +45,57 @@ type HiveClientInstance = InstanceType<typeof HiveClient>;
 type HiveSessionHandle = Awaited<ReturnType<HiveClientInstance['openSession']>>;
 type HiveOperation = Awaited<ReturnType<HiveSessionHandle['executeStatement']>>;
 type HiveOperationStatus = Awaited<ReturnType<HiveOperation['status']>>;
+
+// The slice of the driver's operation object the fetch loop actually uses,
+// declared narrowly so `node --test` can drive the loop with a fake.
+export interface HiveFetchable {
+  fetch(): Promise<unknown>;
+  hasMoreRows(): boolean;
+  getSchema(): unknown;
+  getData(): unknown[];
+  flush(): void;
+}
+
+// Pulls one batch at a time and hands each row straight to the sink. getData()
+// accumulates until flush() resets it, so flushing after every batch is what
+// keeps memory flat; the driver's own fetchAll() is what used to hold an entire
+// answer in memory.
+export async function drainHiveRows(
+  operation: HiveFetchable,
+  sink: RowSink,
+  isCancelled: () => boolean,
+): Promise<number> {
+  let descriptors: ColumnDescriptor[] = [];
+  let announced = false;
+  let rowsRead = 0;
+
+  do {
+    if (isCancelled()) {
+      break;
+    }
+    await operation.fetch();
+
+    // The schema only exists once the first batch has arrived.
+    if (!announced) {
+      descriptors = hiveColumnDescriptors(operation.getSchema());
+      sink.onColumns(descriptors.map((descriptor) => descriptor.name));
+      announced = true;
+    }
+
+    for (const rowSet of operation.getData()) {
+      for (const row of decodeHiveRowSet(rowSet, descriptors)) {
+        rowsRead += 1;
+        const pending = sink.onRow(row);
+        if (pending) {
+          await pending;
+        }
+      }
+    }
+    operation.flush();
+  } while (operation.hasMoreRows());
+
+  return rowsRead;
+}
 
 export async function openHiveSession(
   profile: ConnectionProfile,
@@ -64,14 +120,18 @@ export async function openHiveSession(
       authProvider,
     );
     const handle = await openSessionWithFallback(client, profile, password);
-    const session = new HiveQuerySession(client, handle, new HiveUtils(TCLIService_types));
+    const session = new HiveQuerySession(client, handle);
     relay.target = (error) => session.noteTransportError(error);
 
     // HiveServer2 has no "default database" connection option, so the chosen
     // database is selected with USE on the fresh session, which is also what
     // beeline does.
     if (profile.database) {
-      await session.execute(`USE ${quoteIdentifier(profile.database)}`, neverCancelled);
+      await session.execute(`USE ${quoteIdentifier(profile.database)}`, neverCancelled, {
+        onColumns: () => undefined,
+        onRow: () => undefined,
+        onAffectedRows: () => undefined,
+      });
     }
     return session;
   } catch (error) {
@@ -126,7 +186,6 @@ class HiveQuerySession implements QuerySession {
   public constructor(
     private readonly client: HiveClientInstance,
     private readonly session: HiveSessionHandle,
-    private readonly utils: HiveUtils,
   ) {}
 
   public get broken(): boolean {
@@ -139,7 +198,7 @@ class HiveQuerySession implements QuerySession {
     this.transportError ??= toHiveError(error);
   }
 
-  public async execute(sql: string, signal: CancelSignal): Promise<QueryOutcome> {
+  public async execute(sql: string, signal: CancelSignal, sink: RowSink): Promise<QuerySummary> {
     this.throwPendingTransportError();
 
     const operation = await this.run(() =>
@@ -160,13 +219,11 @@ class HiveQuerySession implements QuerySession {
       if (cancelled) {
         throw new QueryCancelledError();
       }
-      await this.run(() => this.utils.fetchAll(operation));
-      const decoded = decodeHiveResult(operation.getSchema(), operation.getData());
-      return {
-        rows: decoded.rows,
-        columns: decoded.columns,
-        affectedRows: modifiedRowCount(status),
-      };
+      const rowsRead = await this.run(() => drainHiveRows(operation, sink, () => cancelled));
+      if (cancelled) {
+        throw new QueryCancelledError();
+      }
+      return { rowsRead, affectedRows: modifiedRowCount(status) };
     } catch (error) {
       if (isConnectionFailure(error)) {
         this.invalid = true;

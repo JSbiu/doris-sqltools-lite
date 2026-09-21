@@ -48,6 +48,40 @@ export function toTsv(rows: Row[], columns: string[], options: TsvEncodeOptions 
   return blocks.join('').replace(/\r\n$/, '');
 }
 
+const TSV_SEPARATOR = '\t';
+
+function createCellEncoder(options: TsvEncodeOptions): (value: unknown) => string {
+  const escapeFormulas = options.escapeFormulas !== false;
+  return (value) => {
+    const displayed = displayValue(value);
+    const text = escapeFormulas ? escapeSpreadsheetFormula(displayed) : displayed;
+    const needsQuotes = text.includes(TSV_SEPARATOR) || /["\r\n]/.test(text);
+    return needsQuotes ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+}
+
+// Header and body are encoded separately so a streaming writer can emit them
+// once each instead of repeating the header for every block.
+export function encodeTsvHeader(columns: string[], options: TsvEncodeOptions = {}): string {
+  const encode = createCellEncoder(options);
+  return `${columns.map((column) => encode(column)).join(TSV_SEPARATOR)}\r\n`;
+}
+
+export function encodeTsvRows(
+  rows: readonly Row[],
+  columns: string[],
+  options: TsvEncodeOptions = {},
+): string {
+  if (rows.length === 0) {
+    return '';
+  }
+  const encode = createCellEncoder(options);
+  const body = rows
+    .map((row) => columns.map((column) => encode(row[column])).join(TSV_SEPARATOR))
+    .join('\r\n');
+  return `${body}\r\n`;
+}
+
 // Streams TSV in bounded blocks so exporting a large result set never has to
 // build one giant string (V8 caps strings around 512MB).
 export function* toTsvBlocks(
@@ -56,21 +90,11 @@ export function* toTsvBlocks(
   chunkRows: number = TSV_CHUNK_ROWS,
   options: TsvEncodeOptions = {},
 ): Generator<string> {
-  const separator = '\t';
-  const escapeFormulas = options.escapeFormulas !== false;
-  const encode = (value: unknown): string => {
-    const displayed = displayValue(value);
-    const text = escapeFormulas ? escapeSpreadsheetFormula(displayed) : displayed;
-    const needsQuotes = text.includes(separator) || /["\r\n]/.test(text);
-    return needsQuotes ? `"${text.replace(/"/g, '""')}"` : text;
-  };
+  yield encodeTsvHeader(columns, options);
 
   const size = Number.isInteger(chunkRows) && chunkRows >= 1 ? chunkRows : TSV_CHUNK_ROWS;
-
-  yield `${columns.map((column) => encode(column)).join(separator)}\r\n`;
   for (let index = 0; index < rows.length; index += size) {
-    const chunk = rows.slice(index, index + size);
-    yield `${chunk.map((row) => columns.map((column) => encode(row[column])).join(separator)).join('\r\n')}\r\n`;
+    yield encodeTsvRows(rows.slice(index, index + size), columns, options);
   }
 }
 

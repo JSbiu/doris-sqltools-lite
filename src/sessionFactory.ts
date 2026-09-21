@@ -1,6 +1,7 @@
 import type { ConnectionProfile } from './connectionSecurity';
 import { openHiveSession } from './hiveSession';
 import { openMysqlSession } from './mysqlSession';
+import { createRowCollector } from './queryResults';
 import { neverCancelled, type QuerySession } from './querySession';
 
 // The one place that maps a connection's declared type to a wire protocol.
@@ -25,7 +26,8 @@ export async function testQuerySession(
 ): Promise<void> {
   const session = await openQuerySession(profile, password);
   try {
-    await session.execute('SELECT 1', neverCancelled);
+    // Only connectivity matters, so keep a single row instead of buffering.
+    await session.execute('SELECT 1', neverCancelled, createRowCollector(1));
   } finally {
     await session.close();
   }

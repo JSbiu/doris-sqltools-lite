@@ -32,7 +32,7 @@ export interface DecodedHiveResult {
   rows: Row[];
 }
 
-interface ColumnDescriptor {
+export interface ColumnDescriptor {
   name: string;
   position: number;
 }
@@ -48,7 +48,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 // --------------------------------------------------------------- schema
 
-function readDescriptors(schema: unknown): ColumnDescriptor[] {
+// Exported so the session can decode one fetch batch at a time instead of
+// materialising the whole answer through decodeHiveResult below.
+export function hiveColumnDescriptors(schema: unknown): ColumnDescriptor[] {
   const columns = isRecord(schema) && Array.isArray(schema.columns) ? schema.columns : [];
   return columns
     .map((column, index) => {
@@ -236,7 +238,7 @@ export function decodeHiveRowSet(rowSet: unknown, descriptors: ColumnDescriptor[
 }
 
 export function decodeHiveResult(schema: unknown, rowSets: readonly unknown[]): DecodedHiveResult {
-  const descriptors = readDescriptors(schema);
+  const descriptors = hiveColumnDescriptors(schema);
   const rows: Row[] = [];
   for (const rowSet of rowSets) {
     rows.push(...decodeHiveRowSet(rowSet, descriptors));

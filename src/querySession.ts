@@ -1,10 +1,32 @@
-import type { QueryOutcome } from './queryResults';
+import type { Row } from './queryResults';
 
 // Driver-agnostic surface the extension talks to. Both the MySQL/Doris driver
 // (mysql2) and the Spark Thrift driver (hive-driver) implement this, so
 // extension.ts never has to know which wire protocol is underneath.
 
-export type { QueryOutcome };
+export type { Row };
+
+// Where a driver hands each row as it arrives. The sink decides how much to
+// keep; a driver must never accumulate the whole result set on its own, which
+// is what used to make a wide answer cost hundreds of megabytes.
+export interface RowSink {
+  // Called once, before the first row, with the answer's column names.
+  onColumns(columns: string[]): void;
+  // Returning a promise makes the driver wait for it, which is what keeps a
+  // fetch loop from outrunning a sink that writes to disk. A synchronous sink
+  // just returns nothing.
+  onRow(row: Row): void | Promise<void>;
+  // A statement that returns no result set (INSERT/UPDATE/DDL). Never combined
+  // with onColumns/onRow for the same statement.
+  onAffectedRows(count: number): void;
+}
+
+export interface QuerySummary {
+  // Every row the server sent, including the ones the sink discarded. This is
+  // what the "共 N 行" line reports.
+  rowsRead: number;
+  affectedRows: number;
+}
 
 // The extension owns a vscode.CancellationToken. Adapters only need to know
 // whether cancellation was requested and to be told once when it happens --
@@ -16,7 +38,7 @@ export interface CancelSignal {
 }
 
 export interface QuerySession {
-  execute(sql: string, signal: CancelSignal): Promise<QueryOutcome>;
+  execute(sql: string, signal: CancelSignal, sink: RowSink): Promise<QuerySummary>;
   // Set once the underlying connection had to be torn down -- a cancel the
   // server would not honour, or a socket-level failure. The caller must drop
   // the session instead of reusing it.

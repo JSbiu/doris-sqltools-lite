@@ -2,37 +2,100 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
-  createQueryResultView,
+  columnNamesFromFields,
+  createRowCollector,
   findSqlStatementAtOffset,
   hasMultipleStatements,
 } = require('../out/queryResults.js');
 
-test('keeps field headers and zero rows for an empty SELECT', () => {
-  const result = createQueryResultView([], [{ name: 'id' }], 1000);
+function collect(maxRows, rows) {
+  const collector = createRowCollector(maxRows);
+  for (const row of rows) {
+    collector.onRow(row);
+  }
+  return collector;
+}
 
-  assert.deepEqual(result.rows, []);
-  assert.deepEqual(result.columns, ['id']);
-  assert.equal(result.truncated, false);
+test('keeps field headers and zero rows for an empty SELECT', () => {
+  const collector = createRowCollector(1000);
+  collector.onColumns(['id']);
+
+  const view = collector.toView();
+  assert.deepEqual(view.rows, []);
+  assert.deepEqual(view.columns, ['id']);
+  assert.equal(view.truncated, false);
+  assert.equal(view.totalRows, 0);
 });
 
 test('represents an affected-row statement without pretending it returned rows', () => {
-  const result = createQueryResultView({ affectedRows: 2 }, undefined, 1000);
+  const collector = createRowCollector(1000);
+  collector.onAffectedRows(2);
 
-  assert.deepEqual(result.rows, []);
-  assert.deepEqual(result.columns, []);
-  assert.equal(result.affectedRows, 2);
+  const view = collector.toView();
+  assert.deepEqual(view.rows, []);
+  assert.deepEqual(view.columns, []);
+  assert.equal(view.affectedRows, 2);
 });
 
-test('marks only genuinely truncated result sets', () => {
-  const result = createQueryResultView(
-    [{ id: 1 }, { id: 2 }, { id: 3 }],
-    [{ name: 'id' }],
-    2,
-  );
+test('caps the kept rows and counts every row that streamed past', () => {
+  const collector = collect(2, [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]);
 
-  assert.deepEqual(result.rows, [{ id: 1 }, { id: 2 }]);
-  assert.equal(result.truncated, true);
-  assert.equal(createQueryResultView([{ id: 1 }, { id: 2 }], [{ name: 'id' }], 2).truncated, false);
+  const view = collector.toView();
+  assert.deepEqual(view.rows, [{ id: 1 }, { id: 2 }]);
+  assert.equal(view.totalRows, 5);
+  assert.equal(view.truncated, true);
+});
+
+test('discarded rows are never retained, whatever the answer size', () => {
+  const collector = createRowCollector(3);
+  for (let index = 0; index < 20_000; index += 1) {
+    collector.onRow({ id: index });
+  }
+
+  const view = collector.toView();
+  assert.equal(view.rows.length, 3);
+  assert.equal(view.totalRows, 20_000);
+  assert.equal(view.truncated, true);
+});
+
+test('reports the running total so a progress line can follow it', () => {
+  const collector = createRowCollector(1);
+  assert.equal(collector.totalRows(), 0);
+
+  collector.onRow({ id: 1 });
+  collector.onRow({ id: 2 });
+
+  assert.equal(collector.totalRows(), 2);
+  assert.equal(collector.toView().rows.length, 1);
+});
+
+test('does not mark a result as truncated when it fits exactly', () => {
+  const exact = collect(2, [{ id: 1 }, { id: 2 }]).toView();
+  assert.equal(exact.truncated, false);
+  assert.equal(exact.totalRows, 2);
+});
+
+test('falls back to 1000 kept rows for an invalid cap', () => {
+  const collector = createRowCollector(0);
+  for (let index = 0; index < 1500; index += 1) {
+    collector.onRow({ id: index });
+  }
+
+  assert.equal(collector.toView().rows.length, 1000);
+});
+
+test('falls back to the row keys when the driver reports no columns', () => {
+  const collector = createRowCollector(10);
+  collector.onRow({ first: 1, second: 2 });
+
+  assert.deepEqual(collector.toView().columns, ['first', 'second']);
+});
+
+test('reads column names out of mysql2 field packets', () => {
+  assert.deepEqual(columnNamesFromFields([{ name: 'id' }, { name: 'name' }]), ['id', 'name']);
+  // A statement with no result set raises `fields` with undefined.
+  assert.deepEqual(columnNamesFromFields(undefined), []);
+  assert.deepEqual(columnNamesFromFields('not-an-array'), []);
 });
 
 test('allows one statement with a trailing semicolon or comments', () => {
@@ -74,7 +137,6 @@ test('selects the next statement when it starts immediately after a separator', 
 
   assert.equal(findSqlStatementAtOffset(sql, sql.indexOf('SELECT 2')), 'SELECT 2;');
 });
-
 
 test('ignores semicolons in quoted identifiers, strings, and comments', () => {
   const sql = [
@@ -131,37 +193,4 @@ test('clamps out-of-range or invalid cursor offsets', () => {
 
 test('accepts a final statement without a trailing semicolon', () => {
   assert.equal(findSqlStatementAtOffset('SELECT 1', 0), 'SELECT 1');
-});
-
-test('keeps the full result set for export while capping the rendered rows', () => {
-  const result = createQueryResultView(
-    [{ id: 1 }, { id: 2 }, { id: 3 }],
-    [{ name: 'id' }],
-    2,
-  );
-
-  assert.deepEqual(result.rows, [{ id: 1 }, { id: 2 }]);
-  assert.deepEqual(result.allRows, [{ id: 1 }, { id: 2 }, { id: 3 }]);
-  assert.equal(result.totalRows, 3);
-  assert.equal(result.truncated, true);
-});
-
-test('totalRows matches the shown rows when nothing was truncated', () => {
-  const result = createQueryResultView([{ id: 1 }], [{ name: 'id' }], 1000);
-
-  assert.equal(result.totalRows, 1);
-  assert.deepEqual(result.allRows, result.rows);
-  assert.equal(result.truncated, false);
-});
-
-test('falls back to 1000 rows for an invalid maxRows', () => {
-  assert.equal(createQueryResultView([{ id: 1 }], [{ name: 'id' }], 0).truncated, false);
-  assert.equal(createQueryResultView([{ id: 1 }], [{ name: 'id' }], Number.NaN).truncated, false);
-});
-
-test('affected-row statements expose an empty full row set', () => {
-  const result = createQueryResultView({ affectedRows: 2 }, undefined, 1000);
-
-  assert.deepEqual(result.allRows, []);
-  assert.equal(result.totalRows, 0);
 });
