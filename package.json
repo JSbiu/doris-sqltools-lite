@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -227,6 +227,18 @@
           "default": "",
           "scope": "machine-overridable",
           "description": "Directory that TSV exports are written to without prompting. Leave empty to be asked for a location on every export."
+        },
+        "dorisSqlLite.exportChunkRows": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 100,
+          "maximum": 100000,
+          "description": "Rows per write block during a TSV export. Smaller blocks keep each intermediate string shorter and let the progress bar update more often; larger blocks mean fewer round trips. Exporting always writes the full result set."
+        },
+        "dorisSqlLite.escapeSpreadsheetFormulas": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefix a cell with an apostrophe when its text starts with = or @, or with + or - followed by something that is not a plain number, so Excel, LibreOffice and Google Sheets do not evaluate exported data as a formula. Turn this off if a downstream tool needs the exact stored value."
         }
       }
     }

@@ -4,6 +4,7 @@ const test = require('node:test');
 const {
   displayValue,
   isExportFormat,
+  needsFormulaEscape,
   toTsv,
   toTsvBlocks,
 } = require('../out/exports.js');
@@ -59,4 +60,57 @@ test('block quoting matches the non-streaming encoder', () => {
   const columns = ['note', 'quote'];
 
   assert.equal([...toTsvBlocks(rows, columns)].join(''), `${toTsv(rows, columns)}\r\n`);
+});
+
+test('classifies the prefixes a spreadsheet would evaluate', () => {
+  // `=` and `@` are unambiguous formula triggers.
+  assert.equal(needsFormulaEscape('=1+1'), true);
+  assert.equal(needsFormulaEscape('@SUM(A1)'), true);
+  assert.equal(needsFormulaEscape("=cmd|' /c calc'!A0"), true);
+  // `+`/`-` only when what follows is not a plain number, otherwise every
+  // negative number would land in the sheet as text.
+  assert.equal(needsFormulaEscape('-2+3'), true);
+  assert.equal(needsFormulaEscape('+cmd|x'), true);
+  assert.equal(needsFormulaEscape('-5'), false);
+  assert.equal(needsFormulaEscape('+3.5'), false);
+  assert.equal(needsFormulaEscape('-1.2e3'), false);
+  // Everything else is untouched.
+  assert.equal(needsFormulaEscape('plain'), false);
+  assert.equal(needsFormulaEscape(''), false);
+  assert.equal(needsFormulaEscape('北京'), false);
+});
+
+test('prefixes a formula-shaped cell with the spreadsheet text marker', () => {
+  const tsv = toTsv(
+    [{ a: '=1+1', b: '@SUM(1)', c: '-2+3', d: 'plain', e: '-5' }],
+    ['a', 'b', 'c', 'd', 'e'],
+  );
+
+  assert.equal(tsv.split('\r\n')[1], "'=1+1\t'@SUM(1)\t'-2+3\tplain\t-5");
+});
+
+test('keeps the marker inside the quotes when the value also needs quoting', () => {
+  const row = toTsv([{ a: '=x\ty' }], ['a']).split('\r\n')[1];
+
+  assert.equal(row, `"'=x\ty"`);
+});
+
+test('escapes a column name that looks like a formula', () => {
+  assert.equal(toTsv([], ['=col']), "'=col");
+});
+
+test('can export the stored value verbatim when escaping is turned off', () => {
+  const row = toTsv([{ a: '=1+1' }], ['a'], { escapeFormulas: false }).split('\r\n')[1];
+
+  assert.equal(row, '=1+1');
+});
+
+test('honours a custom block size together with escaping', () => {
+  const rows = [{ a: '=1' }, { a: '=2' }, { a: '=3' }];
+
+  assert.deepEqual([...toTsvBlocks(rows, ['a'], 2, { escapeFormulas: true })], [
+    'a\r\n',
+    "'=1\r\n'=2\r\n",
+    "'=3\r\n",
+  ]);
 });

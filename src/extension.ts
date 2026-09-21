@@ -1,13 +1,20 @@
 import * as vscode from 'vscode';
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
 import { openConnectionForm } from './connectionForm';
-import { displayValue, isExportFormat, toTsv, toTsvBlocks, type ExportFormat } from './exports';
+import {
+  displayValue,
+  isExportFormat,
+  toTsv,
+  toTsvBlocks,
+  TSV_CHUNK_ROWS,
+  type ExportFormat,
+} from './exports';
 import { buildExportFileName, normalizeExportDirectory } from './exportPath';
 import {
   createQueryResultViewFromOutcome,
@@ -16,7 +23,13 @@ import {
   type QueryResultView,
   type Row,
 } from './queryResults';
-import { isQueryCancelled, neverCancelled, type CancelSignal, type QuerySession } from './querySession';
+import {
+  QueryCancelledError,
+  isQueryCancelled,
+  neverCancelled,
+  type CancelSignal,
+  type QuerySession,
+} from './querySession';
 
 type ConnectionSessionState = {
   documentConnections: Map<string, string>;
@@ -35,6 +48,25 @@ function configuredExportDirectory(): string | undefined {
   return normalizeExportDirectory(
     vscode.workspace.getConfiguration('dorisSqlLite').get<unknown>('exportDirectory'),
   );
+}
+
+// Only trades round-trip granularity against allocation churn: it bounds the
+// intermediate string per block, not the export itself.
+function configuredExportChunkRows(): number {
+  const raw = vscode.workspace
+    .getConfiguration('dorisSqlLite')
+    .get<number>('exportChunkRows', TSV_CHUNK_ROWS);
+  return Number.isInteger(raw) && raw > 0 ? raw : TSV_CHUNK_ROWS;
+}
+
+// Spreadsheets evaluate a cell starting with `=`, `@` or a non-numeric `+`/`-`,
+// so an exported result carrying user-controlled text becomes an injection
+// vector the moment it is opened or pasted into a sheet. On by default; the
+// switch exists for pipelines that need the stored value byte for byte.
+function configuredEscapeFormulas(): boolean {
+  return vscode.workspace
+    .getConfiguration('dorisSqlLite')
+    .get<boolean>('escapeSpreadsheetFormulas', true);
 }
 
 type LiveDocumentConnection = {
@@ -375,9 +407,11 @@ class ResultPanel {
       const target = join(directory, defaultName);
       try {
         await mkdir(directory, { recursive: true });
-        await writeTsvFile(vscode.Uri.file(target), rows, columns);
-        vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${target}`);
-        return true;
+        const written = await this.exportTo(vscode.Uri.file(target), rows, columns);
+        if (written) {
+          vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${target}`);
+        }
+        return written;
       } catch (error) {
         // A stale or unwritable default directory must never block the export.
         const reason = error instanceof Error ? error.message : String(error);
@@ -398,8 +432,57 @@ class ResultPanel {
       return false;
     }
 
-    await writeTsvFile(uri, rows, columns);
-    vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${uri.fsPath}`);
+    const written = await this.exportTo(uri, rows, columns);
+    if (written) {
+      vscode.window.showInformationMessage(`已导出 ${rows.length} 行到 ${uri.fsPath}`);
+    }
+    return written;
+  }
+
+  // Writes behind a cancellable notification. The row count is already known
+  // because the whole result set is buffered, so the bar is exact rather than an
+  // indeterminate spinner.
+  private async exportTo(uri: vscode.Uri, rows: Row[], columns: string[]): Promise<boolean> {
+    const total = rows.length;
+    const chunkRows = configuredExportChunkRows();
+    const escapeFormulas = configuredEscapeFormulas();
+    let lastRatio = 0;
+    let cancelled = false;
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `导出 ${total} 行`,
+        cancellable: true,
+      },
+      async (progress, token) => {
+        try {
+          await writeTsvFile(uri, rows, columns, {
+            chunkRows,
+            escapeFormulas,
+            token,
+            onProgress: (written) => {
+              const ratio = total === 0 ? 1 : Math.min(written / total, 1);
+              progress.report({
+                message: `${written} / ${total} 行`,
+                increment: Math.max((ratio - lastRatio) * 100, 0),
+              });
+              lastRatio = ratio;
+            },
+          });
+        } catch (error) {
+          if (!isQueryCancelled(error)) {
+            throw error;
+          }
+          cancelled = true;
+        }
+      },
+    );
+
+    if (cancelled) {
+      vscode.window.showInformationMessage('已取消导出，未写完的文件已删除。');
+      return false;
+    }
     return true;
   }
 
@@ -414,25 +497,80 @@ class ResultPanel {
   }
 }
 
+interface WriteTsvOptions {
+  chunkRows: number;
+  escapeFormulas: boolean;
+  token: vscode.CancellationToken;
+  onProgress: (writtenRows: number) => void;
+}
+
+function throwIfCancelled(token: vscode.CancellationToken): void {
+  if (token.isCancellationRequested) {
+    throw new QueryCancelledError('导出已取消。');
+  }
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
 // Writes TSV in bounded blocks so a large export never has to materialise one
-// huge string. Non-file targets fall back to a single buffered write.
-async function writeTsvFile(uri: vscode.Uri, rows: Row[], columns: string[]): Promise<void> {
+// huge string. Non-file targets have no streaming API, so the blocks are
+// collected as Buffers there -- bytes rather than a JS string, which keeps the
+// payload clear of V8's ~512MB string ceiling.
+async function writeTsvFile(
+  uri: vscode.Uri,
+  rows: Row[],
+  columns: string[],
+  options: WriteTsvOptions,
+): Promise<void> {
+  const { chunkRows, escapeFormulas, token, onProgress } = options;
+  const encodeOptions = { escapeFormulas };
+
+  // The generator yields the header first, so only later blocks count as rows.
+  let headerPending = true;
+  let writtenRows = 0;
+  const reportBlock = (): void => {
+    if (headerPending) {
+      headerPending = false;
+    } else {
+      writtenRows = Math.min(writtenRows + chunkRows, rows.length);
+    }
+    onProgress(writtenRows);
+  };
+
   if (uri.scheme !== 'file') {
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(toTsv(rows, columns), 'utf8'));
+    const parts: Buffer[] = [];
+    for (const block of toTsvBlocks(rows, columns, chunkRows, encodeOptions)) {
+      throwIfCancelled(token);
+      parts.push(Buffer.from(block, 'utf8'));
+      reportBlock();
+    }
+    await vscode.workspace.fs.writeFile(uri, Buffer.concat(parts));
     return;
   }
 
   const stream = createWriteStream(uri.fsPath, { encoding: 'utf8' });
   try {
-    for (const block of toTsvBlocks(rows, columns)) {
+    for (const block of toTsvBlocks(rows, columns, chunkRows, encodeOptions)) {
+      throwIfCancelled(token);
       if (!stream.write(block)) {
         await once(stream, 'drain');
       }
+      reportBlock();
+      // When the write buffer never fills there is nothing above to await, so
+      // hand the event loop a turn; otherwise the whole loop is synchronous and
+      // neither the progress bar nor cancellation would ever be observed.
+      await yieldToEventLoop();
     }
     stream.end();
     await once(stream, 'finish');
   } catch (error) {
     stream.destroy();
+    // A half-written file must not be left behind looking like a complete export.
+    await unlink(uri.fsPath).catch(() => undefined);
     throw error;
   }
 }

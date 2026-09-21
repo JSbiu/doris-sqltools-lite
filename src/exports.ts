@@ -8,9 +8,43 @@ export function isExportFormat(value: unknown): value is ExportFormat {
 
 export const TSV_CHUNK_ROWS = 5_000;
 
-export function toTsv(rows: Row[], columns: string[]): string {
-  const blocks = [...toTsvBlocks(rows, columns, Math.max(rows.length, 1))];
-  // Clipboard payloads keep the historical shape: no trailing separator.
+export interface TsvEncodeOptions {
+  // Neutralise spreadsheet formulas. On unless explicitly disabled: a result set
+  // routinely carries user-controlled text, and pasting it into a spreadsheet
+  // would otherwise execute it.
+  escapeFormulas?: boolean;
+}
+
+// A cell starting with one of these is evaluated as a formula by Excel,
+// LibreOffice and Google Sheets, which is how exported data becomes a DDE
+// payload. `=` and `@` are unambiguous triggers. `+` and `-` are declared in the
+// OWASP rule too, but escaping every negative number would turn plain numerics
+// into text in the spreadsheet, so a signed value that is just a number is left
+// alone.
+const FORMULA_PREFIX = /^[=@]/;
+const SIGN_PREFIX = /^[+-]/;
+const PLAIN_NUMBER = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+export function needsFormulaEscape(value: string): boolean {
+  if (!value) {
+    return false;
+  }
+  if (FORMULA_PREFIX.test(value)) {
+    return true;
+  }
+  return SIGN_PREFIX.test(value) && !PLAIN_NUMBER.test(value);
+}
+
+// The apostrophe is the "treat as text" marker spreadsheets understand; they
+// hide it inside the cell, so the displayed value is unchanged.
+export function escapeSpreadsheetFormula(value: string): string {
+  return needsFormulaEscape(value) ? `'${value}` : value;
+}
+
+export function toTsv(rows: Row[], columns: string[], options: TsvEncodeOptions = {}): string {
+  // Clipboard payloads keep the historical shape: no trailing separator. The
+  // row cap means this is never asked to build a huge string.
+  const blocks = [...toTsvBlocks(rows, columns, Math.max(rows.length, 1), options)];
   return blocks.join('').replace(/\r\n$/, '');
 }
 
@@ -20,10 +54,13 @@ export function* toTsvBlocks(
   rows: Row[],
   columns: string[],
   chunkRows: number = TSV_CHUNK_ROWS,
+  options: TsvEncodeOptions = {},
 ): Generator<string> {
   const separator = '\t';
+  const escapeFormulas = options.escapeFormulas !== false;
   const encode = (value: unknown): string => {
-    const text = displayValue(value);
+    const displayed = displayValue(value);
+    const text = escapeFormulas ? escapeSpreadsheetFormula(displayed) : displayed;
     const needsQuotes = text.includes(separator) || /["\r\n]/.test(text);
     return needsQuotes ? `"${text.replace(/"/g, '""')}"` : text;
   };
