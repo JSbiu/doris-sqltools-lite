@@ -126,6 +126,9 @@ database 默认留空且不是必填项，连接和 `Test Connection` 仍可用�
 - 编译（只有测试需要，产物在 `out/`）：`node_modules/.bin/tsc.CMD -p .`
 - 测试：`node --test tests/connection-security.test.js tests/connection-form.test.js tests/connection-diagnostics.test.js tests/query-results.test.js tests/exports.test.js tests/export-path.test.js tests/hive-result.test.js`
 - 打包：`node scripts/package-runtime.js`（会先构建 bundle）
+- 对**真实 MySQL** 跑端到端流式检查：`node scripts/check-live-mysql.js --host=127.0.0.1 --port=3306 --user=root --password=… --database=… [--seed]`
+
+`scripts/check-live-mysql.js` 不在 `pnpm test` 里，因为它需要一台可连的服务器；改动驱动层（`src/mysqlSession.ts`、`src/hiveSession.ts`、`src/querySession.ts`）后建议手动跑一次。它验证的是假流测不到的东西：真实 `Query.stream()` 行为、非 SELECT 语句的 `affectedRows`、**取消之后连接是否仍然干净**、以及重查导出的落盘结果。`--seed` 会自己建两张表并灌数据（7 行类型样本 + 3 万行），**会 TRUNCATE 这两张表**，所以请指向一次性库。
 
 `pnpm test` 把上面几步串成一条链。改动 `src/` 后需要重建 bundle：`pnpm run watch`，或用 `pnpm run watch:types` 只做类型检查的 watch —— **F5 调试加载的是 `dist/extension.js`，只跑 `tsc -w` 会让调试主机一直执行旧代码。**
 
