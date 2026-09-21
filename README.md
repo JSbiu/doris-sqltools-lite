@@ -109,7 +109,7 @@ database 默认留空且不是必填项，连接和 `Test Connection` 仍可用�
 - **端口**：预填 `10000`（HiveServer2 默认端口）。服务端如果通过 `hive.server2.thrift.port` 改过端口，按实际值填。
 - **认证方式**（表单里按类型出现，对上服务端的启动参数即可，不确定就保持默认）：
   - `SASL/PLAIN`（默认）—— 对应服务端 `--auth none`（HiveServer2 默认）或 `ldap`。
-    **`none` 模式不校验密码内容，但服务端会拒绝空密码**（实测返回 `Error validating the login`），所以随便填一个非空值即可，例如与用户名相同；只有 `ldap` 才需要填真实密码。
+    `none` 模式不校验密码，**密码留空即可**；只有 `ldap` 才需要填真实密码。
   - `NOSASL` —— 对应服务端 `--auth nosasl`，裸 Thrift socket，密码可以留空。
   - Kerberos 不支持：它依赖需要本机编译的原生 `kerberos` 模块，没法随 VSIX 分发。
 - **协议版本**：从 `HIVE_CLI_SERVICE_PROTOCOL_V10` 起逐级向下重试到 `V6`。Spark 各版本打包的 Hive 版本不同（Spark 2.x 是 Hive 1.2，Spark 3.x/4.x 是 Hive 2.3+），协议版本不匹配时握手会直接失败，所以这里自动降级，不需要手动配置。

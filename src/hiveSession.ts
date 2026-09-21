@@ -112,6 +112,17 @@ export async function drainHiveRows(
   return rowsRead;
 }
 
+// The driver distinguishes two kinds of "no password":
+//   undefined -> it substitutes a placeholder, its way of saying "this server
+//                checks nothing"
+//   ''        -> it frames a genuinely empty password, which HiveServer2
+//                answers with "Error validating the login" even under NONE
+// Verified against Spark 3.2.0: `undefined` connects, `''` does not. So a blank
+// password from the user has to be handed over as `undefined`, not as ''.
+export function hiveAuthPassword(password: string): string | undefined {
+  return password === '' ? undefined : password;
+}
+
 export async function openHiveSession(
   profile: ConnectionProfile,
   password: string,
@@ -128,7 +139,10 @@ export async function openHiveSession(
   const authProvider =
     profile.hiveAuth === 'nosasl'
       ? new auth.NoSaslAuthentication()
-      : new auth.PlainTcpAuthentication({ username: profile.username, password });
+      : new auth.PlainTcpAuthentication({
+          username: profile.username,
+          password: hiveAuthPassword(password),
+        });
 
   try {
     await withTimeout(

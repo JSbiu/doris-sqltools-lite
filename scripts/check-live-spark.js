@@ -393,50 +393,46 @@ async function main() {
 
   // ------------------------------------------------ 11. empty credentials
   console.log('\n-- empty credentials --');
-  if (AUTH === 'plain') {
-    // Counter-intuitive but verified: HiveServer2's NONE mode never checks the
-    // value, yet it still rejects a blank one with "Error validating the
-    // login". So "this server needs no password" actually means "type
-    // anything", which is what the connection form now tells the user.
-    let emptyError;
+  // A blank password must connect. The adapter maps '' to undefined, which makes
+  // the driver send its placeholder rather than an empty password; sending the
+  // empty string straight through fails with "Error validating the login" even
+  // though NONE never checks the value. That distinction is the whole point of
+  // this check -- and of the fix it guards.
+  {
     const emptyStarted = Date.now();
+    let emptyOk = false;
+    let emptyMessage = '';
     try {
       const emptySession = await openHiveSession(profile, '');
-      await emptySession.close();
+      try {
+        const collector = createRowCollector(5);
+        await emptySession.execute('SELECT 1 AS ok', neverCancelled, collector);
+        emptyOk = Number(collector.toView().rows[0].ok) === 1;
+      } finally {
+        await emptySession.close();
+      }
     } catch (error) {
-      emptyError = error;
+      emptyMessage = String((error && error.message) || error);
     }
     check(
-      'a blank password is rejected even though NONE never checks the value',
-      emptyError !== undefined,
-      `${Date.now() - emptyStarted} ms: ${String((emptyError && emptyError.message) || 'connected anyway').slice(0, 70)}`,
+      'a blank password connects (mapped to the driver placeholder)',
+      emptyOk,
+      `${Date.now() - emptyStarted} ms${emptyMessage ? `: ${emptyMessage.slice(0, 70)}` : ''}`,
     );
+  }
 
+  {
     const anySession = await openHiveSession(profile, 'x');
     try {
       const collector = createRowCollector(5);
       await anySession.execute('SELECT 1 AS ok', neverCancelled, collector);
       check(
-        'any non-empty password is accepted in NONE mode',
+        'any non-empty password also connects',
         Number(collector.toView().rows[0].ok) === 1,
         JSON.stringify(collector.toView().rows[0]),
       );
     } finally {
       await anySession.close();
-    }
-  } else {
-    // NOSASL never frames credentials at all, so a blank one is simply unused.
-    const emptySession = await openHiveSession(profile, '');
-    try {
-      const collector = createRowCollector(5);
-      await emptySession.execute('SELECT 1 AS ok', neverCancelled, collector);
-      check(
-        'NOSASL connects with a blank password',
-        Number(collector.toView().rows[0].ok) === 1,
-        JSON.stringify(collector.toView().rows[0]),
-      );
-    } finally {
-      await emptySession.close();
     }
   }
 

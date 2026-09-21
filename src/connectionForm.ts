@@ -185,19 +185,15 @@ async function testDraft(
   if (!password && existing) {
     password = (await manager.readPassword(existing.id)) ?? '';
   }
-  // A NOSASL Spark Thrift Server takes no credentials at all; every other mode
-  // needs a non-empty one, because HiveServer2 rejects blank credentials even in
-  // NONE mode, where the value itself is never checked.
-  const needsPassword = profile.type !== 'Spark' || profile.hiveAuth !== 'nosasl';
+  // A Spark connection is never blocked on the password: NONE mode does not
+  // check it, and NOSASL does not use one. Only MySQL/Doris needs it here.
+  const needsPassword = profile.type !== 'Spark';
   if (!password && needsPassword) {
     return {
       ok: false,
-      message:
-        profile.type === 'Spark'
-          ? 'Spark Thrift Server 不校验密码内容，但空密码会被服务端拒绝 —— 随便填一个非空值即可。'
-          : existing
-            ? '本机没有保存该连接的密码，请填写后再测试。'
-            : '请填写密码后再测试（测试不会保存密码）。',
+      message: existing
+        ? '本机没有保存该连接的密码，请填写后再测试。'
+        : '请填写密码后再测试（测试不会保存密码）。',
     };
   }
 
@@ -307,7 +303,7 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
           <option value="plain"${draft.hiveAuth === 'plain' ? ' selected' : ''}>SASL/PLAIN — 服务端 --auth none（默认）或 ldap</option>
           <option value="nosasl"${draft.hiveAuth === 'nosasl' ? ' selected' : ''}>NOSASL — 服务端 --auth nosasl</option>
         </select>
-        <p class="hint">对上服务端的启动参数即可，不确定就保持默认的 SASL/PLAIN。none 模式不校验密码内容，但服务端会拒绝空密码，随便填一个非空值即可；nosasl 模式不用密码。</p>
+        <p class="hint">对上服务端的启动参数即可，不确定就保持默认的 SASL/PLAIN。none 模式不校验密码，密码留空即可；nosasl 模式也不用密码。</p>
         <span class="err"></span>
       </div>
       <div class="field">

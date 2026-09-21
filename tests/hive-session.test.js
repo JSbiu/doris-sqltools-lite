@@ -1,7 +1,17 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { drainHiveRows } = require('../out/hiveSession.js');
+const { drainHiveRows, hiveAuthPassword } = require('../out/hiveSession.js');
+
+test('hands a blank password to the driver as undefined, not as an empty string', () => {
+  // The driver substitutes its own placeholder for `undefined` ("this server
+  // checks nothing"), but frames an explicit '' as a genuinely empty password --
+  // which HiveServer2 answers with "Error validating the login" even under NONE.
+  // Verified against Spark 3.2.0. Passing '' straight through was the bug.
+  assert.equal(hiveAuthPassword(''), undefined);
+  assert.equal(hiveAuthPassword('x'), 'x');
+  assert.equal(hiveAuthPassword('  '), '  ', 'whitespace is a real value, not a blank one');
+});
 
 // A TRowSet in the column-oriented shape Hive and Spark actually send.
 function stringRowSet(values) {
