@@ -1,7 +1,33 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { drainHiveRows, hiveAuthPassword } = require('../out/hiveSession.js');
+const { drainHiveRows, hiveAuthPassword, toHiveError } = require('../out/hiveSession.js');
+
+test('keeps the errno when converting a non-Error throwable', () => {
+  // Some layers re-throw a socket failure as a plain object rather than an Error.
+  // Dropping `code` while converting is what made a failed connection surface as
+  // a bare English sentence with no explanation: the diagnostics layer
+  // classifies by code, and without one it has nothing to say.
+  const wrapped = toHiveError({ code: 'ETIMEDOUT', syscall: 'connect', message: 'connect ETIMEDOUT' });
+
+  assert.equal(wrapped.code, 'ETIMEDOUT');
+  assert.match(wrapped.message, /connect ETIMEDOUT/);
+});
+
+test('puts the target back into a socket message that lost it', () => {
+  // A raw Node socket error reads "connect ETIMEDOUT 10.0.0.5:7011"; when one
+  // arrives stripped down to "connect ETIMEDOUT", the address has to be restored
+  // from the separate fields or the user cannot tell what was attempted.
+  const wrapped = toHiveError({
+    code: 'ETIMEDOUT',
+    message: 'connect ETIMEDOUT',
+    address: '10.0.0.5',
+    port: 7011,
+  });
+
+  assert.match(wrapped.message, /10\.0\.0\.5:7011/);
+  assert.equal(wrapped.code, 'ETIMEDOUT');
+});
 
 test('hands a blank password to the driver as undefined, not as an empty string', () => {
   // The driver substitutes its own placeholder for `undefined` ("this server

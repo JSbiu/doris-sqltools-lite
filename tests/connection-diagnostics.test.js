@@ -143,6 +143,17 @@ test('认证失败的建议里指向 Forget Saved Password', () => {
   assert.match(advice.hint, /Forget Saved Password/);
 });
 
+test('reads the message off a throwable that is not an Error', () => {
+  // The driver layer sometimes throws plain objects rather than Errors.
+  // String()-ing those put "[object Object]" in the middle of the advice, so the
+  // user got a classification with no idea what had actually gone wrong.
+  const advice = formatDatabaseError({ code: 'ETIMEDOUT', message: 'connect ETIMEDOUT' });
+
+  assert.match(advice, /connect ETIMEDOUT/);
+  assert.doesNotMatch(advice, /\[object Object\]/);
+  assert.match(advice, /连接超时/);
+});
+
 test('Spark Thrift 的 SASL/LDAP 登录失败也归类为 auth', () => {
   // HiveServer2 answers a failed PLAIN/LDAP login with prose, not a MySQL code.
   const error = new Error(

@@ -144,6 +144,10 @@ export async function openHiveSession(
           password: hiveAuthPassword(password),
         });
 
+  // Everything up to the opened session is the handshake. A failure there is
+  // worth describing as such, because the TCP probe has already proved the port
+  // is open by this point.
+  let inHandshake = true;
   try {
     await withTimeout(
       client.connect(
@@ -157,6 +161,8 @@ export async function openHiveSession(
       openSessionWithFallback(client, profile, password),
       () => closeClient(client),
     );
+    inHandshake = false;
+
     const session = new HiveQuerySession(client, handle);
     relay.target = (error) => session.noteTransportError(error);
 
@@ -173,8 +179,27 @@ export async function openHiveSession(
     return session;
   } catch (error) {
     closeClient(client);
-    throw toHiveError(error);
+    const base = toHiveError(error);
+    throw inHandshake ? describeHandshakeFailure(profile, base) : base;
   }
+}
+
+// Reached only after the TCP probe succeeded, so the port is demonstrably open.
+// Whatever failed now happened during the SASL handshake or OpenSession, and
+// saying so keeps someone from chasing a firewall that is not the problem.
+function describeHandshakeFailure(profile: ConnectionProfile, error: Error): Error {
+  if (error instanceof HandshakeTimeoutError || CJK_PATTERN.test(error.message)) {
+    return error;
+  }
+  const wrapped = new Error(
+    `${profile.host}:${profile.port} 端口可以连通，但 HiveServer2 握手失败：${error.message}`,
+  );
+  wrapped.name = error.name;
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code) {
+    (wrapped as NodeJS.ErrnoException).code = code;
+  }
+  return wrapped;
 }
 
 async function openSessionWithFallback(
@@ -215,6 +240,33 @@ class HandshakeTimeoutError extends Error {
 // "认证方式不匹配" message after 20s. A plain socket also surfaces the real errno
 // (ECONNREFUSED / ETIMEDOUT / ENOTFOUND / EHOSTUNREACH), which the diagnostics
 // layer turns into accurate advice instead of a bare "connect ETIMEDOUT".
+const CJK_PATTERN = /[\u4e00-\u9fa5]/;
+
+// Wraps a socket-level failure so the message always names the target and the
+// errno, and carries `code` through for the diagnostics layer. A socket error
+// that has been re-thrown by another layer can arrive as a bare
+// "connect ETIMEDOUT" with no address and no code, which reads like a protocol
+// problem and leaves the user nothing to act on.
+function describeTcpFailure(host: string, port: number, error: Error): Error {
+  const detail = typeof error.message === 'string' ? error.message.trim() : '';
+  if (CJK_PATTERN.test(detail)) {
+    return error;
+  }
+  const code = (error as NodeJS.ErrnoException).code;
+  const advice =
+    code === 'ECONNREFUSED'
+      ? '主机能连通，但该端口上没有服务在监听。'
+      : '地址或端口可能不对，也可能是防火墙 / 安全组把数据包丢弃了。';
+  const wrapped = new Error(
+    `无法连接 ${host}:${port}：${detail || code || '连接失败'}。${advice}`,
+  );
+  wrapped.name = 'TcpConnectError';
+  if (code) {
+    (wrapped as NodeJS.ErrnoException).code = code;
+  }
+  return wrapped;
+}
+
 function probeTcpReachable(host: string, port: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const socket = createConnection({ host, port });
@@ -228,7 +280,7 @@ function probeTcpReachable(host: string, port: number): Promise<void> {
       socket.removeAllListeners();
       socket.destroy();
       if (error) {
-        reject(error);
+        reject(describeTcpFailure(host, port, error));
       } else {
         resolve();
       }
@@ -440,7 +492,7 @@ function modifiedRowCount(status: HiveOperationStatus): number {
 // The driver's errors are plain classes, not Error subclasses, and it splits the
 // server text between `message` and `stack` (which holds infoMessages). Fold all
 // of it into one real Error so nothing is lost on the way to the UI.
-function toHiveError(error: unknown): Error {
+export function toHiveError(error: unknown): Error {
   if (error instanceof Error) {
     return error;
   }
@@ -452,6 +504,9 @@ function toHiveError(error: unknown): Error {
     name?: unknown;
     message?: unknown;
     stack?: unknown;
+    code?: unknown;
+    address?: unknown;
+    port?: unknown;
     response?: unknown;
   };
   const parts: string[] = [];
@@ -463,6 +518,15 @@ function toHiveError(error: unknown): Error {
 
   push(record.message);
   push(record.stack);
+
+  // A socket error can arrive as a plain object whose message is only
+  // "connect ETIMEDOUT" -- the target lives in separate fields. Put it back into
+  // the text so the user can see what was actually attempted.
+  const address = typeof record.address === 'string' ? record.address.trim() : '';
+  const port = record.port === undefined || record.port === null ? '' : String(record.port);
+  if (address && !parts.join(' ').includes(address)) {
+    parts.push(port ? `${address}:${port}` : address);
+  }
 
   const response = record.response as
     | { errorMessage?: unknown; sqlState?: unknown; errorCode?: unknown }
@@ -476,6 +540,12 @@ function toHiveError(error: unknown): Error {
   const wrapped = new Error(message);
   if (typeof record.name === 'string' && record.name.trim()) {
     wrapped.name = record.name;
+  }
+  // The diagnostics layer classifies by `code`, so dropping it here is what made
+  // a failed connection surface as a bare English sentence with no explanation
+  // and no advice.
+  if (typeof record.code === 'string' && record.code.trim()) {
+    (wrapped as NodeJS.ErrnoException).code = record.code;
   }
   return wrapped;
 }

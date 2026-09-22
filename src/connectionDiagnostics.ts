@@ -209,7 +209,19 @@ function errorCode(error: unknown): string | undefined {
 }
 
 function rawErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    return error.message;
+  }
+  // A throwable that is not an Error still usually carries a message; read it
+  // rather than rendering "[object Object]" in the middle of the user's
+  // explanation.
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) {
+      return message;
+    }
+  }
+  return String(error);
 }
 
 export function classifyDatabaseError(error: unknown): DatabaseErrorAdvice {
