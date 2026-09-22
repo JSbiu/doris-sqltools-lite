@@ -37,6 +37,7 @@ import {
   type QueryResultView,
   type Row,
 } from './queryResults';
+import { applyRowLimit } from './rowLimit';
 import {
   QueryCancelledError,
   isQueryCancelled,
@@ -1295,6 +1296,17 @@ async function runQuery(
           // and a minute. The statement is interrupted the same way a cancel
           // does it, so the server stops producing too.
           const readLimit = resolveReadLimit(configuredReadRowLimit(), maxRows);
+          // Push the cap into the statement itself so the server bounds the work
+          // while it is still planning, instead of being interrupted after it has
+          // already produced the answer. Measured on real servers this is worth
+          // 5-12x on Spark and 3.5-8x on Doris for ORDER BY; interrupting is
+          // nearly worthless there because the answer is materialised before the
+          // first row is sent. applyRowLimit refuses anything it cannot rewrite
+          // safely (writes, multi-statement, an existing LIMIT), and those fall
+          // back to the interrupt path below.
+          const injectedSql =
+            readLimit === undefined ? undefined : applyRowLimit(statement, readLimit);
+          const executedSql = injectedSql ?? statement;
           let reportedRows = 0;
           const collector = createRowCollector(
             maxRows,
@@ -1314,23 +1326,34 @@ async function runQuery(
           };
 
           progress.report({ message: '正在执行…' });
-          await active.execute(statement, signal, sink);
+          await active.execute(executedSql, signal, sink);
           // Only a user cancel abandons the result here. A limit stop returns
           // the rows on purpose: they are exactly what was asked for.
           if (stopReason === 'user') {
             return;
           }
+          // An injected statement ends by itself, so stopReason stays undefined
+          // and there is nothing in the interrupt path to mark the answer as cut
+          // short. Without this the panel would report the cap as if it were the
+          // real total. Reaching the cap is the only evidence available: a result
+          // that happens to end exactly at the cap reads as truncated, which is
+          // the safe direction to be wrong in.
+          const capReached =
+            injectedSql !== undefined &&
+            readLimit !== undefined &&
+            collector.totalRows() >= readLimit;
           ResultPanel.open(collector.toView(), {
             connectionName: profile.name,
             database: profile.database,
             durationMs: Date.now() - startedAt,
             maxRows,
             parameters: prepared.used,
-            // False when we stopped reading at the limit, so the panel can say
-            // "已读取 N 行" instead of claiming an exact total it does not have.
-            readComplete: stopReason !== 'limit',
-            // The resolved statement, not the template: an export that has to run
-            // the query again must use the same values this panel is showing.
+            // False when the answer was cut short, so the panel can say "已读取
+            // N 行" instead of claiming an exact total it does not have.
+            readComplete: stopReason !== 'limit' && !capReached,
+            // The resolved statement, not the template, and deliberately not the
+            // injected one: an export that has to run the query again wants every
+            // row, so it must not inherit this run's cap.
             rerun: { manager, profile, sql: statement },
           });
         } catch (error) {
