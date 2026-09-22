@@ -194,3 +194,36 @@ test('clamps out-of-range or invalid cursor offsets', () => {
 test('accepts a final statement without a trailing semicolon', () => {
   assert.equal(findSqlStatementAtOffset('SELECT 1', 0), 'SELECT 1');
 });
+
+test('signals the row limit exactly once, one row past the cap', () => {
+  // The signal is what stops the read, so it has to fire at the first row that
+  // cannot be kept -- not on the last row we wanted, and not repeatedly.
+  let signals = 0;
+  const collector = createRowCollector(3, { onLimitReached: () => { signals += 1; } });
+
+  collector.onRow({ n: 1 });
+  collector.onRow({ n: 2 });
+  collector.onRow({ n: 3 });
+  assert.equal(signals, 0, 'a result that fits is not truncated');
+
+  collector.onRow({ n: 4 });
+  assert.equal(signals, 1);
+
+  collector.onRow({ n: 5 });
+  collector.onRow({ n: 6 });
+  assert.equal(signals, 1, 'only the first row past the cap signals');
+
+  const view = collector.toView();
+  assert.equal(view.rows.length, 3);
+  assert.equal(view.totalRows, 6);
+  assert.equal(view.truncated, true);
+});
+
+test('never signals when the caller gave no callback', () => {
+  const collector = createRowCollector(1);
+  assert.doesNotThrow(() => {
+    collector.onRow({ n: 1 });
+    collector.onRow({ n: 2 });
+  });
+  assert.equal(collector.totalRows(), 2);
+});

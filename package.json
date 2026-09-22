@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -249,6 +249,11 @@
           "type": "boolean",
           "default": true,
           "description": "Substitute ${name} placeholders in a statement before it is sent, asking for any value the template does not answer itself (${name=default}). Works for MySQL, Doris and Spark alike. Write $${name} to keep a placeholder for the server, for example a Spark conf reference. Values are stored locally, never in settings.json."
+        },
+        "dorisSqlLite.readRowLimit": {
+          "type": "number",
+          "default": 0,
+          "description": "How many rows to read before stopping and ignoring the rest of the answer. 0 follows maxResultRows: once one row past the display cap arrives, reading stops and the statement is interrupted, so the panel reports \u201c已读取 N 行\u201d instead of an exact total. A positive number sets an explicit limit (never below maxResultRows). -1 reads the whole answer so the total is exact, which is much slower on large results."
         }
       }
     }

@@ -47,10 +47,12 @@ export async function consumeMysqlStream(
   stream: MysqlRowStream,
   sink: RowSink,
   isCancelled: () => boolean,
+  // Filled in as the stream is read. Passed in rather than returned so the
+  // counts survive an interruption: a stop part-way through leaves the caller
+  // with an accurate "read this many rows" instead of nothing at all.
+  summary: QuerySummary = { rowsRead: 0, affectedRows: 0 },
 ): Promise<QuerySummary> {
   let hasResultSet = false;
-  let affectedRows = 0;
-  let rowsRead = 0;
 
   // mysql2 raises `fields` before the first row. A statement that returns no
   // result set raises it with `undefined` instead, and the single item that
@@ -72,10 +74,10 @@ export async function consumeMysqlStream(
       continue;
     }
     if (!hasResultSet) {
-      affectedRows = affectedRowCount(item);
+      summary.affectedRows = affectedRowCount(item);
       continue;
     }
-    rowsRead += 1;
+    summary.rowsRead += 1;
     const pending = sink.onRow(item as Row);
     if (pending) {
       await pending;
@@ -83,9 +85,9 @@ export async function consumeMysqlStream(
   }
 
   if (!hasResultSet) {
-    sink.onAffectedRows(affectedRows);
+    sink.onAffectedRows(summary.affectedRows);
   }
-  return { rowsRead, affectedRows };
+  return summary;
 }
 
 function affectedRowCount(header: unknown): number {
@@ -139,10 +141,13 @@ class MysqlSession implements QuerySession {
       });
     });
 
+    // Owned by the caller so the counts survive an interrupted read.
+    const summary: QuerySummary = { rowsRead: 0, affectedRows: 0 };
+
     try {
       const stream = rawConnectionOf(this.connection).query(sql).stream();
-      const summary = await consumeMysqlStream(stream, sink, () => cancelled);
-      if (cancelled) {
+      await consumeMysqlStream(stream, sink, () => cancelled, summary);
+      if (cancelled && signal.reason !== 'limit') {
         throw new QueryCancelledError();
       }
       return summary;
@@ -150,10 +155,19 @@ class MysqlSession implements QuerySession {
       if (isConnectionFailure(error)) {
         this.invalid = true;
       }
-      // A cancel that arrived mid-flight surfaces as a driver error; report it
-      // as a cancellation so the user does not see a scary failure toast.
-      if (cancelled && !(error instanceof QueryCancelledError)) {
-        throw new QueryCancelledError();
+      if (cancelled) {
+        // Stopping at a row limit interrupts the server on purpose, so a driver
+        // error raised by that interruption is expected, not a failure. MySQL
+        // streams as it produces, so that kill also stops work the server has
+        // not done yet -- here a limit saves compute, not just bandwidth.
+        if (signal.reason === 'limit') {
+          return summary;
+        }
+        // A cancel that arrived mid-flight surfaces as a driver error; report it
+        // as a cancellation so the user does not see a scary failure toast.
+        if (!(error instanceof QueryCancelledError)) {
+          throw new QueryCancelledError();
+        }
       }
       throw error;
     } finally {

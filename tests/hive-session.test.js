@@ -126,8 +126,7 @@ test('stops fetching once cancellation is observed', async () => {
   let cancelled = false;
   const sink = {
     onColumns: () => undefined,
-    onAffectedRows: () => undefined,
-    onRow: () => {
+    onAffectedRows: () => undefined,    onRow: () => {
       cancelled = true;
     },
   };
@@ -169,4 +168,54 @@ test('waits for an async sink, one row at a time', async () => {
 
   assert.equal(rows.length, 2);
   assert.equal(maxConcurrent, 1);
+});
+
+test('stops in the middle of a batch when the sink has had enough', async () => {
+  // The row limit is decided by the sink (it knows maxResultRows), and a batch
+  // is 1000 rows -- so checking only between batches would decode up to 999 rows
+  // that are about to be thrown away, and one more fetch on top of that.
+  const operation = fakeOperation([[stringRowSet(['a', 'b', 'c', 'd'])]], schema);
+  let cancelled = false;
+  const delivered = [];
+  const sink = {
+    columns: undefined,
+    onColumns(columns) {
+      this.columns = columns;
+    },
+    onAffectedRows: () => undefined,
+    onRow(row) {
+      delivered.push(row);
+      if (delivered.length === 2) {
+        cancelled = true;
+      }
+    },
+  };
+
+  const rowsRead = await drainHiveRows(operation, sink, () => cancelled);
+
+  assert.equal(rowsRead, 2);
+  assert.deepEqual(delivered, [{ name: 'a' }, { name: 'b' }]);
+  assert.deepEqual(sink.columns, ['name']);
+  // Still flushed, so the driver's own buffer does not keep the rest of the batch.
+  assert.equal(operation.flushCount, 1);
+});
+
+test('does not fetch a further batch after the sink stops it', async () => {
+  const operation = fakeOperation(
+    [[stringRowSet(['a'])], [stringRowSet(['b'])], [stringRowSet(['c'])]],
+    schema,
+  );
+  let cancelled = false;
+  const sink = {
+    onColumns: () => undefined,
+    onAffectedRows: () => undefined,
+    onRow() {
+      cancelled = true;
+    },
+  };
+
+  const rowsRead = await drainHiveRows(operation, sink, () => cancelled);
+
+  assert.equal(rowsRead, 1);
+  assert.equal(operation.fetchCount, 1, 'the second and third batches are never asked for');
 });

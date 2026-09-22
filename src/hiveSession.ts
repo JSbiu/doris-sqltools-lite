@@ -97,16 +97,30 @@ export async function drainHiveRows(
       announced = true;
     }
 
+    // Checked per row, not per batch: a caller that has all the rows it needs
+    // decides that in the middle of a batch, and the rest of that batch would
+    // otherwise be decoded only to be thrown away.
+    let stopped = false;
     for (const rowSet of operation.getData()) {
       for (const row of decodeHiveRowSet(rowSet, descriptors)) {
+        if (isCancelled()) {
+          stopped = true;
+          break;
+        }
         rowsRead += 1;
         const pending = sink.onRow(row);
         if (pending) {
           await pending;
         }
       }
+      if (stopped) {
+        break;
+      }
     }
     operation.flush();
+    if (stopped) {
+      break;
+    }
   } while (operation.hasMoreRows());
 
   return rowsRead;
@@ -378,13 +392,14 @@ class HiveQuerySession implements QuerySession {
       void operation.cancel().catch(() => undefined);
     });
 
+    let rowsRead = 0;
     try {
       const status = await this.pollUntilFinished(operation, () => cancelled);
-      if (cancelled) {
+      if (cancelled && signal.reason !== 'limit') {
         throw new QueryCancelledError();
       }
-      const rowsRead = await this.run(() => drainHiveRows(operation, sink, () => cancelled));
-      if (cancelled) {
+      rowsRead = await this.run(() => drainHiveRows(operation, sink, () => cancelled));
+      if (cancelled && signal.reason !== 'limit') {
         throw new QueryCancelledError();
       }
       return { rowsRead, affectedRows: modifiedRowCount(status) };
@@ -392,10 +407,20 @@ class HiveQuerySession implements QuerySession {
       if (isConnectionFailure(error)) {
         this.invalid = true;
       }
-      // A cancel that arrived mid-flight surfaces as a driver error; report it
-      // as a cancellation so the user does not see a scary failure toast.
-      if (cancelled && !(error instanceof QueryCancelledError)) {
-        throw new QueryCancelledError();
+      if (cancelled) {
+        // A limit stop interrupts the operation on purpose. Closing it (in the
+        // finally block) also releases the result the server had already
+        // materialised, which for a large answer is most of what stopping early
+        // buys: the fetch phase is short, the server's own work is not saveable
+        // because an async statement has usually finished before we fetch.
+        if (signal.reason === 'limit') {
+          return { rowsRead, affectedRows: 0 };
+        }
+        // A cancel that arrived mid-flight surfaces as a driver error; report it
+        // as a cancellation so the user does not see a scary failure toast.
+        if (!(error instanceof QueryCancelledError)) {
+          throw new QueryCancelledError();
+        }
       }
       throw error;
     } finally {

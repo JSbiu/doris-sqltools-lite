@@ -20,12 +20,24 @@ export interface RowCollector extends RowSink {
   toView(): QueryResultView;
 }
 
-export function createRowCollector(maxRows: number): RowCollector {
+export interface RowCollectorOptions {
+  // Called exactly once, the moment a row arrives that the collector cannot
+  // keep. That is the earliest point at which truncation is certain, so the
+  // caller can stop reading instead of counting the rest of the answer -- which
+  // is what makes a 600k-row query stop after a couple of thousand rows.
+  onLimitReached?: () => void;
+}
+
+export function createRowCollector(
+  maxRows: number,
+  options: RowCollectorOptions = {},
+): RowCollector {
   const safeMaxRows = Number.isInteger(maxRows) && maxRows >= 1 ? maxRows : 1000;
   const kept: Row[] = [];
   let total = 0;
   let columns: string[] = [];
   let affectedRows = 0;
+  let limitSignalled = false;
 
   return {
     onColumns(next) {
@@ -35,6 +47,11 @@ export function createRowCollector(maxRows: number): RowCollector {
       total += 1;
       if (kept.length < safeMaxRows) {
         kept.push(row);
+        return;
+      }
+      if (!limitSignalled) {
+        limitSignalled = true;
+        options.onLimitReached?.();
       }
     },
     onAffectedRows(count) {

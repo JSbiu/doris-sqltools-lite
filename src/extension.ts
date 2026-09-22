@@ -44,6 +44,7 @@ import {
   type CancelSignal,
   type QuerySession,
   type RowSink,
+  type StopReason,
 } from './querySession';
 
 type ConnectionSessionState = {
@@ -94,6 +95,28 @@ function configuredSqlParameters(): boolean {
     .get<boolean>('sqlParameters', true);
 }
 
+// How many rows to read before giving up on the rest of the answer. 0 follows
+// the display cap, a positive number is an explicit limit, and -1 reads
+// everything so the total can be counted exactly (the slow, pre-0.8.1
+// behaviour). Never returns less than the display cap: stopping before the panel
+// can be filled would be surprising.
+function configuredReadRowLimit(): number {
+  const raw = vscode.workspace
+    .getConfiguration('dorisSqlLite')
+    .get<number>('readRowLimit', 0);
+  return Number.isFinite(raw) ? raw : 0;
+}
+
+export function resolveReadLimit(setting: number, maxRows: number): number | undefined {
+  if (!Number.isInteger(setting) || setting === 0) {
+    return maxRows;
+  }
+  if (setting < 0) {
+    return undefined;
+  }
+  return Math.max(setting, maxRows);
+}
+
 type LiveDocumentConnection = {
   profileId: string;
   session: QuerySession;
@@ -112,6 +135,9 @@ interface ResultPanelMetadata {
   database?: string;
   durationMs: number;
   maxRows: number;
+  // False when reading stopped at the row limit, which means totalRows is a
+  // lower bound rather than a count of the whole answer.
+  readComplete: boolean;
   // The values this run actually substituted, so the panel shows what was really
   // sent rather than what the file says. An empty object means the statement had
   // no parameters.
@@ -208,6 +234,7 @@ class ResultPanel {
     connectionName: '',
     durationMs: 0,
     maxRows: 1000,
+    readComplete: true,
   };
 
   private constructor(private readonly panel: vscode.WebviewPanel) {}
@@ -301,9 +328,13 @@ class ResultPanel {
     const databaseLabel = this.metadata.database
       ? `<span class="meta">${escapeHtml(this.metadata.database)}</span>`
       : '';
-    const truncatedNotice = this.result.truncated
-      ? `<div class="notice">共 ${this.result.totalRows} 行，显示前 ${this.metadata.maxRows} 行。导出为全部 ${this.result.totalRows} 行；复制为当前显示的 ${this.rows.length} 行。</div>`
-      : '';
+    const truncatedNotice = !this.result.truncated
+      ? ''
+      : this.metadata.readComplete
+        ? `<div class="notice">共 ${this.result.totalRows} 行，显示前 ${this.metadata.maxRows} 行。导出为全部 ${this.result.totalRows} 行；复制为当前显示的 ${this.rows.length} 行。</div>`
+        // Reading stopped at the limit, so there is no total to report -- saying
+        // "共 N 行" here would be a lie the user cannot see through.
+        : `<div class="notice">已读取 ${this.result.totalRows} 行后停止（达到读取上限，结果不止这些）。显示前 ${this.metadata.maxRows} 行，复制同样只取这些行；导出不受影响，会重新执行该查询并写出全部结果。</div>`;
     // What was actually substituted, not what the file says: with ${...} in the
     // statement the editor no longer shows the values that ran.
     const parameterEntries = Object.entries(this.metadata.parameters ?? {});
@@ -444,12 +475,21 @@ class ResultPanel {
 
     if (this.result.truncated && !rerun) {
       void vscode.window.showWarningMessage(
-        `这次查询返回 ${totalRows} 行，面板只保留了前 ${keptRows.length} 行，无法导出完整结果。请重新执行一次查询后再导出。`,
+        this.metadata.readComplete
+          ? `这次查询返回 ${totalRows} 行，面板只保留了前 ${keptRows.length} 行，无法导出完整结果。请重新执行一次查询后再导出。`
+          : `这次查询读到 ${totalRows} 行就停止了，面板只保留了前 ${keptRows.length} 行，无法导出完整结果。请重新执行一次查询后再导出。`,
       );
       return false;
     }
 
-    if (totalRows > EXPORT_CONFIRM_ROW_THRESHOLD) {
+    // An incomplete read leaves no row count to compare against the threshold,
+    // and the export will re-run the statement and write an unknown number of
+    // rows -- so that case is always confirmed, or the old guard would silently
+    // stop protecting exactly the queries it was added for.
+    const needsConfirm =
+      totalRows > EXPORT_CONFIRM_ROW_THRESHOLD ||
+      (rerun !== undefined && !this.metadata.readComplete);
+    if (needsConfirm) {
       const parameterNote = Object.keys(this.metadata.parameters ?? {}).length > 0
         // Say so explicitly: the re-run reuses the values of this run, and the
         // panel is showing them, but the file itself no longer contains them.
@@ -457,7 +497,9 @@ class ResultPanel {
         : '';
       const answer = await vscode.window.showWarningMessage(
         rerun
-          ? `将导出 ${totalRows} 行。结果超出了面板保留上限，导出会重新执行一次该查询${parameterNote}。确认继续？`
+          ? this.metadata.readComplete
+            ? `将导出 ${totalRows} 行。结果超出了面板保留上限，导出会重新执行一次该查询${parameterNote}。确认继续？`
+            : `结果未读完，导出会重新执行一次该查询并写出全部结果${parameterNote}，行数未知、可能很大。确认继续？`
           : `将导出 ${totalRows} 行，文件可能很大。确认继续？`,
         { modal: true },
         '继续导出',
@@ -582,7 +624,9 @@ class ResultPanel {
     await vscode.env.clipboard.writeText(toTsv(rows, this.columns));
     if (this.result.truncated) {
       vscode.window.showInformationMessage(
-        `已复制当前显示的 ${rows.length} 行（共 ${this.result.totalRows} 行）；需要全部数据请用导出。`,
+        this.metadata.readComplete
+          ? `已复制当前显示的 ${rows.length} 行（共 ${this.result.totalRows} 行）；需要全部数据请用导出。`
+          : `已复制当前显示的 ${rows.length} 行（结果未读完，实际不止这些）；需要全部数据请用导出。`,
       );
     }
   }
@@ -598,9 +642,14 @@ async function runForExport(
 ): Promise<void> {
   const session = await rerun.manager.open(rerun.profile);
   const listeners = new Set<() => void>();
+  // No row limit here on purpose: an export exists to write every row, so this
+  // path always reads the answer to the end. Only the user can stop it.
   const signal: CancelSignal = {
     get requested(): boolean {
       return token.isCancellationRequested;
+    },
+    get reason(): StopReason | undefined {
+      return token.isCancellationRequested ? 'user' : undefined;
     },
     onRequest(listener: () => void) {
       listeners.add(listener);
@@ -1164,11 +1213,17 @@ async function runQuery(
     cancelled || cancelSource.token.isCancellationRequested || token?.isCancellationRequested === true;
 
   // Adapters listen on this instead of on a vscode token, so the query runner no
-  // longer has to know how a given protocol interrupts a statement.
+  // longer has to know how a given protocol interrupts a statement. `reason`
+  // travels with it because the two ways of stopping lead to opposite outcomes:
+  // a cancel discards the rows, a row limit means we are done and want them.
   const cancelListeners = new Set<() => void>();
+  let stopReason: StopReason | undefined;
   const signal: CancelSignal = {
     get requested(): boolean {
       return cancelled;
+    },
+    get reason(): StopReason | undefined {
+      return stopReason;
     },
     onRequest(listener: () => void) {
       cancelListeners.add(listener);
@@ -1188,16 +1243,19 @@ async function runQuery(
     await target.close().catch(() => undefined);
   };
 
-  const requestCancel = (): void => {
+  const stop = (reason: StopReason): void => {
     if (cancelled) {
       return;
     }
     cancelled = true;
-    progressHandle?.report({ message: '正在取消…' });
+    stopReason = reason;
+    progressHandle?.report({ message: reason === 'user' ? '正在取消…' : '已读满，正在停止读取…' });
     for (const listener of [...cancelListeners]) {
       listener();
     }
   };
+
+  const requestCancel = (): void => stop('user');
 
   const subscriptions = [cancelSource.token.onCancellationRequested(requestCancel)];
   try {
@@ -1230,11 +1288,18 @@ async function runQuery(
           const maxRows = vscode.workspace
             .getConfiguration('dorisSqlLite')
             .get<number>('maxResultRows', 1000);
-          // Only the first maxRows rows are kept; every row past that is merely
-          // counted as it streams by, which is what keeps a large answer from
-          // costing hundreds of megabytes.
+          // Rows arrive one at a time and only the first maxRows are kept. Once
+          // one row past that cap has arrived, truncation is certain -- so the
+          // read stops there instead of counting the rest of the answer, which
+          // for a few hundred thousand rows is the difference between seconds
+          // and a minute. The statement is interrupted the same way a cancel
+          // does it, so the server stops producing too.
+          const readLimit = resolveReadLimit(configuredReadRowLimit(), maxRows);
           let reportedRows = 0;
-          const collector = createRowCollector(maxRows);
+          const collector = createRowCollector(
+            maxRows,
+            readLimit === undefined ? {} : { onLimitReached: () => stop('limit') },
+          );
           const sink: RowSink = {
             onColumns: (columns) => collector.onColumns(columns),
             onAffectedRows: (count) => collector.onAffectedRows(count),
@@ -1250,7 +1315,9 @@ async function runQuery(
 
           progress.report({ message: '正在执行…' });
           await active.execute(statement, signal, sink);
-          if (signal.requested) {
+          // Only a user cancel abandons the result here. A limit stop returns
+          // the rows on purpose: they are exactly what was asked for.
+          if (stopReason === 'user') {
             return;
           }
           ResultPanel.open(collector.toView(), {
@@ -1259,6 +1326,9 @@ async function runQuery(
             durationMs: Date.now() - startedAt,
             maxRows,
             parameters: prepared.used,
+            // False when we stopped reading at the limit, so the panel can say
+            // "已读取 N 行" instead of claiming an exact total it does not have.
+            readComplete: stopReason !== 'limit',
             // The resolved statement, not the template: an export that has to run
             // the query again must use the same values this panel is showing.
             rerun: { manager, profile, sql: statement },

@@ -44,6 +44,29 @@ function recordingSink() {
   };
 }
 
+test('keeps a partial row count when the stream fails mid-way', async () => {
+  // A row limit stops the statement by killing it, and the driver then reports
+  // that interruption as an error. The caller still has the rows it collected,
+  // so the count has to survive the throw -- a caller-owned summary is what
+  // makes "read 1001 rows" reportable instead of "read nothing".
+  const sink = recordingSink();
+  const stream = new FakeQueryStream([{ id: 1 }, { id: 2 }], [{ name: 'id' }]);
+  stream._read = function read() {
+    if (!this.fieldsSent) {
+      this.fieldsSent = true;
+      this.emit('fields', this.fields);
+    }
+    this.push(this.items[0]);
+    this.destroy(new Error('ER_QUERY_INTERRUPTED: Query execution was interrupted'));
+  };
+  const summary = { rowsRead: 0, affectedRows: 0 };
+
+  await assert.rejects(() => consumeMysqlStream(stream, sink, () => false, summary));
+
+  assert.equal(summary.rowsRead, 1, 'the row that did arrive is still counted');
+  assert.equal(sink.rows.length, 1);
+});
+
 test('streams result rows into the sink with their column names', async () => {
   const sink = recordingSink();
   const stream = new FakeQueryStream([{ id: 1 }, { id: 2 }], [{ name: 'id' }]);

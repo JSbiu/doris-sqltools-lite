@@ -32,8 +32,16 @@ export interface QuerySummary {
 // whether cancellation was requested and to be told once when it happens --
 // how a driver actually interrupts a statement differs per protocol (MySQL
 // needs a second connection and KILL QUERY, HiveServer2 has CancelOperation).
+//
+// Why a statement stopped is carried alongside *that* it stopped, because the
+// two reasons lead to opposite outcomes: a user cancel throws the rows away,
+// while a row limit means the caller already has everything it wanted and must
+// get them back.
+export type StopReason = 'user' | 'limit';
+
 export interface CancelSignal {
   readonly requested: boolean;
+  readonly reason: StopReason | undefined;
   onRequest(listener: () => void): { dispose(): void };
 }
 
@@ -63,5 +71,6 @@ export function isQueryCancelled(error: unknown): boolean {
 // the form's "测试连接"), where no token exists to listen to.
 export const neverCancelled: CancelSignal = {
   requested: false,
+  reason: undefined,
   onRequest: () => ({ dispose: () => undefined }),
 };
