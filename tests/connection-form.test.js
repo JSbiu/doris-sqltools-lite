@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const {
   DEFAULT_PORTS,
+  coerceDraft,
   draftFromProfile,
   draftToProfile,
   emptyDraft,
@@ -414,4 +415,53 @@ test('reads jdbc user and password query parameters', () => {
 
   // Real userinfo still wins when both forms are present.
   assert.equal(parseConnectionUrl('mysql://alice:pw@10.0.0.5:3306/app?user=bob').username, 'alice');
+});
+
+test('keeps the Spark type when sanitising what the webview posted', () => {
+  // Regression: this used to be `type === 'MySQL' ? 'MySQL' : 'Doris'`, which
+  // rewrote Spark to Doris. The form then blocked the test button on a password
+  // and, far worse, saving stored a MySQL/Doris connection that would be opened
+  // with the wrong wire protocol.
+  const coerced = coerceDraft({
+    name: 'SparkThrift',
+    type: 'Spark',
+    host: '10.0.0.9',
+    port: '7011',
+    username: 'hadoop',
+    hiveAuth: 'nosasl',
+  });
+
+  assert.equal(coerced.type, 'Spark');
+  assert.equal(coerced.hiveAuth, 'nosasl');
+  assert.equal(coerced.port, '7011');
+});
+
+test('falls back to Doris for an unknown connection type', () => {
+  assert.equal(coerceDraft({ type: 'Postgres' }).type, 'Doris');
+  assert.equal(coerceDraft({ type: 42 }).type, 'Doris');
+  assert.equal(coerceDraft({}).type, 'Doris');
+  assert.equal(coerceDraft(null).type, 'Doris');
+});
+
+test('trims text fields but never the password', () => {
+  const coerced = coerceDraft({
+    name: '  Local Doris  ',
+    host: ' 127.0.0.1 ',
+    port: ' 9030 ',
+    password: ' pw with spaces ',
+    ssl: 'yes',
+  });
+
+  assert.equal(coerced.name, 'Local Doris');
+  assert.equal(coerced.host, '127.0.0.1');
+  assert.equal(coerced.port, '9030');
+  assert.equal(coerced.password, ' pw with spaces ');
+  // Only a real boolean counts.
+  assert.equal(coerced.ssl, false);
+  assert.equal(coerceDraft({ ssl: true }).ssl, true);
+});
+
+test('falls back to the default hive auth mode for an unknown value', () => {
+  assert.equal(coerceDraft({ hiveAuth: 'kerberos' }).hiveAuth, 'plain');
+  assert.equal(coerceDraft({}).hiveAuth, 'plain');
 });

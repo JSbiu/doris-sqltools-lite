@@ -1,4 +1,10 @@
-import type { ConnectionProfile, DatabaseType, HiveAuthMode } from './connectionSecurity';
+import {
+  isDatabaseType,
+  isHiveAuthMode,
+  type ConnectionProfile,
+  type DatabaseType,
+  type HiveAuthMode,
+} from './connectionSecurity';
 
 // Pure draft logic for the connection form. Deliberately free of the `vscode`
 // import so it can be unit-tested from plain Node.
@@ -75,6 +81,37 @@ export function draftFromProfile(profile: ConnectionProfile): ConnectionDraft {
     ssl: profile.ssl === true,
     hiveAuth: profile.hiveAuth ?? 'plain',
     clearSavedPassword: false,
+  };
+}
+
+export function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+// Sanitises whatever the webview posts back. A webview is a separate context, so
+// nothing arriving from it can be trusted: every field is re-derived here and
+// anything unrecognised falls back to a safe default instead of reaching the
+// connection code.
+export function coerceDraft(raw: unknown): ConnectionDraft {
+  const source = (raw ?? {}) as Record<string, unknown>;
+  return {
+    name: text(source.name),
+    // Must accept every DatabaseType, Spark included. An earlier version only
+    // knew MySQL/Doris here and rewrote everything else to Doris, so a Spark
+    // connection was silently treated as MySQL -- the form demanded a password
+    // for it and, worse, saving it stored the wrong protocol.
+    type: isDatabaseType(source.type) ? source.type : 'Doris',
+    host: text(source.host),
+    port: text(source.port),
+    database: text(source.database),
+    username: text(source.username),
+    // Never trimmed: leading or trailing spaces can be part of a password.
+    password: typeof source.password === 'string' ? source.password : '',
+    ssl: source.ssl === true,
+    // Anything the driver does not understand falls back to the default rather
+    // than reaching the connection code.
+    hiveAuth: isHiveAuthMode(source.hiveAuth) ? source.hiveAuth : 'plain',
+    clearSavedPassword: source.clearSavedPassword === true,
   };
 }
 

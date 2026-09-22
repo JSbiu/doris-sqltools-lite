@@ -1,16 +1,18 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { formatDatabaseError } from './connectionDiagnostics';
-import { isHiveAuthMode, type ConnectionProfile } from './connectionSecurity';
+import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, showError } from './connectionManager';
 import { testQuerySession } from './sessionFactory';
 
 import {
   DEFAULT_PORTS,
+  coerceDraft,
   draftFromProfile,
   draftToProfile,
   emptyDraft,
   parseConnectionInput,
+  text,
   validateDraft,
   type ConnectionDraft,
   type ConnectionFormMode,
@@ -147,29 +149,6 @@ type FormInbound =
   | { type: 'parseInput'; input?: unknown }
   | { type: 'test'; draft?: unknown }
   | { type: 'save'; draft?: unknown };
-
-function coerceDraft(raw: unknown): ConnectionDraft {
-  const source = (raw ?? {}) as Record<string, unknown>;
-  return {
-    name: text(source.name),
-    type: text(source.type) === 'MySQL' ? 'MySQL' : 'Doris',
-    host: text(source.host),
-    port: text(source.port),
-    database: text(source.database),
-    username: text(source.username),
-    // Never trimmed: leading or trailing spaces can be part of a password.
-    password: typeof source.password === 'string' ? source.password : '',
-    ssl: source.ssl === true,
-    // Anything the driver does not understand falls back to the default rather
-    // than reaching the connection code.
-    hiveAuth: isHiveAuthMode(source.hiveAuth) ? source.hiveAuth : 'plain',
-    clearSavedPassword: source.clearSavedPassword === true,
-  };
-}
-
-function text(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
 
 async function testDraft(
   manager: ConnectionManager,
