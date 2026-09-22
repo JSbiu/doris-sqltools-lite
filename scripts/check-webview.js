@@ -23,6 +23,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const defaultTargets = [
   { label: 'result panel', file: 'src/extension.ts' },
   { label: 'connection form', file: 'src/connectionForm.ts' },
+  { label: 'parameter form', file: 'src/parameterForm.ts' },
 ];
 
 const scriptBlock = /<script\b[^>]*nonce="\$\{([A-Za-z0-9_$]+)\}"[^>]*>([\s\S]*?)<\/script>/g;

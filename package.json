@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.7.10",
+  "version": "0.8.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -74,6 +74,11 @@
       {
         "command": "dorisSqlLite.clearExportDirectory",
         "title": "Doris SQL Lite: Clear Default Export Directory",
+        "icon": "$(close)"
+      },
+      {
+        "command": "dorisSqlLite.forgetSqlParameters",
+        "title": "Doris SQL Lite: Forget This File's Query Parameters",
         "icon": "$(close)"
       }
     ],
@@ -239,6 +244,11 @@
           "type": "boolean",
           "default": true,
           "description": "Prefix a cell with an apostrophe when its text starts with = or @, or with + or - followed by something that is not a plain number, so Excel, LibreOffice and Google Sheets do not evaluate exported data as a formula. Turn this off if a downstream tool needs the exact stored value."
+        },
+        "dorisSqlLite.sqlParameters": {
+          "type": "boolean",
+          "default": true,
+          "description": "Substitute ${name} placeholders in a statement before it is sent, asking for any value the template does not answer itself (${name=default}). Works for MySQL, Doris and Spark alike. Write $${name} to keep a placeholder for the server, for example a Spark conf reference. Values are stored locally, never in settings.json."
         }
       }
     }

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { createWriteStream } from 'node:fs';
 import { mkdir, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { type ConnectionProfile } from './connectionSecurity';
@@ -17,6 +17,19 @@ import {
   type ExportFormat,
 } from './exports';
 import { buildExportFileName, normalizeExportDirectory } from './exportPath';
+import { openParameterForm } from './parameterForm';
+import {
+  forgetParameterValues,
+  readParameterValues,
+  rememberParameterValues,
+  type ParameterMemento,
+} from './parameterStore';
+import {
+  parseSqlParameters,
+  resolveSqlParameters,
+  unescapeDollarPlaceholders,
+  type SqlParameter,
+} from './sqlParameters';
 import {
   createRowCollector,
   findSqlStatementAtOffset,
@@ -71,6 +84,16 @@ function configuredEscapeFormulas(): boolean {
     .get<boolean>('escapeSpreadsheetFormulas', true);
 }
 
+// Hue-style ${name} substitution. Applies to every connection type: it happens
+// on our side of the wire, so Doris and MySQL get the same behaviour as Spark
+// even though only Spark would recognise a placeholder on its own -- and Spark
+// would silently turn an unknown name into an empty string rather than fail.
+function configuredSqlParameters(): boolean {
+  return vscode.workspace
+    .getConfiguration('dorisSqlLite')
+    .get<boolean>('sqlParameters', true);
+}
+
 type LiveDocumentConnection = {
   profileId: string;
   session: QuerySession;
@@ -78,11 +101,21 @@ type LiveDocumentConnection = {
 
 let activeConnectionSession: ConnectionSessionState | undefined;
 
+// Where remembered parameter values live. Workspace state when a folder is open
+// (so a project keeps its own values), otherwise global. Neither is part of
+// Settings Sync, and neither is settings.json -- these are business values, not
+// configuration.
+let parameterState: ParameterMemento | undefined;
+
 interface ResultPanelMetadata {
   connectionName: string;
   database?: string;
   durationMs: number;
   maxRows: number;
+  // The values this run actually substituted, so the panel shows what was really
+  // sent rather than what the file says. An empty object means the statement had
+  // no parameters.
+  parameters?: Record<string, string>;
   // Enough to run the statement again. Rows past maxResultRows are counted but
   // never stored, so a truncated result has no full set in memory to export.
   rerun?: {
@@ -271,6 +304,14 @@ class ResultPanel {
     const truncatedNotice = this.result.truncated
       ? `<div class="notice">共 ${this.result.totalRows} 行，显示前 ${this.metadata.maxRows} 行。导出为全部 ${this.result.totalRows} 行；复制为当前显示的 ${this.rows.length} 行。</div>`
       : '';
+    // What was actually substituted, not what the file says: with ${...} in the
+    // statement the editor no longer shows the values that ran.
+    const parameterEntries = Object.entries(this.metadata.parameters ?? {});
+    const parameterNotice = parameterEntries.length === 0
+      ? ''
+      : `<div class="params"><span class="params-label">本次参数</span>${parameterEntries
+          .map(([name, value]) => `<span class="param"><span class="param-name">${escapeHtml(name)}</span>=<span class="param-value">${escapeHtml(value)}</span></span>`)
+          .join('')}</div>`;
     const resultContent = hasTable
       ? `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，未返回数据</td></tr>`}</tbody></table></div>`
       : `<section class="success-state"><span class="success-icon">✓</span><div><strong>执行成功</strong><p>${this.result.affectedRows} 行受到影响 · ${formatDuration(this.metadata.durationMs)}</p></div></section>`;
@@ -299,6 +340,9 @@ class ResultPanel {
     button.ghost:hover { background: var(--vscode-list-hoverBackground); }
     button:disabled { cursor: default; opacity: .65; }
     .notice { margin-bottom: 10px; padding: 8px 10px; color: var(--vscode-editorWarning-foreground); background: var(--vscode-inputValidation-warningBackground); border-left: 3px solid var(--vscode-editorWarning-foreground); }
+    .params { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 10px; padding: 8px 10px; border-left: 3px solid var(--vscode-panel-border); background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background)); font-family: var(--vscode-editor-font-family); font-size: 12px; }
+    .params-label { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); }
+    .param-name { color: var(--vscode-descriptionForeground); }
     .table-wrap { overflow: auto; max-height: calc(100vh - 92px); border: 1px solid var(--vscode-panel-border); }
     table { border-collapse: separate; border-spacing: 0; min-width: 100%; white-space: nowrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
     th, td { border-bottom: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); padding: 6px 9px; text-align: left; vertical-align: top; }
@@ -332,6 +376,7 @@ class ResultPanel {
     ` : ''}
   </div>
   ${truncatedNotice}
+  ${parameterNotice}
   ${resultContent}
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
@@ -405,9 +450,14 @@ class ResultPanel {
     }
 
     if (totalRows > EXPORT_CONFIRM_ROW_THRESHOLD) {
+      const parameterNote = Object.keys(this.metadata.parameters ?? {}).length > 0
+        // Say so explicitly: the re-run reuses the values of this run, and the
+        // panel is showing them, but the file itself no longer contains them.
+        ? '（沿用本次的查询参数）'
+        : '';
       const answer = await vscode.window.showWarningMessage(
         rerun
-          ? `将导出 ${totalRows} 行。结果超出了面板保留上限，导出会重新执行一次该查询。确认继续？`
+          ? `将导出 ${totalRows} 行。结果超出了面板保留上限，导出会重新执行一次该查询${parameterNote}。确认继续？`
           : `将导出 ${totalRows} 行，文件可能很大。确认继续？`,
         { modal: true },
         '继续导出',
@@ -725,6 +775,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     showError('迁移旧连接密码失败', error);
   }
 
+  // A project keeps its own parameter values; without a folder there is nothing
+  // to scope to, so fall back to global state.
+  parameterState = vscode.workspace.workspaceFolders?.length
+    ? context.workspaceState
+    : context.globalState;
+
   context.subscriptions.push(
     connectionStatus,
     vscode.window.registerTreeDataProvider('dorisSqlLiteExplorer', provider),
@@ -925,10 +981,111 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         .update('exportDirectory', '', vscode.ConfigurationTarget.Global);
       vscode.window.showInformationMessage(`已清除默认导出目录（原：${current}），导出时将重新弹出位置选择。`);
     }),
+    vscode.commands.registerCommand('dorisSqlLite.forgetSqlParameters', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showInformationMessage('请先打开要清除参数的 SQL 文件。');
+        return;
+      }
+      if (!parameterState) {
+        vscode.window.showInformationMessage('当前没有记住任何查询参数。');
+        return;
+      }
+
+      const documentKey = editor.document.uri.toString();
+      const remembered = readParameterValues(parameterState, documentKey);
+      const names = Object.keys(remembered);
+      if (names.length === 0) {
+        vscode.window.showInformationMessage(
+          `「${basename(editor.document.fileName)}」没有记住查询参数。`,
+        );
+        return;
+      }
+
+      // Confirm by name: this is the way out of a value that has gone stale, and
+      // it is not obvious from the editor that anything was stored at all.
+      const answer = await vscode.window.showWarningMessage(
+        `将清除「${basename(editor.document.fileName)}」记住的 ${names.length} 个查询参数：${names.join('、')}。下次执行会重新询问。`,
+        { modal: true },
+        '清除',
+      );
+      if (answer !== '清除') {
+        return;
+      }
+
+      await forgetParameterValues(parameterState, documentKey);
+      vscode.window.showInformationMessage(`已清除 ${names.length} 个查询参数。`);
+    }),
   );
 }
 
 
+
+// The declaration text a value was entered against, as written after the `=`:
+// `US` for ${country=US}, `A, B` for ${country=A, B}, '' when there is none.
+// Comparing it verbatim is what lets an edit to the default inside the SQL
+// invalidate a remembered value.
+function declarationText(parameter: SqlParameter): string {
+  return parameter.candidates.join(', ');
+}
+
+// Resolves Hue-style ${...} parameters, asking for anything the template does not
+// answer by itself. Returns undefined when the user backs out.
+async function prepareStatementSql(
+  sql: string,
+  documentKey: string,
+  documentLabel: string,
+): Promise<{ sql: string; used: Record<string, string> } | undefined> {
+  if (!configuredSqlParameters()) {
+    // Still unwrap $$ escapes: they are part of the template's meaning either way.
+    return { sql: unescapeDollarPlaceholders(sql), used: {} };
+  }
+
+  const parameters = parseSqlParameters(sql);
+  if (parameters.length === 0) {
+    return { sql: unescapeDollarPlaceholders(sql), used: {} };
+  }
+
+  const declarations: Record<string, string> = {};
+  for (const parameter of parameters) {
+    declarations[parameter.name] = declarationText(parameter);
+  }
+
+  const decision = await openParameterForm({
+    documentLabel,
+    sql,
+    parameters,
+    initialValues: parameterState
+      ? readParameterValues(parameterState, documentKey, declarations)
+      : {},
+  });
+  if (!decision) {
+    return undefined;
+  }
+  if (decision.action === 'raw') {
+    return { sql: unescapeDollarPlaceholders(sql), used: {} };
+  }
+
+  const resolution = resolveSqlParameters(sql, decision.values);
+  if (resolution.missing.length > 0) {
+    // The panel will not submit with an unanswered parameter, so this is a
+    // backstop: a placeholder must never reach the server by accident, because
+    // Spark turns an unknown one into an empty string instead of failing.
+    vscode.window.showWarningMessage(
+      `这些参数没有值，已取消执行：${resolution.missing.join('、')}。`,
+    );
+    return undefined;
+  }
+
+  if (parameterState) {
+    try {
+      await rememberParameterValues(parameterState, documentKey, decision.values, declarations);
+    } catch {
+      // Remembering is a convenience; a state write failure must not block a query.
+    }
+  }
+  return { sql: resolution.sql, used: resolution.used };
+}
 
 async function runQuery(
   manager: ConnectionManager,
@@ -963,6 +1120,21 @@ async function runQuery(
     );
     return;
   }
+
+  // ${...} is resolved before a connection is chosen, so cancelling the panel
+  // cannot leave a session behind. Substituting here, after the statement was
+  // picked out of the document, is what keeps a value containing `;` or `--`
+  // from ever moving a statement boundary.
+  const prepared = await prepareStatementSql(
+    sql,
+    documentKey,
+    basename(editor.document.fileName),
+  );
+  if (!prepared) {
+    return;
+  }
+  const statement = prepared.sql;
+
   const id = requestedConnectionId
     ?? connectionSession.documentConnections.get(documentKey)
     ?? connectionSession.defaultConnectionId;
@@ -1077,7 +1249,7 @@ async function runQuery(
           };
 
           progress.report({ message: '正在执行…' });
-          await active.execute(sql, signal, sink);
+          await active.execute(statement, signal, sink);
           if (signal.requested) {
             return;
           }
@@ -1086,7 +1258,10 @@ async function runQuery(
             database: profile.database,
             durationMs: Date.now() - startedAt,
             maxRows,
-            rerun: { manager, profile, sql },
+            parameters: prepared.used,
+            // The resolved statement, not the template: an export that has to run
+            // the query again must use the same values this panel is showing.
+            rerun: { manager, profile, sql: statement },
           });
         } catch (error) {
           if (isQueryCancelled(error) || isCancelled(token)) {
@@ -1195,6 +1370,7 @@ function normalizeCommandConnectionId(value: unknown): string | undefined {
 export async function deactivate(): Promise<void> {
   const session = activeConnectionSession;
   activeConnectionSession = undefined;
+  parameterState = undefined;
   if (session) {
     for (const source of session.cancellationSources.values()) {
       source.cancel();
