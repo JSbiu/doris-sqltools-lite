@@ -108,6 +108,18 @@ function configuredReadRowLimit(): number {
   return Number.isFinite(raw) ? raw : 0;
 }
 
+// A connection that goes away without a FIN leaves the read loop parked on a
+// packet that will never arrive -- the progress notification keeps spinning and
+// the file stays marked as running. This is how long a live connection may go
+// quiet mid-answer before it is presumed dead; the clock only starts once rows
+// have begun arriving, so a slow statement is never cut off by it.
+function configuredQueryIdleTimeoutMs(): number {
+  const raw = vscode.workspace
+    .getConfiguration('dorisSqlLite')
+    .get<number>('queryIdleTimeoutMs', 300_000);
+  return Number.isFinite(raw) ? raw : 300_000;
+}
+
 export function resolveReadLimit(setting: number, maxRows: number): number | undefined {
   if (!Number.isInteger(setting) || setting === 0) {
     return maxRows;
@@ -641,7 +653,7 @@ async function runForExport(
   writer: TsvWriter,
   token: vscode.CancellationToken,
 ): Promise<void> {
-  const session = await rerun.manager.open(rerun.profile);
+  const session = await rerun.manager.open(rerun.profile, configuredQueryIdleTimeoutMs());
   const listeners = new Set<() => void>();
   // No row limit here on purpose: an export exists to write every row, so this
   // path always reads the answer to the end. Only the user can stop it.
@@ -811,7 +823,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   connectionStatus.name = 'Doris SQL Lite Connection';
   connectionStatus.command = 'dorisSqlLite.setConnection';
   const refreshConnectionStatus = (): void => updateConnectionStatus(connectionStatus, manager, connectionSession);
-  refreshConnectionStatus();
+
+  // A running query needs a way out that does not depend on the progress
+  // notification still being on screen: dismissing that notification used to
+  // leave nothing to click, and the command that does the job is not
+  // discoverable by name. This item is shown only while something is running,
+  // so it never becomes one more thing to ignore.
+  const runningStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
+  runningStatus.name = 'Doris SQL Lite Running Query';
+  runningStatus.text = '$(stop-circle) 正在执行…';
+  runningStatus.tooltip = '当前有 SQL 正在执行。点击取消。';
+  runningStatus.command = 'dorisSqlLite.cancelQuery';
+
+  const refreshRunningStatus = (): void => {
+    if (connectionSession.cancellationSources.size > 0) {
+      runningStatus.show();
+    } else {
+      runningStatus.hide();
+    }
+    // Gates the Cancel Query entries in the editor menus, so they appear only
+    // when there is something to cancel.
+    void vscode.commands.executeCommand(
+      'setContext',
+      'dorisSqlLite.queryRunning',
+      connectionSession.cancellationSources.size > 0,
+    );
+  };
+
+  // The two items answer different questions ("which connection" vs "is
+  // something running"), but both go stale at the same moments.
+  const refreshStatusBars = (): void => {
+    refreshConnectionStatus();
+    refreshRunningStatus();
+  };
+  refreshStatusBars();
 
   try {
     await manager.migrateConnectionScope();
@@ -833,6 +878,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     connectionStatus,
+    runningStatus,
     vscode.window.registerTreeDataProvider('dorisSqlLiteExplorer', provider),
     vscode.window.onDidChangeActiveTextEditor(refreshConnectionStatus),
     vscode.workspace.onDidCloseTextDocument((document) => {
@@ -927,16 +973,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
     }),
     vscode.commands.registerCommand('dorisSqlLite.runQuery', async (commandArgument?: unknown) => {
-      await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument), refreshConnectionStatus);
+      await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument), refreshStatusBars);
     }),
     vscode.commands.registerCommand('dorisSqlLite.cancelQuery', async () => {
-      const documentKey = vscode.window.activeTextEditor?.document.uri.toString();
-      const source = documentKey ? connectionSession.cancellationSources.get(documentKey) : undefined;
-      if (!source) {
-        vscode.window.showInformationMessage('当前 SQL 文件没有正在执行的查询。');
+      const target = await pickRunningQuery(connectionSession);
+      if (!target) {
+        vscode.window.showInformationMessage('当前没有正在执行的查询。');
         return;
       }
-      source.cancel();
+      if (target.source.token.isCancellationRequested) {
+        vscode.window.showInformationMessage(`${target.label} 上的查询正在取消中…`);
+        return;
+      }
+      // Cancel runs through a second connection for KILL QUERY, so it is not
+      // instant; saying so here keeps the click from looking ignored if the
+      // progress notification has already been dismissed.
+      target.source.cancel();
+      vscode.window.showInformationMessage(`正在取消 ${target.label} 上的查询…`);
     }),
     vscode.commands.registerCommand('dorisSqlLite.testConnection', async (item?: ConnectionItem) => {
       const profile = await chooseProfile(manager, item?.profile.id);
@@ -1141,7 +1194,7 @@ async function runQuery(
   manager: ConnectionManager,
   connectionSession: ConnectionSessionState,
   requestedConnectionId?: string,
-  onConnectionChanged?: () => void,
+  onStateChanged?: () => void,
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'sql') {
@@ -1165,9 +1218,16 @@ async function runQuery(
 
   const documentKey = editor.document.uri.toString();
   if (connectionSession.runningDocuments.has(documentKey)) {
-    vscode.window.showInformationMessage(
-      '当前 SQL 文件已有查询正在执行；可从进度通知取消，或执行 Doris SQL Lite: Cancel Query。',
+    // Offer the cancel right here: the command does exist, but its name is not
+    // one anyone can guess, and the progress notification may already have been
+    // dismissed by the time this message appears.
+    const choice = await vscode.window.showInformationMessage(
+      '当前 SQL 文件已有查询正在执行。',
+      '取消该查询',
     );
+    if (choice === '取消该查询') {
+      connectionSession.cancellationSources.get(documentKey)?.cancel();
+    }
     return;
   }
 
@@ -1198,11 +1258,15 @@ async function runQuery(
   }
   connectionSession.documentConnections.set(documentKey, profile.id);
   connectionSession.defaultConnectionId = profile.id;
-  onConnectionChanged?.();
+  onStateChanged?.();
 
   connectionSession.runningDocuments.add(documentKey);
   const cancelSource = new vscode.CancellationTokenSource();
   connectionSession.cancellationSources.set(documentKey, cancelSource);
+  // Shown for as long as the query runs, so there is always something on screen
+  // that cancels it -- the progress notification can be dismissed, and until now
+  // nothing else pointed at the cancel command.
+  onStateChanged?.();
 
   const startedAt = Date.now();
   let progressHandle: vscode.Progress<{ message?: string }> | undefined;
@@ -1273,7 +1337,7 @@ async function runQuery(
           let active = session;
           if (!active) {
             progress.report({ message: '正在建立连接…' });
-            active = await manager.open(profile);
+            active = await manager.open(profile, configuredQueryIdleTimeoutMs());
             session = active;
             connectionSession.liveConnections.set(documentKey, {
               profileId: profile.id,
@@ -1373,12 +1437,42 @@ async function runQuery(
     cancelSource.dispose();
     connectionSession.cancellationSources.delete(documentKey);
     connectionSession.runningDocuments.delete(documentKey);
+    onStateChanged?.();
     // A session that already had to be torn down (or was dropped to cancel) must
     // not be handed to the next statement.
     if (session?.broken) {
       await dropSession(session);
     }
   }
+}
+
+// The status bar item and the menu entries are global, so with two files
+// running at once there is no way to tell which query was meant. Prefer the
+// document the user is looking at, then the only one there is, then ask.
+async function pickRunningQuery(
+  connectionSession: ConnectionSessionState,
+): Promise<{ label: string; source: vscode.CancellationTokenSource } | undefined> {
+  const entries = [...connectionSession.cancellationSources.entries()];
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  const activeKey = vscode.window.activeTextEditor?.document.uri.toString();
+  const preferred = entries.find(([key]) => key === activeKey);
+  if (preferred) {
+    return { label: documentLabel(preferred[0]), source: preferred[1] };
+  }
+  if (entries.length === 1) {
+    return { label: documentLabel(entries[0][0]), source: entries[0][1] };
+  }
+
+  const candidates = entries.map(([key, source]) => ({ label: documentLabel(key), source }));
+  return vscode.window.showQuickPick(candidates, { title: '取消哪个文件上的查询？' });
+}
+
+function documentLabel(documentKey: string): string {
+  const uri = vscode.Uri.parse(documentKey);
+  return basename(uri.path) || documentKey;
 }
 
 async function chooseProfile(

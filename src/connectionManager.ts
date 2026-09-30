@@ -137,11 +137,11 @@ export class ConnectionManager {
   // wrong stored password is dropped and re-asked once, and a typed password is
   // only persisted after the handshake actually succeeded. Which wire protocol
   // is used is the session factory's business, not this class's.
-  public async open(profile: ConnectionProfile): Promise<QuerySession> {
+  public async open(profile: ConnectionProfile, idleTimeoutMs?: number): Promise<QuerySession> {
     const stored = await this.readPassword(profile.id);
     if (stored !== undefined) {
       try {
-        return await openQuerySession(profile, stored);
+        return await openQuerySession(profile, stored, idleTimeoutMs);
       } catch (error) {
         if (classifyDatabaseError(error).kind !== 'auth') {
           throw error;
@@ -153,10 +153,13 @@ export class ConnectionManager {
       }
     }
 
-    return this.promptAndOpen(profile);
+    return this.promptAndOpen(profile, idleTimeoutMs);
   }
 
-  private async promptAndOpen(profile: ConnectionProfile): Promise<QuerySession> {
+  private async promptAndOpen(
+    profile: ConnectionProfile,
+    idleTimeoutMs?: number,
+  ): Promise<QuerySession> {
     const password = await vscode.window.showInputBox({
       title: `Password for ${profile.name}`,
       prompt: passwordPromptFor(profile),
@@ -169,7 +172,7 @@ export class ConnectionManager {
     }
 
     // Connect first, persist second: a rejected password must never be stored.
-    const session = await openQuerySession(profile, password);
+    const session = await openQuerySession(profile, password, idleTimeoutMs);
     try {
       await this.savePassword(profile.id, password);
     } catch (error) {

@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.8.2",
+  "version": "0.8.4",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -117,6 +117,18 @@
           "command": "dorisSqlLite.runQuery",
           "when": "editorTextFocus && resourceLangId == sql",
           "group": "navigation@1"
+        },
+        {
+          "command": "dorisSqlLite.cancelQuery",
+          "when": "resourceLangId == sql && dorisSqlLite.queryRunning",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "dorisSqlLite.cancelQuery",
+          "when": "resourceLangId == sql && dorisSqlLite.queryRunning",
+          "group": "navigation"
         }
       ],
       "view/title": [
@@ -254,6 +266,12 @@
           "type": "number",
           "default": 0,
           "description": "How many rows to read before stopping and ignoring the rest of the answer. 0 follows maxResultRows: once one row past the display cap arrives, reading stops and the statement is interrupted, so the panel reports \u201c已读取 N 行\u201d instead of an exact total. A positive number sets an explicit limit (never below maxResultRows). -1 reads the whole answer so the total is exact, which is much slower on large results."
+        },
+        "dorisSqlLite.queryIdleTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 0,
+          "description": "How long a live connection may go without answering before it is treated as gone (milliseconds). It applies in two places, both of which would otherwise wait forever on a peer that disappeared without closing the connection (a dropped VPN, a firewall that forgot the flow, a killed server process). While the statement is still running on the server, each status request is raced against this limit -- those are small round trips whose cost barely depends on how long the statement itself runs, so the limit measures one request rather than the total runtime, and a Spark job may still legitimately run for hours. Keep it well above the server's worst status latency, since a server saturated with work can take seconds to answer a status request; the default is deliberately generous for that reason. While the answer is arriving, the clock restarts on every row and only starts after the first one, so a statement that has produced nothing yet is never cut off. 0 disables the check."
         }
       }
     }

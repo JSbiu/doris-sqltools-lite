@@ -2,6 +2,7 @@ import type mysql from 'mysql2/promise';
 import type { ConnectionProfile } from './connectionSecurity';
 import { isConnectionFailure } from './connectionDiagnostics';
 import { createMysqlConnection } from './mysqlConnect';
+import { QueryIdleTimeoutError, createIdleGuard, settleWithin } from './idleGuard';
 import { columnNamesFromFields, type Row } from './queryResults';
 import {
   QueryCancelledError,
@@ -15,12 +16,23 @@ import {
 // version), fall back to tearing the socket down after this long.
 const CANCEL_FALLBACK_TIMEOUT_MS = 5_000;
 
+// How long the answer may go quiet before the connection is presumed dead. The
+// clock only starts once rows have started arriving, so this never fires for a
+// slow statement -- see idleGuard.ts. Five minutes is far longer than any gap a
+// live MySQL/Doris server leaves mid-result.
+export const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
+
+// How long the goodbye may take. Only a connection that is already gone will
+// ever hit this -- see close() below.
+const CLOSE_TIMEOUT_MS = 2_000;
+
 export async function openMysqlSession(
   profile: ConnectionProfile,
   password: string,
+  idleTimeoutMs: number = DEFAULT_IDLE_TIMEOUT_MS,
 ): Promise<QuerySession> {
   const connection = await createMysqlConnection(profile, password);
-  return new MysqlSession(profile, password, connection);
+  return new MysqlSession(profile, password, connection, idleTimeoutMs);
 }
 
 // mysql2/promise hides the callback-style connection behind `.connection`, and
@@ -51,6 +63,11 @@ export async function consumeMysqlStream(
   // counts survive an interruption: a stop part-way through leaves the caller
   // with an accurate "read this many rows" instead of nothing at all.
   summary: QuerySummary = { rowsRead: 0, affectedRows: 0 },
+  // Called once per item that arrives, which is the only proof available that
+  // the socket is still alive -- the caller's idle guard is armed and reset
+  // from here. Deliberately not called for `fields`: that fires before the
+  // answer starts, and a statement still working has sent nothing at all.
+  onActivity?: () => void,
 ): Promise<QuerySummary> {
   let hasResultSet = false;
 
@@ -66,6 +83,7 @@ export async function consumeMysqlStream(
   });
 
   for await (const item of stream) {
+    onActivity?.();
     if (isCancelled()) {
       // Keep draining rather than breaking out: tearing the stream down while
       // the server is still sending leaves unread packets on the connection,
@@ -106,6 +124,7 @@ class MysqlSession implements QuerySession {
     private readonly profile: ConnectionProfile,
     private readonly password: string,
     private readonly connection: mysql.Connection,
+    private readonly idleTimeoutMs: number,
   ) {}
 
   public get broken(): boolean {
@@ -116,6 +135,16 @@ class MysqlSession implements QuerySession {
     let cancelled = false;
     let settled = false;
     let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+    // Not a query timeout: this only starts counting once the answer has begun
+    // arriving, so a statement that is merely slow never trips it. What it
+    // catches is a socket that goes away without a FIN -- the read loop would
+    // otherwise be parked on it forever, holding the "this file is running"
+    // flag and leaving the progress notification spinning with no way out.
+    const idle = createIdleGuard(this.idleTimeoutMs, () => {
+      this.invalid = true;
+      this.connection.destroy();
+    });
 
     const subscription = signal.onRequest(() => {
       cancelled = true;
@@ -146,12 +175,41 @@ class MysqlSession implements QuerySession {
 
     try {
       const stream = rawConnectionOf(this.connection).query(sql).stream();
-      await consumeMysqlStream(stream, sink, () => cancelled, summary);
+      const read = consumeMysqlStream(stream, sink, () => cancelled, summary, () =>
+        idle.noteActivity(),
+      );
+      // Awaiting the read on its own is not safe. When a socket dies without an
+      // error -- which is exactly what a vanished peer leaves behind -- mysql2
+      // emits nothing at all, so the iterator stays parked on a value that will
+      // never arrive, and destroying the socket does not wake it. Measured: the
+      // guard fired and the read then sat there for another 17 seconds anyway.
+      // Racing against the guard is what actually gives control back.
+      const outcome = await Promise.race([
+        read.then(
+          () => 'read' as const,
+          (error: unknown) => ({ error }),
+        ),
+        idle.whenExpired.then(() => 'expired' as const),
+      ]);
+      if (outcome === 'expired') {
+        throw new QueryIdleTimeoutError(this.idleTimeoutMs);
+      }
+      if (typeof outcome === 'object') {
+        throw outcome.error;
+      }
       if (cancelled && signal.reason !== 'limit') {
         throw new QueryCancelledError();
       }
       return summary;
     } catch (error) {
+      // Checked before the cancel branch: when the guard is what ended the
+      // read, the driver error that surfaced is a symptom of the teardown, and
+      // the user needs to hear about the dead connection rather than see it
+      // reported as a failed statement.
+      if (idle.expired) {
+        this.invalid = true;
+        throw new QueryIdleTimeoutError(this.idleTimeoutMs);
+      }
       if (isConnectionFailure(error)) {
         this.invalid = true;
       }
@@ -172,6 +230,7 @@ class MysqlSession implements QuerySession {
       throw error;
     } finally {
       settled = true;
+      idle.dispose();
       if (fallbackTimer !== undefined) {
         clearTimeout(fallbackTimer);
       }
@@ -185,7 +244,12 @@ class MysqlSession implements QuerySession {
     }
     this.closed = true;
     this.invalid = true;
-    await this.connection.end().catch(() => undefined);
+    // `end()` waits for the server to acknowledge the goodbye, and a connection
+    // that went half-open never sends one. Without a deadline the caller's
+    // finally block -- and with it the progress notification and the "this file
+    // is running" flag -- would hang here even after the read itself was
+    // abandoned. Past the deadline the socket is of no use to anyone.
+    await settleWithin(this.connection.end(), CLOSE_TIMEOUT_MS, () => this.connection.destroy());
   }
 
   // A short-lived second connection used to KILL the running statement without

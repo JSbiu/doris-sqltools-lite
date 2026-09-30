@@ -11,10 +11,13 @@ import { neverCancelled, type QuerySession } from './querySession';
 export async function openQuerySession(
   profile: ConnectionProfile,
   password: string,
+  // How long a live connection may go quiet mid-answer before it is presumed
+  // dead. Left undefined, each adapter applies its own default; see idleGuard.
+  idleTimeoutMs?: number,
 ): Promise<QuerySession> {
   return profile.type === 'Spark'
-    ? openHiveSession(profile, password)
-    : openMysqlSession(profile, password);
+    ? openHiveSession(profile, password, idleTimeoutMs)
+    : openMysqlSession(profile, password, idleTimeoutMs);
 }
 
 // Opening a session plus one trivial statement, which is what the connection
