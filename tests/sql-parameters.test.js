@@ -8,6 +8,17 @@ const {
   unescapeDollarPlaceholders,
 } = require('../out/sqlParameters.js');
 
+test('prototype property names require explicit parameter values and remain visible in the used-value snapshot', () => {
+  const sql = 'SELECT ${constructor}, ${toString}, ${__proto__};';
+  const unresolved = resolveSqlParameters(sql, {});
+  assert.deepEqual(unresolved.missing, ['constructor', 'toString', '__proto__']);
+  const values = JSON.parse('{"constructor":"1","toString":"2","__proto__":"3"}');
+  const resolved = resolveSqlParameters(sql, values);
+  assert.equal(resolved.sql, 'SELECT 1, 2, 3;');
+  assert.deepEqual(Object.keys(resolved.used), ['constructor', 'toString', '__proto__']);
+  assert.equal(resolved.used.__proto__, '3');
+});
+
 test('finds a plain parameter', () => {
   const sql = "SELECT CAST('${family_created_from}' AS TIMESTAMP)";
 

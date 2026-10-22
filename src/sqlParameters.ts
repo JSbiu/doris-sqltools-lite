@@ -186,7 +186,7 @@ export function resolveSqlParameters(sql: string, values: ParameterValues): Para
     out += sql.slice(cursor, match.start);
     cursor = match.end;
 
-    const supplied = values[match.name];
+    const supplied = Object.hasOwn(values, match.name) ? values[match.name] : undefined;
     const value = supplied !== undefined && supplied !== '' ? supplied : defaults.get(match.name);
 
     if (value === undefined) {
@@ -200,7 +200,7 @@ export function resolveSqlParameters(sql: string, values: ParameterValues): Para
     }
 
     out += value;
-    used[match.name] = value;
+    Object.defineProperty(used, match.name, { value, enumerable: true, configurable: true });
   }
 
   out += sql.slice(cursor);

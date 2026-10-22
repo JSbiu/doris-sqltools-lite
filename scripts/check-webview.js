@@ -24,6 +24,7 @@ const defaultTargets = [
   { label: 'result panel', file: 'src/extension.ts' },
   { label: 'connection form', file: 'src/connectionForm.ts' },
   { label: 'parameter form', file: 'src/parameterForm.ts' },
+  { label: 'execution plan', file: 'src/planPanel.ts' },
 ];
 
 const scriptBlock = /<script\b[^>]*nonce="\$\{([A-Za-z0-9_$]+)\}"[^>]*>([\s\S]*?)<\/script>/g;

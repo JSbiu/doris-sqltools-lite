@@ -32,12 +32,14 @@ import {
 } from './sqlParameters';
 import {
   createRowCollector,
-  findSqlStatementAtOffset,
   hasMultipleStatements,
   type QueryResultView,
   type Row,
 } from './queryResults';
 import { applyRowLimit } from './rowLimit';
+import { resolveStatementContext, findDirectiveConnection } from './sqlDirectives';
+import { buildExplainSql, planText } from './executionPlan';
+import { openPlanPanel } from './planPanel';
 import {
   QueryCancelledError,
   isQueryCancelled,
@@ -136,6 +138,9 @@ type LiveDocumentConnection = {
 };
 
 let activeConnectionSession: ConnectionSessionState | undefined;
+// Cover parameter / connection prompts too: repeated shortcuts must not start
+// a second execution before the first has registered its cancellation source.
+const pendingExecutions = new Set<string>();
 
 // Where remembered parameter values live. Workspace state when a folder is open
 // (so a project keeps its own values), otherwise global. Neither is part of
@@ -145,6 +150,7 @@ let parameterState: ParameterMemento | undefined;
 
 interface ResultPanelMetadata {
   connectionName: string;
+  statementName?: string;
   database?: string;
   durationMs: number;
   maxRows: number;
@@ -261,7 +267,7 @@ class ResultPanel {
 
     const panel = vscode.window.createWebviewPanel(
       'dorisSqlLiteResults',
-      `Results · ${metadata.connectionName}`,
+      `Results · ${metadata.statementName ?? metadata.connectionName}`,
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true },
     );
@@ -302,7 +308,7 @@ class ResultPanel {
   private update(result: QueryResultView, metadata: ResultPanelMetadata): void {
     this.result = result;
     this.metadata = metadata;
-    this.panel.title = `Results · ${metadata.connectionName}`;
+    this.panel.title = `Results · ${metadata.statementName ?? metadata.connectionName}`;
     this.render();
   }
 
@@ -430,6 +436,7 @@ class ResultPanel {
       <strong><span id="visible-count">${this.rows.length}</span> 行</strong>
       <span class="meta">${this.columns.length} 列</span>
       <span class="meta connection">${escapeHtml(this.metadata.connectionName)}</span>
+      ${this.metadata.statementName ? `<span class="meta">${escapeHtml(this.metadata.statementName)}</span>` : ''}
       ${databaseLabel}
       <span class="meta">${formatDuration(this.metadata.durationMs)}</span>
     </span>
@@ -1081,7 +1088,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
     }),
     vscode.commands.registerCommand('dorisSqlLite.runQuery', async (commandArgument?: unknown) => {
-      await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument), refreshStatusBars);
+      try {
+        await runQuery(manager, connectionSession, normalizeCommandConnectionId(commandArgument), refreshStatusBars);
+      } catch (error) {
+        showError('执行失败', error);
+      }
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.explainQuery', async () => {
+      try {
+        await runQuery(manager, connectionSession, undefined, refreshStatusBars, true);
+      } catch (error) {
+        showError('查看执行计划失败', error);
+      }
     }),
     vscode.commands.registerCommand('dorisSqlLite.cancelQuery', async () => {
       const target = await pickRunningQuery(connectionSession);
@@ -1246,6 +1264,7 @@ async function prepareStatementSql(
   sql: string,
   documentKey: string,
   documentLabel: string,
+  commentValues: Readonly<Record<string, string>> = {},
 ): Promise<{ sql: string; used: Record<string, string> } | undefined> {
   if (!configuredSqlParameters()) {
     // Still unwrap $$ escapes: they are part of the template's meaning either way.
@@ -1257,6 +1276,13 @@ async function prepareStatementSql(
     return { sql: unescapeDollarPlaceholders(sql), used: {} };
   }
 
+  // Explicit comment values and inline defaults need no second confirmation.
+  // Only unresolved values need the existing parameter form.
+  const supplied = resolveSqlParameters(sql, commentValues);
+  if (supplied.missing.length === 0) {
+    return { sql: supplied.sql, used: { ...supplied.used } };
+  }
+
   const declarations: Record<string, string> = {};
   for (const parameter of parameters) {
     declarations[parameter.name] = declarationText(parameter);
@@ -1266,9 +1292,10 @@ async function prepareStatementSql(
     documentLabel,
     sql,
     parameters,
-    initialValues: parameterState
+    fixedValues: commentValues,
+    initialValues: { ...(parameterState
       ? readParameterValues(parameterState, documentKey, declarations)
-      : {},
+      : {}), ...commentValues },
   });
   if (!decision) {
     return undefined;
@@ -1277,7 +1304,7 @@ async function prepareStatementSql(
     return { sql: unescapeDollarPlaceholders(sql), used: {} };
   }
 
-  const resolution = resolveSqlParameters(sql, decision.values);
+  const resolution = resolveSqlParameters(sql, { ...decision.values, ...commentValues });
   if (resolution.missing.length > 0) {
     // The panel will not submit with an unanswered parameter, so this is a
     // backstop: a placeholder must never reach the server by accident, because
@@ -1303,18 +1330,50 @@ async function runQuery(
   connectionSession: ConnectionSessionState,
   requestedConnectionId?: string,
   onStateChanged?: () => void,
+  explain = false,
+): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  const documentKey = editor?.document.uri.toString();
+  if (!documentKey || editor?.document.languageId !== 'sql') {
+    vscode.window.showInformationMessage('请先打开 SQL 文件。');
+    return;
+  }
+  if (pendingExecutions.has(documentKey)) {
+    const source = connectionSession.cancellationSources.get(documentKey);
+    const choice = source
+      ? await vscode.window.showInformationMessage('当前 SQL 文件已有查询正在执行。', '取消该查询')
+      : await vscode.window.showInformationMessage('当前 SQL 文件正在准备执行，请先完成参数或连接选择。');
+    if (choice === '取消该查询') source?.cancel();
+    return;
+  }
+  pendingExecutions.add(documentKey);
+  try {
+    await executeQuery(manager, connectionSession, requestedConnectionId, onStateChanged, explain);
+  } finally {
+    pendingExecutions.delete(documentKey);
+  }
+}
+
+async function executeQuery(
+  manager: ConnectionManager,
+  connectionSession: ConnectionSessionState,
+  requestedConnectionId?: string,
+  onStateChanged?: () => void,
+  explain = false,
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'sql') {
     vscode.window.showInformationMessage('请先打开 SQL 文件。');
     return;
   }
-  const sql = editor.selection.isEmpty
-    ? findSqlStatementAtOffset(
-      editor.document.getText(),
-      editor.document.offsetAt(editor.selection.active),
-    )
-    : editor.document.getText(editor.selection);
+  const sourceUri = editor.document.uri;
+  const sourceLabel = basename(editor.document.fileName);
+  const context = resolveStatementContext(
+    editor.document.getText(),
+    editor.document.offsetAt(editor.selection.start),
+    editor.document.offsetAt(editor.selection.end),
+  );
+  const sql = context?.sql;
   if (!sql?.trim()) {
     vscode.window.showInformationMessage('没有可执行的 SQL。');
     return;
@@ -1346,7 +1405,8 @@ async function runQuery(
   const prepared = await prepareStatementSql(
     sql,
     documentKey,
-    basename(editor.document.fileName),
+    sourceLabel,
+    context?.parameters,
   );
   if (!prepared) {
     return;
@@ -1356,10 +1416,15 @@ async function runQuery(
   const id = requestedConnectionId
     ?? connectionSession.documentConnections.get(documentKey)
     ?? connectionSession.defaultConnectionId;
-  const profile = await chooseProfile(manager, id);
+  const profile = context?.connection
+    ? findDirectiveConnection(manager.getProfiles(), context.connection)
+    : await chooseProfile(manager, id);
   if (!profile) {
     return;
   }
+  // Build before touching the session: malformed / already-EXPLAIN input must
+  // never fall through to executing the original statement.
+  const explainSql = explain ? buildExplainSql(statement, profile.type) : undefined;
   const active = connectionSession.liveConnections.get(documentKey);
   if (active && active.profileId !== profile.id) {
     await closeDocumentConnection(connectionSession, documentKey);
@@ -1435,7 +1500,7 @@ async function runQuery(
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `执行 ${profile.name}`,
+        title: `${explain ? '查看计划' : '执行'} ${context?.name ?? profile.name}`,
         cancellable: true,
       },
       async (progress, token) => {
@@ -1456,6 +1521,27 @@ async function runQuery(
           }
           if (signal.requested) {
             await dropSession(active);
+            return;
+          }
+          if (explainSql !== undefined) {
+            // Plans are text, often many rows long. Never apply the result
+            // display/read cap or append a LIMIT to this request.
+            const collector = createRowCollector(Number.MAX_SAFE_INTEGER);
+            progress.report({ message: '正在获取完整执行计划…' });
+            await active.execute(explainSql, signal, collector);
+            if (signal.requested) return;
+            const result = collector.toView();
+            openPlanPanel({
+              name: context?.name ?? sourceLabel,
+              source: `${sourceUri.toString()}:${context?.line ?? 1}`,
+              connectionName: profile.name,
+              databaseType: profile.type,
+              parameters: prepared.used,
+              sql: statement,
+              explainSql,
+              plan: planText(result.columns, result.rows),
+              generatedAt: new Date().toISOString(),
+            }, sourceUri);
             return;
           }
           const maxRows = vscode.workspace
@@ -1516,6 +1602,7 @@ async function runQuery(
             collector.totalRows() >= readLimit;
           ResultPanel.open(collector.toView(), {
             connectionName: profile.name,
+            statementName: context?.name,
             database: profile.database,
             durationMs: Date.now() - startedAt,
             maxRows,

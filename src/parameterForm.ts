@@ -22,6 +22,8 @@ export interface ParameterFormInputs {
   parameters: readonly SqlParameter[];
   // Remembered values, already filtered against the template's declarations.
   initialValues: Readonly<Record<string, string>>;
+  // Values declared in SQL comments stay authoritative in the missing-value form.
+  fixedValues?: Readonly<Record<string, string>>;
 }
 
 export interface ParameterFormDecision {
@@ -111,7 +113,11 @@ function pickValues(
   const values: Record<string, string> = {};
   for (const parameter of inputs.parameters) {
     const value = source[parameter.name];
-    values[parameter.name] = typeof value === 'string' ? value : '';
+    const fixed = inputs.fixedValues && Object.hasOwn(inputs.fixedValues, parameter.name)
+      ? inputs.fixedValues[parameter.name] : undefined;
+    Object.defineProperty(values, parameter.name, {
+      value: fixed ?? (typeof value === 'string' ? value : ''), enumerable: true,
+    });
   }
   return values;
 }
@@ -131,16 +137,18 @@ interface DisplayParameter {
   value: string;
   candidates: readonly string[];
   labels: readonly (string | undefined)[];
-  source: 'used' | 'default' | 'choose' | 'needed';
+  source: 'used' | 'default' | 'choose' | 'needed' | 'comment';
 }
 
 function displayParameters(inputs: ParameterFormInputs): DisplayParameter[] {
   return inputs.parameters.map((parameter) => {
-    const remembered = inputs.initialValues[parameter.name];
+    const remembered = Object.hasOwn(inputs.initialValues, parameter.name) ? inputs.initialValues[parameter.name] : undefined;
     const inlineDefault = parameter.candidates.length === 1 ? parameter.candidates[0] : undefined;
-    const value = remembered ?? inlineDefault ?? '';
+    const fixed = inputs.fixedValues && Object.hasOwn(inputs.fixedValues, parameter.name)
+      ? inputs.fixedValues[parameter.name] : undefined;
+    const value = fixed ?? remembered ?? inlineDefault ?? '';
     const source: DisplayParameter['source'] =
-      remembered !== undefined
+      fixed !== undefined ? 'comment' : remembered !== undefined
         ? 'used'
         : inlineDefault !== undefined
           ? 'default'
@@ -158,6 +166,7 @@ function displayParameters(inputs: ParameterFormInputs): DisplayParameter[] {
 }
 
 const SOURCE_LABEL: Record<DisplayParameter['source'], string> = {
+  comment: '来自 SQL 注释，请在编辑器修改',
   used: '上次使用',
   default: '来自 SQL 默认值',
   choose: '请选择',
@@ -187,7 +196,7 @@ function renderParameterForm(inputs: ParameterFormInputs): string {
         <span class="name">${escapeHtml(parameter.name)}</span>
         <span class="tag tag-${parameter.source}">${SOURCE_LABEL[parameter.source]}</span>
       </div>
-      <input type="text" spellcheck="false" autocomplete="off" data-value="${escapeHtml(parameter.name)}"${listAttribute} value="${escapeHtml(parameter.value)}" />
+      <input type="text" spellcheck="false" autocomplete="off" data-value="${escapeHtml(parameter.name)}"${listAttribute} value="${escapeHtml(parameter.value)}"${parameter.source === 'comment' ? ' readonly' : ''} />
       ${list}
       ${labels ? `<p class="hint">可选：${escapeHtml(labels)}</p>` : ''}
     </div>`;

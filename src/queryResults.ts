@@ -86,7 +86,7 @@ export function columnNamesFromFields(fields: unknown): string[] {
     .filter(Boolean);
 }
 
-interface SqlStatementRange {
+export interface SqlStatementRange {
   start: number;
   end: number;
 }
@@ -115,7 +115,7 @@ export function findSqlStatementAtOffset(sql: string, offset: number): string | 
   return sql.slice(nearest.start, nearest.end);
 }
 
-function findSqlStatementRanges(sql: string): SqlStatementRange[] {
+export function findSqlStatementRanges(sql: string): SqlStatementRange[] {
   let quote: "'" | '"' | '`' | undefined;
   let lineComment = false;
   let blockComment = false;
