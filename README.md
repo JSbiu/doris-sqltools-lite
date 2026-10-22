@@ -1,11 +1,11 @@
 # Doris SQLTools Lite
 
-一个面向 Windows + VS Code 的极简 MySQL / Doris / Spark Thrift 查询插件 MVP。
+一个极简的 VS Code MySQL / Doris / Spark Thrift 查询扩展。
 
 
-## 本机开发（WSL）
+## 开发调试
 
-在 VS Code 的 Ubuntu-22.04 窗口中打开项目，使用 Linux Node 和 pnpm：
+在 VS Code 中打开项目，使用当前开发环境的 Node.js 和 pnpm：
 
 ```bash
 pnpm install --frozen-lockfile

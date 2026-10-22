@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "数据库扩展开发（WSL）",
+      "name": "数据库扩展开发",
       "type": "extensionHost",
       "request": "launch",
       "args": [
