@@ -323,17 +323,27 @@ class ResultPanel {
     const shownRows = this.rows.map((row) =>
       this.columns.map((column) => {
         const value = row[column];
-        return value === null || value === undefined
-          ? '<span class="null-value">NULL</span>'
-          : escapeHtml(displayValue(value));
+        if (value === null || value === undefined) {
+          return { html: '<span class="null-value">NULL</span>', sort: ' data-sort-null="1"' };
+        }
+        const text = displayValue(value);
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          return {
+            html: escapeHtml(text),
+            sort: ` data-sort-kind="number" data-sort-value="${escapeHtml(String(value))}"`,
+          };
+        }
+        // Everything else is sorted as its displayed text, which keeps text IDs
+        // and non-finite numbers exactly as the user sees them.
+        return { html: escapeHtml(text), sort: ` data-sort-kind="text" data-sort-value="${escapeHtml(text)}"` };
       }),
     );
     const header = [
       '<th class="row-number" aria-label="Row number">#</th>',
-      ...this.columns.map((column) => `<th>${escapeHtml(column)}</th>`),
+      ...this.columns.map((column, index) => `<th scope="col" aria-sort="none" data-sort-header="${index}"><button type="button" class="sort-button" data-sort-column="${index}" data-sort-label="${escapeHtml(column)}" title="排序：${escapeHtml(column)}" aria-label="按 ${escapeHtml(column)} 排序：当前为原始顺序">${escapeHtml(column)}<span class="sort-indicator" aria-hidden="true">↕</span></button></th>`),
     ].join('');
     const body = shownRows
-      .map((cells, index) => `<tr data-row><td class="row-number">${index + 1}</td>${cells.map((cell) => `<td>${cell}</td>`).join('')}</tr>`)
+      .map((cells, index) => `<tr data-row data-original-index="${index}"><td class="row-number">${index + 1}</td>${cells.map((cell) => `<td${cell.sort}>${cell.html}</td>`).join('')}</tr>`)
       .join('');
     const hasTable = this.columns.length > 0;
     const exportDirectory = configuredExportDirectory();
@@ -359,6 +369,11 @@ class ResultPanel {
     const resultContent = hasTable
       ? `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，未返回数据</td></tr>`}</tbody></table></div>`
       : `<section class="success-state"><span class="success-icon">✓</span><div><strong>执行成功</strong><p>${this.result.affectedRows} 行受到影响 · ${formatDuration(this.metadata.durationMs)}</p></div></section>`;
+    // Sorting and filtering only ever reorder what is already in the panel, so
+    // say that next to the table instead of implying a server-side ORDER BY.
+    const sortScopeNotice = !hasTable
+      ? ''
+      : `<div class="sort-scope"><span id="sort-status" class="sort-status" role="status" aria-live="polite">原始顺序</span><span>排序与筛选仅作用于已加载的 ${this.rows.length} 行；不改变复制和导出内容/顺序。</span></div>`;
 
     this.panel.webview.html = `<!doctype html>
 <html lang="zh-CN">
@@ -386,6 +401,12 @@ class ResultPanel {
     .notice { margin-bottom: 10px; padding: 8px 10px; color: var(--vscode-editorWarning-foreground); background: var(--vscode-inputValidation-warningBackground); border-left: 3px solid var(--vscode-editorWarning-foreground); }
     .params { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 10px; padding: 8px 10px; border-left: 3px solid var(--vscode-panel-border); background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background)); font-family: var(--vscode-editor-font-family); font-size: 12px; }
     .params-label { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); }
+    .sort-scope { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 10px; color: var(--vscode-descriptionForeground); font-size: 12px; }
+    .sort-status { color: var(--vscode-foreground); font-weight: 600; }
+    .sort-button { display: inline-flex; align-items: center; gap: 6px; min-height: 0; padding: 0; color: inherit; background: transparent; border: 0; font: inherit; font-weight: 600; cursor: pointer; }
+    .sort-button:hover { color: var(--vscode-textLink-foreground); background: transparent; }
+    .sort-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+    .sort-indicator { color: var(--vscode-descriptionForeground); font-weight: 400; }
     .param-name { color: var(--vscode-descriptionForeground); }
     .table-wrap { overflow: auto; max-height: calc(100vh - 92px); border: 1px solid var(--vscode-panel-border); }
     table { border-collapse: separate; border-spacing: 0; min-width: 100%; white-space: nowrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
@@ -421,6 +442,7 @@ class ResultPanel {
   </div>
   ${truncatedNotice}
   ${parameterNotice}
+  ${sortScopeNotice}
   ${resultContent}
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
@@ -459,6 +481,92 @@ class ResultPanel {
         if (matches) visible += 1;
       });
       document.getElementById('visible-count').textContent = String(visible);
+    });
+    // Sorting only reorders the rows already in the table. It never posts a
+    // message, so copy, export and the stored result keep their original order.
+    const tbody = document.querySelector('tbody');
+    const sortButtons = [...document.querySelectorAll('th button[data-sort-column]')];
+    const sortStatus = document.getElementById('sort-status');
+    const directionLabels = { ascending: '升序', descending: '降序' };
+    let sortColumn = -1;
+    let sortDirection = 'none';
+    const originalIndex = (row) => Number(row.getAttribute('data-original-index'));
+    const sortKey = (row, column) => {
+      const cell = row.querySelectorAll('td')[column + 1];
+      if (!cell || cell.hasAttribute('data-sort-null')) return { group: 'null', number: 0, text: '' };
+      const raw = cell.getAttribute('data-sort-value') ?? '';
+      return cell.getAttribute('data-sort-kind') === 'number'
+        ? { group: 'number', number: Number(raw), text: raw }
+        : { group: 'text', number: 0, text: raw };
+    };
+    const groupRank = (group) => {
+      if (sortDirection === 'descending') {
+        return group === 'text' ? 0 : group === 'number' ? 1 : 2;
+      }
+      return group === 'number' ? 0 : group === 'text' ? 1 : 2;
+    };
+    const restoreOriginalOrder = () => {
+      if (!tbody) return;
+      [...rows]
+        .sort((left, right) => originalIndex(left) - originalIndex(right))
+        .forEach((row) => tbody.appendChild(row));
+    };
+    const applySort = () => {
+      if (!tbody) return;
+      const decorated = rows.map((row) => ({ row, index: originalIndex(row), key: sortKey(row, sortColumn) }));
+      decorated.sort((left, right) => {
+        const groupDelta = groupRank(left.key.group) - groupRank(right.key.group);
+        if (groupDelta !== 0) return groupDelta;
+        let delta = 0;
+        if (left.key.group === 'number') {
+          delta = left.key.number - right.key.number;
+        } else if (left.key.group === 'text') {
+          delta = left.key.text < right.key.text ? -1 : left.key.text > right.key.text ? 1 : 0;
+        }
+        if (delta !== 0) return sortDirection === 'descending' ? -delta : delta;
+        return left.index - right.index;
+      });
+      decorated.forEach(({ row }) => tbody.appendChild(row));
+    };
+    const labelOf = (button) => button.getAttribute('data-sort-label') ?? '';
+    const updateSortUi = () => {
+      sortButtons.forEach((button) => {
+        const column = Number(button.getAttribute('data-sort-column'));
+        const active = sortDirection !== 'none' && column === sortColumn;
+        button.closest('th')?.setAttribute('aria-sort', active ? sortDirection : 'none');
+        const indicator = button.querySelector('.sort-indicator');
+        if (indicator) indicator.textContent = active ? (sortDirection === 'ascending' ? '↑' : '↓') : '↕';
+        const label = labelOf(button);
+        button.setAttribute(
+          'aria-label',
+          active
+            ? '按 ' + label + ' 排序：当前' + directionLabels[sortDirection] + '，点击切换为' + (sortDirection === 'ascending' ? '降序' : '原始顺序')
+            : '按 ' + label + ' 排序：当前为原始顺序',
+        );
+      });
+      if (!sortStatus) return;
+      const current = sortButtons.find((button) => Number(button.getAttribute('data-sort-column')) === sortColumn);
+      sortStatus.textContent = sortDirection === 'none' || !current
+        ? '原始顺序'
+        : '按“' + labelOf(current) + '”' + directionLabels[sortDirection];
+    };
+    sortButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const column = Number(button.getAttribute('data-sort-column'));
+        if (column !== sortColumn) {
+          sortColumn = column;
+          sortDirection = 'ascending';
+        } else {
+          sortDirection = sortDirection === 'none' ? 'ascending' : sortDirection === 'ascending' ? 'descending' : 'none';
+        }
+        if (sortDirection === 'none') {
+          sortColumn = -1;
+          restoreOriginalOrder();
+        } else {
+          applySort();
+        }
+        updateSortUi();
+      });
     });
     window.addEventListener('message', ({ data }) => {
       const button = pendingButton ?? (data.action === 'copy' ? copyButton : exportButton);

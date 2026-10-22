@@ -2,6 +2,19 @@
 
 一个面向 Windows + VS Code 的极简 MySQL / Doris / Spark Thrift 查询插件 MVP。
 
+
+## 本机开发（WSL）
+
+在 VS Code 的 Ubuntu-22.04 窗口中打开项目，使用 Linux Node 和 pnpm：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build
+```
+
+F5 使用 `.vscode/launch.json`：先由项目现有构建脚本生成 `dist/extension.js` 及 source map，再启动扩展开发窗口。该配置不自动连接数据库。
+`.vscode/tasks.json` 保存构建入口。扩展版本及业务行为按已有版本规则处理。
+
 ## 协作入口
 
 项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`（由 `AGENTS.md` 导入），不进入 Git。共享知识与具体需求记录以项目文档为准。
@@ -32,6 +45,8 @@
 5. 按 `Ctrl+Enter` 或右键 `Doris SQL Lite: Run Query at Cursor`：有选区时执行选中的单条 SQL；没有选区时自动执行光标所在或最近的一条 SQL。语句里含 `${...}` 参数时会先弹出参数面板（见下节）。
 6. 查询可以取消：进度通知上的取消按钮，或命令面板执行 `Doris SQL Lite: Cancel Query`。取消走 `KILL QUERY`，活动连接会保留，`USE`、临时表和会话变量继续生效；服务端不响应时会退化为断开该连接。同一 SQL 文件不会并发启动重复查询。
 7. 结果复用同一个面板，可查看连接、database、耗时、行列数和截断提示，并支持行号、筛选、TSV 导出和复制。**面板最多保留 `maxResultRows` 行（默认 1000），并在读到上限后停止读取；导出写的是全部结果（结果被截断时会重新执行一次查询），复制只复制当前显示的那部分。**
+
+结果列头支持三态排序：点击数据列列头依次为升序、降序、恢复原始顺序，换列从升序开始；`#` 行号列不参与排序，当前列与方向显示在列头和表格上方。排序按驱动返回的实际 JavaScript 类型处理：有限 `number` 按数值比较；字符串（包括 `"10"`、`"2"` 这类数字字符串）按区分大小写的 UTF-16 文本比较，空字符串是最小文本；其他类型按面板展示文本归入文本组。`null` / `undefined` 视为 `NULL`，两个方向都排在最后。升序为 number → text → NULL，降序为 text → number → NULL；相同值始终按查询原始顺序排列。排序只重排面板中**已加载的行**（上方会写明确切行数），可与筛选同时使用；它不改变复制和导出的内容或顺序，也不会重新查询数据库。
 
 当前 SQL 文件使用的连接会显示在 VS Code 状态栏，点击即可切换。也可以在 SQL 编辑器中右键选择 `Doris SQL Lite: Set Connection`。连接选择和活动连接只保存在当前扩展会话内，不会写入工作区配置；关闭 SQL 文件、切换连接、修改/删除连接或扩展停用时会释放活动连接。
 
@@ -246,7 +261,7 @@ WHERE  create_time >= '${family_created_from}'
 - 构建 bundle：`node scripts/build.js`
 - Bundle 冒烟检查：`node scripts/check-bundle.js`（在 VS Code 之外加载 `dist/extension.js`、跑一遍 `activate()`、并验证两个驱动在 bundle 内可用）
 - Webview 检查：`node scripts/check-webview.js`
-- 编译（只有测试需要，产物在 `out/`）：`node_modules/.bin/tsc.CMD -p .`
+- 编译（只有测试需要，产物在 `out/`）：`pnpm run compile`
 - 测试：`node --test "tests/**/*.test.js"`（glob 由 Node 自己展开。**不要写成 `node --test tests`** —— 在 Windows 上 Node 会把它当成模块路径而失败）
 - 打包：`node scripts/package-runtime.js`（会先构建 bundle）
 - 对**真实 MySQL** 跑端到端流式检查：`node scripts/check-live-mysql.js --host=127.0.0.1 --port=3306 --user=root --password=… --database=… [--seed]`

@@ -48,3 +48,10 @@
 - [README.md](README.md)：使用、构建与验证；`src/extension.ts`：扩展入口；`src/connectionDraft.ts`、`src/connectionManager.ts`：输入解析及连接；`src/queryResults.ts`、`src/exports.ts`：结果展示与导出。
 - 功能状态与已发布变更以 README 和版本文件为准；个人产品偏好与尚未验证的环境问题见 `.local/memory.md`。
 - 仅协作文档修改检查内容、链接、忽略规则和差异，不改变扩展版本，也不触发数据库连接或安装发布。
+
+
+## WSL 与编辑器入口
+
+- 本机项目命令在 Ubuntu-22.04 中执行，正式工作区位于 `/home/jason/projects/doris-sqltools-lite`。
+- VS Code 使用 WSL 项目窗口，环境和入口见 README.md 的“本机开发（WSL）”。
+- 上述业务、个人资料和生产执行边界继续适用于编辑器操作；配置开发环境不自动授权业务运行或数据写入。
