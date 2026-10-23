@@ -40,6 +40,7 @@ import { applyRowLimit } from './rowLimit';
 import { resolveStatementContext, findDirectiveConnection } from './sqlDirectives';
 import { buildExplainSql, planText } from './executionPlan';
 import { openPlanPanel } from './planPanel';
+import { DocumentSessions, SessionExpiredError, type DocumentOperation, type SessionEntry, type SessionSnapshot } from './documentSessions';
 import {
   QueryCancelledError,
   isQueryCancelled,
@@ -52,7 +53,7 @@ import {
 
 type ConnectionSessionState = {
   documentConnections: Map<string, string>;
-  liveConnections: Map<string, LiveDocumentConnection>;
+  sessions: DocumentSessions;
   runningDocuments: Set<string>;
   cancellationSources: Map<string, vscode.CancellationTokenSource>;
   defaultConnectionId?: string;
@@ -132,15 +133,7 @@ export function resolveReadLimit(setting: number, maxRows: number): number | und
   return Math.max(setting, maxRows);
 }
 
-type LiveDocumentConnection = {
-  profileId: string;
-  session: QuerySession;
-};
-
 let activeConnectionSession: ConnectionSessionState | undefined;
-// Cover parameter / connection prompts too: repeated shortcuts must not start
-// a second execution before the first has registered its cancellation source.
-const pendingExecutions = new Set<string>();
 
 // Where remembered parameter values live. Workspace state when a folder is open
 // (so a project keeps its own values), otherwise global. Neither is part of
@@ -161,44 +154,86 @@ interface ResultPanelMetadata {
   // sent rather than what the file says. An empty object means the statement had
   // no parameters.
   parameters?: Record<string, string>;
+  origin?: ResultOrigin;
   // Enough to run the statement again. Rows past maxResultRows are counted but
   // never stored, so a truncated result has no full set in memory to export.
-  rerun?: {
-    manager: ConnectionManager;
-    profile: ConnectionProfile;
-    sql: string;
-  };
+  rerun?: ResultRerun;
+}
+
+interface ResultOrigin {
+  state: ConnectionSessionState;
+  documentKey: string;
+  onStateChanged?: () => void;
+}
+
+interface ResultRerun extends ResultOrigin {
+  snapshot: SessionSnapshot;
+  sql: string;
+}
+
+interface ExportOperation {
+  source: vscode.CancellationTokenSource;
+  operation: DocumentOperation;
 }
 
 async function closeDocumentConnection(
   session: ConnectionSessionState,
   documentKey: string,
 ): Promise<void> {
-  const active = session.liveConnections.get(documentKey);
-  if (!active) {
-    return;
-  }
-
-  session.liveConnections.delete(documentKey);
-  await active.session.close().catch(() => undefined);
+  await session.sessions.closeDocument(documentKey);
 }
 
 async function closeConnectionsForProfile(
   session: ConnectionSessionState,
   profileId: string,
 ): Promise<void> {
-  const documentKeys = [...session.liveConnections.entries()]
-    .filter(([, active]) => active.profileId === profileId)
-    .map(([documentKey]) => documentKey);
-  await Promise.all(documentKeys.map((documentKey) => closeDocumentConnection(session, documentKey)));
+  await session.sessions.closeProfile(profileId);
 }
 
 async function closeAllDocumentConnections(session: ConnectionSessionState): Promise<void> {
-  await Promise.all(
-    [...session.liveConnections.keys()].map((documentKey) =>
-      closeDocumentConnection(session, documentKey),
-    ),
-  );
+  await session.sessions.closeAll();
+}
+
+async function withDocumentOperation<T>(
+  state: ConnectionSessionState, documentKey: string, onStateChanged: (() => void) | undefined,
+  task: (source: vscode.CancellationTokenSource, operation: DocumentOperation) => Promise<T>,
+): Promise<T | undefined> {
+  const source = new vscode.CancellationTokenSource();
+  const operation = state.sessions.begin(documentKey, () => source.cancel());
+  if (!operation) {
+    source.dispose();
+    const active = state.cancellationSources.get(documentKey);
+    const answer = active
+      ? await vscode.window.showInformationMessage('当前 SQL 文件已有查询、计划或导出正在执行。', '取消该操作')
+      : await vscode.window.showInformationMessage('当前 SQL 文件正在释放会话，请稍后重试。');
+    if (answer === '取消该操作') active?.cancel();
+    return undefined;
+  }
+  const subscription = source.token.onCancellationRequested(() => operation.cancel());
+  state.cancellationSources.set(documentKey, source);
+  state.runningDocuments.add(documentKey);
+  onStateChanged?.();
+  try {
+    return await task(source, operation);
+  } finally {
+    subscription.dispose();
+    state.cancellationSources.delete(documentKey);
+    state.runningDocuments.delete(documentKey);
+    source.dispose();
+    operation.finish();
+    onStateChanged?.();
+  }
+}
+
+function untilCancelled<T>(promise: PromiseLike<T>, token?: vscode.CancellationToken): Promise<T | undefined> {
+  if (!token) return Promise.resolve(promise);
+  return new Promise((resolve, reject) => {
+    const cancellation: { subscription?: vscode.Disposable } = {};
+    cancellation.subscription = token.onCancellationRequested(() => { cancellation.subscription?.dispose(); resolve(undefined); });
+    Promise.resolve(promise).then((value) => { cancellation.subscription?.dispose(); resolve(value); },
+      (error) => { cancellation.subscription?.dispose(); reject(error); });
+    if (token.isCancellationRequested) { cancellation.subscription.dispose(); resolve(undefined); }
+  });
 }
 
 class ConnectionItem extends vscode.TreeItem {
@@ -592,6 +627,15 @@ class ResultPanel {
   }
 
   private async export(format: ExportFormat, options: { chooseLocation?: boolean } = {}): Promise<boolean> {
+    const origin = this.metadata.origin;
+    if (!origin) return this.exportResult(format, options);
+    return (await withDocumentOperation(origin.state, origin.documentKey, origin.onStateChanged,
+      async (source, operation) => this.exportResult(format, options, { source, operation }))) ?? false;
+  }
+
+  private async exportResult(
+    format: ExportFormat, options: { chooseLocation?: boolean }, operation?: ExportOperation,
+  ): Promise<boolean> {
     const extension = format;
     const title = this.title;
     const columns = this.columns;
@@ -600,6 +644,11 @@ class ResultPanel {
     // Rows past maxResultRows are counted but discarded, so a truncated result
     // can only be exported by running the statement a second time.
     const rerun = this.result.truncated ? this.metadata.rerun : undefined;
+    if (rerun) {
+      rerun.state.sessions.validate(rerun.snapshot);
+      if (!operation) throw new SessionExpiredError();
+      operation.operation.profileId = rerun.snapshot.entry.profileId;
+    }
 
     if (this.result.truncated && !rerun) {
       void vscode.window.showWarningMessage(
@@ -623,7 +672,7 @@ class ResultPanel {
         // panel is showing them, but the file itself no longer contains them.
         ? '（沿用本次的查询参数）'
         : '';
-      const answer = await vscode.window.showWarningMessage(
+      const answer = await untilCancelled(vscode.window.showWarningMessage(
         rerun
           ? this.metadata.readComplete
             ? `将导出 ${totalRows} 行。结果超出了面板保留上限，导出会重新执行一次该查询${parameterNote}。确认继续？`
@@ -631,7 +680,7 @@ class ResultPanel {
           : `将导出 ${totalRows} 行，文件可能很大。确认继续？`,
         { modal: true },
         '继续导出',
-      );
+      ), operation?.source.token);
       if (answer !== '继续导出') {
         return false;
       }
@@ -643,13 +692,16 @@ class ResultPanel {
       const target = join(directory, defaultName);
       try {
         await mkdir(directory, { recursive: true });
-        const written = await this.exportTo(vscode.Uri.file(target), columns, keptRows, rerun);
+        const written = await this.exportTo(vscode.Uri.file(target), columns, keptRows, rerun, operation);
         if (written === undefined) {
           return false;
         }
         vscode.window.showInformationMessage(`已导出 ${written} 行到 ${target}`);
         return true;
       } catch (error) {
+        // A database failure or a later file-write failure must not silently
+        // run the SQL a second time via the alternate-location fallback.
+        if (error instanceof SessionExpiredError || (rerun && rerun.snapshot.entry.revision !== rerun.snapshot.revision)) throw error;
         // A stale or unwritable default directory must never block the export.
         const reason = error instanceof Error ? error.message : String(error);
         void vscode.window.showWarningMessage(`写入默认导出目录失败（${reason}），请选择其他位置。`);
@@ -659,17 +711,17 @@ class ResultPanel {
     const defaultUri = vscode.workspace.workspaceFolders?.[0]
       ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, defaultName)
       : undefined;
-    const uri = await vscode.window.showSaveDialog({
+    const uri = await untilCancelled(vscode.window.showSaveDialog({
       title: `导出 ${title} 查询结果`,
       saveLabel: '导出',
       filters: { [format.toUpperCase()]: [extension] },
       defaultUri,
-    });
+    }), operation?.source.token);
     if (!uri) {
       return false;
     }
 
-    const written = await this.exportTo(uri, columns, keptRows, rerun);
+    const written = await this.exportTo(uri, columns, keptRows, rerun, operation);
     if (written === undefined) {
       return false;
     }
@@ -685,7 +737,8 @@ class ResultPanel {
     uri: vscode.Uri,
     columns: string[],
     keptRows: Row[],
-    rerun: { manager: ConnectionManager; profile: ConnectionProfile; sql: string } | undefined,
+    rerun: ResultRerun | undefined,
+    operation?: ExportOperation,
   ): Promise<number | undefined> {
     const chunkRows = configuredExportChunkRows();
     const escapeFormulas = configuredEscapeFormulas();
@@ -700,6 +753,9 @@ class ResultPanel {
         cancellable: true,
       },
       async (progress, token) => {
+        const exportToken = operation?.source.token ?? token;
+        const cancelSubscription = token.onCancellationRequested(() => operation?.source.cancel());
+        if (token.isCancellationRequested) operation?.source.cancel();
         const report = (rowsWritten: number): void => {
           if (rerun) {
             progress.report({ message: `已导出 ${rowsWritten} 行…` });
@@ -716,26 +772,32 @@ class ResultPanel {
         const writer = createTsvWriter(uri, columns, {
           chunkRows,
           escapeFormulas,
-          token,
+          token: exportToken,
           onProgress: report,
         });
-
+        let writerStarted = false;
         try {
+          if (exportToken.isCancellationRequested) throw new QueryCancelledError('导出已取消。');
+          if (rerun) rerun.state.sessions.validate(rerun.snapshot);
+          writerStarted = true;
           await writer.begin();
           if (rerun) {
-            await runForExport(rerun, writer, token);
+            await runForExport(rerun, writer, exportToken, operation!.operation);
           } else {
             for (const row of keptRows) {
               await writer.write(row);
             }
           }
           written = await writer.finish();
+          if (rerun) rerun.snapshot.revision = rerun.snapshot.entry.revision;
         } catch (error) {
-          await writer.abort();
+          if (writerStarted) await writer.abort();
           if (!isQueryCancelled(error)) {
             throw error;
           }
           cancelled = true;
+        } finally {
+          cancelSubscription.dispose();
         }
       },
     );
@@ -760,15 +822,15 @@ class ResultPanel {
   }
 }
 
-// Runs the statement again and feeds the rows straight into the writer. Uses its
-// own connection so a long export cannot disturb the session the user is working
-// in (USE / temp tables / session variables stay put).
+// Re-run only on the exact original session and revision, while holding the
+// document's operation. Never reconnect or replay initialization SQL here.
 async function runForExport(
-  rerun: { manager: ConnectionManager; profile: ConnectionProfile; sql: string },
+  rerun: ResultRerun,
   writer: TsvWriter,
   token: vscode.CancellationToken,
+  operation: DocumentOperation,
 ): Promise<void> {
-  const session = await rerun.manager.open(rerun.profile, configuredQueryIdleTimeoutMs());
+  const entry = rerun.state.sessions.validate(rerun.snapshot);
   const listeners = new Set<() => void>();
   // No row limit here on purpose: an export exists to write every row, so this
   // path always reads the answer to the end. Only the user can stop it.
@@ -800,6 +862,7 @@ async function runForExport(
       onAffectedRows: () => undefined,
       onRow: (row) => writer.write(row),
     };
+    const session = rerun.state.sessions.startStatement(operation, entry);
     await session.execute(rerun.sql, signal, sink);
     if (token.isCancellationRequested) {
       throw new QueryCancelledError('导出已取消。');
@@ -807,7 +870,10 @@ async function runForExport(
   } finally {
     subscription.dispose();
     listeners.clear();
-    await session.close().catch(() => undefined);
+    if (entry.valid && entry.session?.broken) {
+      await rerun.state.sessions.discard(entry);
+      void vscode.window.showWarningMessage('导出使用的会话已断开，USE、SET 等会话状态已丢失，请重新初始化后查询。');
+    }
   }
 }
 
@@ -929,7 +995,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Kept only for the current extension host session; never persisted to settings.
   const connectionSession: ConnectionSessionState = {
     documentConnections: new Map(),
-    liveConnections: new Map(),
+    sessions: new DocumentSessions(),
     runningDocuments: new Set(),
     cancellationSources: new Map(),
   };
@@ -990,6 +1056,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   parameterState = vscode.workspace.workspaceFolders?.length
     ? context.workspaceState
     : context.globalState;
+  let knownProfiles = new Map(manager.getProfiles().map((profile) => [profile.id, profile]));
 
   context.subscriptions.push(
     connectionStatus,
@@ -1001,6 +1068,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('dorisSqlLite.connections')) {
+        const next = new Map(manager.getProfiles().map((profile) => [profile.id, profile]));
+        for (const [id, previous] of knownProfiles) {
+          const current = next.get(id);
+          if (!current || !sameConnectionTarget(previous, current) || previous.hiveAuth !== current.hiveAuth) {
+            void closeConnectionsForProfile(connectionSession, id);
+          }
+        }
+        knownProfiles = next;
         provider.refresh();
         refreshConnectionStatus();
       }
@@ -1044,10 +1119,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const documentKey = editor.document.uri.toString();
-      const active = connectionSession.liveConnections.get(documentKey);
-      if (active && active.profileId !== profile.id) {
-        await closeDocumentConnection(connectionSession, documentKey);
-      }
       connectionSession.documentConnections.set(documentKey, profile.id);
       connectionSession.defaultConnectionId = profile.id;
       refreshConnectionStatus();
@@ -1065,10 +1136,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         existing,
         onSaved: async (profile, info) => {
           let sessionClosed = false;
-          if (!sameConnectionTarget(existing, profile)) {
-            sessionClosed = [...connectionSession.liveConnections.values()].some(
-              (active) => active.profileId === existing.id,
-            );
+          if (!sameConnectionTarget(existing, profile) || existing.hiveAuth !== profile.hiveAuth || info.passwordSaved || info.passwordCleared) {
+            sessionClosed = connectionSession.sessions.hasProfile(existing.id);
             await closeConnectionsForProfile(connectionSession, existing.id);
           }
           provider.refresh();
@@ -1100,6 +1169,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } catch (error) {
         showError('查看执行计划失败', error);
       }
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.resetFileSessions', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.languageId !== 'sql') {
+        vscode.window.showInformationMessage('请先打开要重置会话的 SQL 文件。');
+        return;
+      }
+      await closeDocumentConnection(connectionSession, editor.document.uri.toString());
+      refreshStatusBars();
+      vscode.window.showInformationMessage('当前文件的全部数据源会话已重置，USE、SET 等设置需要重新执行。');
     }),
     vscode.commands.registerCommand('dorisSqlLite.cancelQuery', async () => {
       const target = await pickRunningQuery(connectionSession);
@@ -1178,6 +1257,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       await manager.deletePassword(profile.id);
+      await closeConnectionsForProfile(connectionSession, profile.id);
       vscode.window.showInformationMessage(`已清除连接“${profile.name}”的已保存密码。`);
     }),
     vscode.commands.registerCommand('dorisSqlLite.setExportDirectory', async () => {
@@ -1265,6 +1345,7 @@ async function prepareStatementSql(
   documentKey: string,
   documentLabel: string,
   commentValues: Readonly<Record<string, string>> = {},
+  cancellationToken?: vscode.CancellationToken,
 ): Promise<{ sql: string; used: Record<string, string> } | undefined> {
   if (!configuredSqlParameters()) {
     // Still unwrap $$ escapes: they are part of the template's meaning either way.
@@ -1293,6 +1374,7 @@ async function prepareStatementSql(
     sql,
     parameters,
     fixedValues: commentValues,
+    cancellationToken,
     initialValues: { ...(parameterState
       ? readParameterValues(parameterState, documentKey, declarations)
       : {}), ...commentValues },
@@ -1338,25 +1420,15 @@ async function runQuery(
     vscode.window.showInformationMessage('请先打开 SQL 文件。');
     return;
   }
-  if (pendingExecutions.has(documentKey)) {
-    const source = connectionSession.cancellationSources.get(documentKey);
-    const choice = source
-      ? await vscode.window.showInformationMessage('当前 SQL 文件已有查询正在执行。', '取消该查询')
-      : await vscode.window.showInformationMessage('当前 SQL 文件正在准备执行，请先完成参数或连接选择。');
-    if (choice === '取消该查询') source?.cancel();
-    return;
-  }
-  pendingExecutions.add(documentKey);
-  try {
-    await executeQuery(manager, connectionSession, requestedConnectionId, onStateChanged, explain);
-  } finally {
-    pendingExecutions.delete(documentKey);
-  }
+  await withDocumentOperation(connectionSession, documentKey, onStateChanged,
+    async (source, operation) => executeQuery(manager, connectionSession, source, operation, requestedConnectionId, onStateChanged, explain));
 }
 
 async function executeQuery(
   manager: ConnectionManager,
   connectionSession: ConnectionSessionState,
+  cancelSource: vscode.CancellationTokenSource,
+  operation: DocumentOperation,
   requestedConnectionId?: string,
   onStateChanged?: () => void,
   explain = false,
@@ -1384,19 +1456,6 @@ async function executeQuery(
   }
 
   const documentKey = editor.document.uri.toString();
-  if (connectionSession.runningDocuments.has(documentKey)) {
-    // Offer the cancel right here: the command does exist, but its name is not
-    // one anyone can guess, and the progress notification may already have been
-    // dismissed by the time this message appears.
-    const choice = await vscode.window.showInformationMessage(
-      '当前 SQL 文件已有查询正在执行。',
-      '取消该查询',
-    );
-    if (choice === '取消该查询') {
-      connectionSession.cancellationSources.get(documentKey)?.cancel();
-    }
-    return;
-  }
 
   // ${...} is resolved before a connection is chosen, so cancelling the panel
   // cannot leave a session behind. Substituting here, after the statement was
@@ -1407,8 +1466,9 @@ async function executeQuery(
     documentKey,
     sourceLabel,
     context?.parameters,
+    cancelSource.token,
   );
-  if (!prepared) {
+  if (!prepared || operation.cancelled) {
     return;
   }
   const statement = prepared.sql;
@@ -1418,33 +1478,20 @@ async function executeQuery(
     ?? connectionSession.defaultConnectionId;
   const profile = context?.connection
     ? findDirectiveConnection(manager.getProfiles(), context.connection)
-    : await chooseProfile(manager, id);
-  if (!profile) {
+    : await chooseProfile(manager, id, cancelSource.token);
+  if (!profile || operation.cancelled) {
     return;
   }
   // Build before touching the session: malformed / already-EXPLAIN input must
   // never fall through to executing the original statement.
   const explainSql = explain ? buildExplainSql(statement, profile.type) : undefined;
-  const active = connectionSession.liveConnections.get(documentKey);
-  if (active && active.profileId !== profile.id) {
-    await closeDocumentConnection(connectionSession, documentKey);
-  }
   connectionSession.documentConnections.set(documentKey, profile.id);
   connectionSession.defaultConnectionId = profile.id;
   onStateChanged?.();
 
-  connectionSession.runningDocuments.add(documentKey);
-  const cancelSource = new vscode.CancellationTokenSource();
-  connectionSession.cancellationSources.set(documentKey, cancelSource);
-  // Shown for as long as the query runs, so there is always something on screen
-  // that cancels it -- the progress notification can be dismissed, and until now
-  // nothing else pointed at the cancel command.
-  onStateChanged?.();
-
   const startedAt = Date.now();
   let progressHandle: vscode.Progress<{ message?: string }> | undefined;
-  let session: QuerySession | undefined =
-    connectionSession.liveConnections.get(documentKey)?.session;
+  let entry: SessionEntry | undefined;
   let cancelled = false;
 
   const isCancelled = (token?: vscode.CancellationToken): boolean =>
@@ -1473,14 +1520,6 @@ async function executeQuery(
     },
   };
 
-  const dropSession = async (target: QuerySession): Promise<void> => {
-    const active = connectionSession.liveConnections.get(documentKey);
-    if (active?.session === target) {
-      connectionSession.liveConnections.delete(documentKey);
-    }
-    await target.close().catch(() => undefined);
-  };
-
   const stop = (reason: StopReason): void => {
     if (cancelled) {
       return;
@@ -1505,31 +1544,25 @@ async function executeQuery(
       },
       async (progress, token) => {
         progressHandle = progress;
-        subscriptions.push(token.onCancellationRequested(requestCancel));
+        if (token.isCancellationRequested) cancelSource.cancel();
+        subscriptions.push(token.onCancellationRequested(() => cancelSource.cancel()));
         try {
-          let active = session;
-          if (!active) {
-            progress.report({ message: '正在建立连接…' });
-            active = await manager.open(profile, configuredQueryIdleTimeoutMs());
-            session = active;
-            connectionSession.liveConnections.set(documentKey, {
-              profileId: profile.id,
-              session: active,
-            });
-          } else {
-            progress.report({ message: '复用当前文件连接…' });
-          }
-          if (signal.requested) {
-            await dropSession(active);
-            return;
-          }
+          progress.report({ message: '准备当前文件的数据源会话…' });
+          entry = await connectionSession.sessions.open(operation, profile.id, async () => {
+            const current = manager.getProfiles().find((item) => item.id === profile.id);
+            if (!current || !sameConnectionTarget(profile, current) || profile.hiveAuth !== current.hiveAuth) {
+              throw new Error('连接配置已变化，请重新执行。');
+            }
+            return manager.open(profile, configuredQueryIdleTimeoutMs(), cancelSource.token);
+          });
+          if (operation.cancelled || token.isCancellationRequested) return;
           if (explainSql !== undefined) {
             // Plans are text, often many rows long. Never apply the result
             // display/read cap or append a LIMIT to this request.
             const collector = createRowCollector(Number.MAX_SAFE_INTEGER);
             progress.report({ message: '正在获取完整执行计划…' });
-            await active.execute(explainSql, signal, collector);
-            if (signal.requested) return;
+            await connectionSession.sessions.startStatement(operation, entry).execute(explainSql, signal, collector);
+            if (signal.requested || operation.cancelled) return;
             const result = collector.toView();
             openPlanPanel({
               name: context?.name ?? sourceLabel,
@@ -1584,10 +1617,10 @@ async function executeQuery(
           };
 
           progress.report({ message: '正在执行…' });
-          await active.execute(executedSql, signal, sink);
+          await connectionSession.sessions.startStatement(operation, entry).execute(executedSql, signal, sink);
           // Only a user cancel abandons the result here. A limit stop returns
           // the rows on purpose: they are exactly what was asked for.
-          if (stopReason === 'user') {
+          if (stopReason === 'user' || operation.cancelled) {
             return;
           }
           // An injected statement ends by itself, so stopReason stays undefined
@@ -1613,7 +1646,8 @@ async function executeQuery(
             // The resolved statement, not the template, and deliberately not the
             // injected one: an export that has to run the query again wants every
             // row, so it must not inherit this run's cap.
-            rerun: { manager, profile, sql: statement },
+            origin: { state: connectionSession, documentKey, onStateChanged },
+            rerun: { state: connectionSession, documentKey, onStateChanged, snapshot: connectionSession.sessions.snapshot(entry), sql: statement },
           });
         } catch (error) {
           if (isQueryCancelled(error) || isCancelled(token)) {
@@ -1629,14 +1663,11 @@ async function executeQuery(
       subscription.dispose();
     }
     cancelListeners.clear();
-    cancelSource.dispose();
-    connectionSession.cancellationSources.delete(documentKey);
-    connectionSession.runningDocuments.delete(documentKey);
-    onStateChanged?.();
     // A session that already had to be torn down (or was dropped to cancel) must
     // not be handed to the next statement.
-    if (session?.broken) {
-      await dropSession(session);
+    if (entry?.valid && entry.session?.broken) {
+      await connectionSession.sessions.discard(entry);
+      void vscode.window.showWarningMessage('连接会话已断开，USE、SET 等状态已丢失，请重新初始化后查询；失败语句不会自动重试。');
     }
   }
 }
@@ -1673,6 +1704,7 @@ function documentLabel(documentKey: string): string {
 async function chooseProfile(
   manager: ConnectionManager,
   preferredId?: string,
+  token?: vscode.CancellationToken,
 ): Promise<ConnectionProfile | undefined> {
   const profiles = manager.getProfiles();
   if (preferredId) {
@@ -1692,7 +1724,7 @@ async function chooseProfile(
       detail: `${profile.username}${profile.database ? ` · ${profile.database}` : ' · 未指定 database'}${profile.ssl ? ' · SSL' : ''}`,
       profile,
     })),
-    { title: '选择数据库连接' },
+    { title: '选择数据库连接' }, token,
   );
   return selected?.profile;
 }

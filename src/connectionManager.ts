@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { QueryCancelledError } from './querySession';
 import {
   classifyDatabaseError,
   formatDatabaseError,
@@ -137,12 +138,19 @@ export class ConnectionManager {
   // wrong stored password is dropped and re-asked once, and a typed password is
   // only persisted after the handshake actually succeeded. Which wire protocol
   // is used is the session factory's business, not this class's.
-  public async open(profile: ConnectionProfile, idleTimeoutMs?: number): Promise<QuerySession> {
+  public async open(profile: ConnectionProfile, idleTimeoutMs?: number, token?: vscode.CancellationToken): Promise<QuerySession> {
     const stored = await this.readPassword(profile.id);
+    if (token?.isCancellationRequested) throw new QueryCancelledError();
     if (stored !== undefined) {
       try {
-        return await openQuerySession(profile, stored, idleTimeoutMs);
+        const session = await openQuerySession(profile, stored, idleTimeoutMs);
+        if (token?.isCancellationRequested) {
+          await session.close();
+          throw new QueryCancelledError();
+        }
+        return session;
       } catch (error) {
+        if (token?.isCancellationRequested) throw new QueryCancelledError();
         if (classifyDatabaseError(error).kind !== 'auth') {
           throw error;
         }
@@ -153,27 +161,29 @@ export class ConnectionManager {
       }
     }
 
-    return this.promptAndOpen(profile, idleTimeoutMs);
+    return this.promptAndOpen(profile, idleTimeoutMs, token);
   }
 
   private async promptAndOpen(
     profile: ConnectionProfile,
     idleTimeoutMs?: number,
+    token?: vscode.CancellationToken,
   ): Promise<QuerySession> {
     const password = await vscode.window.showInputBox({
       title: `Password for ${profile.name}`,
       prompt: passwordPromptFor(profile),
       password: true,
       ignoreFocusOut: true,
-    });
+    }, token);
 
     if (password === undefined) {
-      throw new Error('已取消密码输入。');
+      throw new QueryCancelledError('已取消密码输入。');
     }
 
     // Connect first, persist second: a rejected password must never be stored.
     const session = await openQuerySession(profile, password, idleTimeoutMs);
     try {
+      if (token?.isCancellationRequested) throw new QueryCancelledError();
       await this.savePassword(profile.id, password);
     } catch (error) {
       await session.close();

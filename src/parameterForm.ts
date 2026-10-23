@@ -24,6 +24,7 @@ export interface ParameterFormInputs {
   initialValues: Readonly<Record<string, string>>;
   // Values declared in SQL comments stay authoritative in the missing-value form.
   fixedValues?: Readonly<Record<string, string>>;
+  cancellationToken?: vscode.CancellationToken;
 }
 
 export interface ParameterFormDecision {
@@ -38,6 +39,7 @@ let currentPanel: vscode.WebviewPanel | undefined;
 export function openParameterForm(
   inputs: ParameterFormInputs,
 ): Promise<ParameterFormDecision | undefined> {
+  if (inputs.cancellationToken?.isCancellationRequested) return Promise.resolve(undefined);
   // One panel at a time: a second run while the first is unresolved would have
   // no way to tell the two apart. Revealing the existing one is the honest
   // behaviour, and the caller simply does not run.
@@ -56,6 +58,7 @@ export function openParameterForm(
 
   return new Promise<ParameterFormDecision | undefined>((resolve) => {
     let settled = false;
+    const cancellation: { subscription?: vscode.Disposable } = {};
     const finish = (decision: ParameterFormDecision | undefined): void => {
       if (settled) {
         return;
@@ -66,6 +69,7 @@ export function openParameterForm(
     };
 
     panel.onDidDispose(() => {
+      cancellation.subscription?.dispose();
       if (currentPanel === panel) {
         currentPanel = undefined;
       }
@@ -100,6 +104,8 @@ export function openParameterForm(
         });
       }
     });
+    cancellation.subscription = inputs.cancellationToken?.onCancellationRequested(() => finish(undefined));
+    if (inputs.cancellationToken?.isCancellationRequested) finish(undefined);
   });
 }
 
