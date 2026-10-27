@@ -17,7 +17,9 @@ F5 使用 `.vscode/launch.json`：先由项目现有构建脚本生成 `dist/ext
 
 ## 协作入口
 
-项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`（由 `AGENTS.md` 导入），不进入 Git。共享知识与具体需求记录以项目文档为准。
+项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`，开始项目工作时按 `AGENTS.md` 读取，不进入 Git。共享知识与具体需求记录以项目文档为准。
+
+供 AI 使用的配套 skill 见 [doris-sqltools-lite](skills/doris-sqltools-lite/SKILL.md)，覆盖 SQL 注释、参数、计划审核、导出和会话规则。将该文件夹安装到 Codex 个人 `skills/` 目录（默认 `~/.codex/skills/`）后，可通过 `$doris-sqltools-lite` 调用，也支持在任务已选用本工具时自动匹配。该 skill 独立于 VSIX，不随扩展包分发。
 
 ## 安全模型
 
