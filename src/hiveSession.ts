@@ -99,6 +99,7 @@ export async function drainHiveRows(
   // available that the transport is still alive -- the caller's idle guard is
   // reset from here.
   onActivity?: () => void,
+  onSinkWait?: (waiting: boolean) => void,
 ): Promise<number> {
   let descriptors: ColumnDescriptor[] = [];
   let announced = false;
@@ -108,37 +109,46 @@ export async function drainHiveRows(
     if (isCancelled()) {
       break;
     }
-    await operation.fetch();
-    onActivity?.();
-
-    // The schema only exists once the first batch has arrived.
-    if (!announced) {
-      descriptors = hiveColumnDescriptors(operation.getSchema());
-      sink.onColumns(descriptors.map((descriptor) => descriptor.name));
-      announced = true;
-    }
-
-    // Checked per row, not per batch: a caller that has all the rows it needs
-    // decides that in the middle of a batch, and the rest of that batch would
-    // otherwise be decoded only to be thrown away.
     let stopped = false;
-    for (const rowSet of operation.getData()) {
-      for (const row of decodeHiveRowSet(rowSet, descriptors)) {
-        if (isCancelled()) {
-          stopped = true;
+    try {
+      await operation.fetch();
+      onActivity?.();
+      if (isCancelled()) break;
+
+      // The schema only exists once the first batch has arrived.
+      if (!announced) {
+        descriptors = hiveColumnDescriptors(operation.getSchema());
+        sink.onColumns(descriptors.map((descriptor) => descriptor.name));
+        announced = true;
+      }
+
+      // Checked per row, not per batch: a caller that has all the rows it needs
+      // decides that in the middle of a batch, and the rest of that batch would
+      // otherwise be decoded only to be thrown away.
+      for (const rowSet of operation.getData()) {
+        for (const row of decodeHiveRowSet(rowSet, descriptors)) {
+          if (isCancelled()) {
+            stopped = true;
+            break;
+          }
+          rowsRead += 1;
+          const pending = sink.onRow(row);
+          if (pending) {
+            onSinkWait?.(true);
+            try {
+              await pending;
+            } finally {
+              onSinkWait?.(false);
+            }
+          }
+        }
+        if (stopped) {
           break;
         }
-        rowsRead += 1;
-        const pending = sink.onRow(row);
-        if (pending) {
-          await pending;
-        }
       }
-      if (stopped) {
-        break;
-      }
+    } finally {
+      operation.flush();
     }
-    operation.flush();
     if (stopped) {
       break;
     }
@@ -400,42 +410,99 @@ class HiveQuerySession implements QuerySession {
   }
 
   public async execute(sql: string, signal: CancelSignal, sink: RowSink): Promise<QuerySummary> {
+    if (signal.requested) throw new QueryCancelledError();
     this.throwPendingTransportError();
-
-    const operation = await this.run(() =>
-      this.session.executeStatement(sql, { runAsync: true }),
-    );
-    operation.setMaxRows(FETCH_ROWS);
+    if (this.broken) throw new Error('会话已失效，请重新连接。');
 
     let cancelled = false;
-    // A latch for the status loop below. CancelOperation is an independent
-    // request on the same client, but on a half-open transport it never gets an
-    // answer, so waiting for it would be waiting forever. This resolves the
-    // instant the user gives up, and that is what actually ends the wait.
+    let finished = false;
+    let operation: HiveOperation | undefined;
+    let cancelRequest: Promise<void> | undefined;
+    let statusRequest: Promise<unknown> | undefined;
+    let drained: Promise<{ count: number } | { error: unknown }> | undefined;
+    let pendingSink: Promise<void> | undefined;
+    let sinkFailure: { error: unknown } | undefined;
+    const invalidate = (): void => {
+      this.invalid = true;
+      closeClient(this.client);
+    };
+    // Starts at the request, including submission/fetch with idle disabled.
+    // Local sink IO is awaited separately; abandoned network requests are not.
+    const cancellation = createIdleGuard(CLOSE_TIMEOUT_MS, invalidate);
+    const idle = createIdleGuard(this.idleTimeoutMs, invalidate);
     let announceCancel: (() => void) | undefined;
     const cancelledSignal = new Promise<void>((resolve) => {
       announceCancel = resolve;
     });
-    const subscription = signal.onRequest(() => {
+    const cancelOperation = (): void => {
+      if (!operation || cancelRequest) return;
+      const current = operation;
+      cancelRequest = Promise.resolve().then(() => current.cancel()).then(
+        () => undefined,
+        invalidate,
+      );
+    };
+    const cancel = (): void => {
+      if (cancelled || finished) return;
       cancelled = true;
+      cancellation.noteActivity();
       announceCancel?.();
-      // CancelOperation is an independent request on the same client, so it can
-      // be issued while the status loop below is asleep.
-      void operation.cancel().catch(() => undefined);
-    });
+      cancelOperation();
+    };
+    const subscription = signal.onRequest(cancel);
+    if (signal.requested) cancel();
 
     let rowsRead = 0;
-    // Not a query timeout -- the status loop above may legitimately run for
-    // minutes with nothing coming back, so the clock only starts once the fetch
-    // loop does. From there a fetch that never returns means the transport is
-    // gone, and without this the read would be parked on it forever. See
-    // idleGuard.ts.
-    const idle = createIdleGuard(this.idleTimeoutMs, () => {
-      this.invalid = true;
-      closeClient(this.client);
-    });
+    const failSink = (error: unknown): never => {
+      sinkFailure = { error };
+      // Hive fetches are separate requests. Closing the operation below frees
+      // its result while a healthy session can keep USE/SET and temp objects.
+      throw error;
+    };
+    const guardedSink: RowSink = {
+      onColumns: (columns) => sink.onColumns(columns),
+      onAffectedRows: (count) => sink.onAffectedRows(count),
+      onRow: (row) => {
+        rowsRead += 1;
+        try {
+          const pending = sink.onRow(row);
+          if (pending) {
+            pendingSink = pending.catch(failSink);
+            return pendingSink;
+          }
+        } catch (error) {
+          return failSink(error);
+        }
+      },
+    };
     try {
-      const status = await this.pollUntilFinished(operation, () => cancelled, cancelledSignal);
+      if (cancelled) throw new QueryCancelledError();
+      const submitting = this.run(() =>
+        this.session.executeStatement(sql, { runAsync: true }),
+      ).then((value) => {
+        if (finished || this.broken) {
+          // The submission lost its race. Its client must remain retired, and
+          // a late handle is released without delivering any rows.
+          void this.closeOperation(value);
+        } else {
+          operation = value;
+          if (cancelled) cancelOperation();
+        }
+        return value;
+      });
+      const submitted = await Promise.race([
+        submitting,
+        cancellation.whenExpired.then(() => undefined),
+      ]);
+      if (!submitted) throw new QueryCancelledError();
+      if (!operation) {
+        this.throwPendingTransportError();
+        throw new Error('会话已失效，请重新连接。');
+      }
+      operation.setMaxRows(FETCH_ROWS);
+      if (cancelled) throw new QueryCancelledError();
+      const status = await this.pollUntilFinished(operation, () => cancelled, cancelledSignal,
+        (request) => { statusRequest = request.catch(() => undefined); });
       if (cancelled && signal.reason !== 'limit') {
         throw new QueryCancelledError();
       }
@@ -444,22 +511,26 @@ class HiveQuerySession implements QuerySession {
       // fetch going quiet is evidence of a dead socket, not of slow work.
       idle.noteActivity();
       const drain = this.run(() =>
-        drainHiveRows(operation, sink, () => cancelled, () => idle.noteActivity()),
+        drainHiveRows(operation!, guardedSink, () => cancelled || finished || this.broken, () => idle.noteActivity(),
+          (waiting) => waiting ? idle.pause() : idle.noteActivity()),
       );
       // Same reason as the MySQL path: a transport that dies without an error
       // leaves the driver's callback waiting for a reply that never comes, and
       // tearing the client down is not guaranteed to wake it. Racing against the
       // guard is what actually returns control.
+      drained = drain.then(
+        (count) => ({ count }),
+        (error: unknown) => ({ error }),
+      );
       const outcome = await Promise.race([
-        drain.then(
-          (count) => ({ count }),
-          (error: unknown) => ({ error }),
-        ),
+        drained,
         idle.whenExpired.then(() => 'expired' as const),
+        cancelledSignal.then(() => 'cancelled' as const),
       ]);
       if (outcome === 'expired') {
         throw new QueryIdleTimeoutError(this.idleTimeoutMs);
       }
+      if (outcome === 'cancelled') throw new QueryCancelledError();
       if ('error' in outcome) {
         throw outcome.error;
       }
@@ -469,6 +540,7 @@ class HiveQuerySession implements QuerySession {
       }
       return { rowsRead, affectedRows: modifiedRowCount(status) };
     } catch (error) {
+      if (sinkFailure) throw sinkFailure.error;
       // Checked first: when the guard fired, the error that surfaced is a
       // symptom of the teardown, and a dead transport is what the user needs to
       // hear about.
@@ -496,6 +568,7 @@ class HiveQuerySession implements QuerySession {
       }
       throw error;
     } finally {
+      finished = true;
       idle.dispose();
       subscription.dispose();
       // Closing the operation is a round trip as well, and a transport that went
@@ -503,8 +576,34 @@ class HiveQuerySession implements QuerySession {
       // against below. Left unguarded, this is where a statement that had just
       // given up would hang the caller's finally block instead, keeping the
       // progress notification spinning and the file marked as running.
-      await settleWithin(operation.close(), CLOSE_TIMEOUT_MS, () => closeClient(this.client));
+      try {
+        await pendingSink;
+      } finally {
+        try {
+          const closing = operation ? this.closeOperation(operation) : undefined;
+          if (cancelled) {
+            // Reuse requires acknowledgements for requests already sent, not
+            // merely a close reply while an older fetch/status is still lost.
+            const cleanup = this.broken ? closing
+              : Promise.all([cancelRequest, statusRequest, drained, closing]);
+            await Promise.race([cleanup, cancellation.whenExpired]);
+          } else {
+            await closing;
+          }
+        } finally {
+          cancellation.dispose();
+        }
+      }
     }
+  }
+
+  private async closeOperation(operation: HiveOperation): Promise<void> {
+    const invalidate = (): void => {
+      this.invalid = true;
+      closeClient(this.client);
+    };
+    await settleWithin(Promise.resolve().then(() => operation.close()).catch(invalidate),
+      CLOSE_TIMEOUT_MS, invalidate);
   }
 
   public async close(): Promise<void> {
@@ -554,6 +653,7 @@ class HiveQuerySession implements QuerySession {
     operation: HiveOperation,
     isCancelled: () => boolean,
     cancelled: Promise<void>,
+    trackRequest: (request: Promise<unknown>) => void,
   ): Promise<HiveOperationStatus> {
     const states = TCLIService_types.TOperationState;
     // Shares the same limit as the read phase below, but measured per request
@@ -573,7 +673,10 @@ class HiveQuerySession implements QuerySession {
 
     try {
       for (;;) {
-        const outcome = await guard.run(this.run(() => operation.status(false)));
+        if (isCancelled()) throw new QueryCancelledError();
+        const request = this.run(() => operation.status(false));
+        trackRequest(request);
+        const outcome = await guard.run(request);
         if (outcome.kind === 'stalled') {
           throw new QueryIdleTimeoutError(this.idleTimeoutMs, 'status');
         }
@@ -609,7 +712,7 @@ class HiveQuerySession implements QuerySession {
         ) {
           throw new Error(`服务端返回了无法识别的查询状态（${String(state)}）。`);
         }
-        await delay(STATUS_POLL_INTERVAL_MS);
+        await Promise.race([delay(STATUS_POLL_INTERVAL_MS), cancelled]);
       }
     } finally {
       guard.dispose();

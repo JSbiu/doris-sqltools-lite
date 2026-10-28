@@ -68,6 +68,7 @@ export async function consumeMysqlStream(
   // from here. Deliberately not called for `fields`: that fires before the
   // answer starts, and a statement still working has sent nothing at all.
   onActivity?: () => void,
+  onSinkWait?: (waiting: boolean) => void,
 ): Promise<QuerySummary> {
   let hasResultSet = false;
 
@@ -98,7 +99,12 @@ export async function consumeMysqlStream(
     summary.rowsRead += 1;
     const pending = sink.onRow(item as Row);
     if (pending) {
-      await pending;
+      onSinkWait?.(true);
+      try {
+        await pending;
+      } finally {
+        onSinkWait?.(false);
+      }
     }
   }
 
@@ -132,9 +138,20 @@ class MysqlSession implements QuerySession {
   }
 
   public async execute(sql: string, signal: CancelSignal, sink: RowSink): Promise<QuerySummary> {
+    if (signal.requested) throw new QueryCancelledError();
+    if (this.broken) throw new Error('会话已失效，请重新连接。');
     let cancelled = false;
     let settled = false;
+    let killSent = false;
+    let killing: Promise<boolean> | undefined;
     let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    let announceFallback: () => void;
+    const fallback = new Promise<void>((resolve) => { announceFallback = resolve; });
+    const abandon = (): void => {
+      this.invalid = true;
+      this.connection.destroy();
+      announceFallback();
+    };
 
     // Not a query timeout: this only starts counting once the answer has begun
     // arriving, so a statement that is merely slow never trips it. What it
@@ -146,37 +163,70 @@ class MysqlSession implements QuerySession {
       this.connection.destroy();
     });
 
-    const subscription = signal.onRequest(() => {
+    const cancel = (): void => {
+      if (cancelled || settled) return;
       cancelled = true;
+      // This deadline includes opening the control connection and its KILL
+      // request. Neither is guaranteed to answer, even after socket teardown.
+      fallbackTimer = setTimeout(abandon, CANCEL_FALLBACK_TIMEOUT_MS);
+      fallbackTimer.unref?.();
       // Cancelling a MySQL statement means killing it from another connection,
       // because this one is parked on the result stream.
       if (!this.connection.threadId) {
-        this.invalid = true;
-        this.connection.destroy();
+        abandon();
         return;
       }
-      void this.killRunningQuery().then((killed) => {
-        if (!killed) {
-          this.invalid = true;
-          this.connection.destroy();
-          return;
+      killing = this.killRunningQuery(
+        () => !settled && !this.broken,
+        () => { killSent = true; },
+      );
+      void killing.then((killed) => {
+        if (!killed && !settled) {
+          abandon();
         }
-        fallbackTimer = setTimeout(() => {
-          if (!settled) {
-            this.invalid = true;
-            this.connection.destroy();
-          }
-        }, CANCEL_FALLBACK_TIMEOUT_MS);
       });
-    });
+    };
+    const subscription = signal.onRequest(cancel);
+    if (signal.requested) cancel();
 
     // Owned by the caller so the counts survive an interrupted read.
     const summary: QuerySummary = { rowsRead: 0, affectedRows: 0 };
+    let sinkFailure: { error: unknown } | undefined;
+    let pendingSink: Promise<void> | undefined;
+    let announceSinkFailure: () => void;
+    const sinkFailed = new Promise<void>((resolve) => { announceSinkFailure = resolve; });
+    const failSink = (error: unknown): never => {
+      sinkFailure = { error };
+      // A rejected sink abandons the async iterator with unread packets. Never
+      // hand that connection to the next query, or wait for the remaining rows.
+      this.invalid = true;
+      this.connection.destroy();
+      announceSinkFailure();
+      throw error;
+    };
+    const guardedSink: RowSink = {
+      onColumns: (columns) => {
+        if (!cancelled && !settled && !this.broken) sink.onColumns(columns);
+      },
+      onAffectedRows: (count) => sink.onAffectedRows(count),
+      onRow: (row) => {
+        try {
+          const pending = sink.onRow(row);
+          if (pending) {
+            pendingSink = pending.catch(failSink);
+            return pendingSink;
+          }
+        } catch (error) {
+          return failSink(error);
+        }
+      },
+    };
 
     try {
+      if (cancelled) throw new QueryCancelledError();
       const stream = rawConnectionOf(this.connection).query(sql).stream();
-      const read = consumeMysqlStream(stream, sink, () => cancelled, summary, () =>
-        idle.noteActivity(),
+      const read = consumeMysqlStream(stream, guardedSink, () => cancelled || settled || this.broken, summary, () =>
+        idle.noteActivity(), (waiting) => waiting ? idle.pause() : idle.noteActivity(),
       );
       // Awaiting the read on its own is not safe. When a socket dies without an
       // error -- which is exactly what a vanished peer leaves behind -- mysql2
@@ -190,7 +240,13 @@ class MysqlSession implements QuerySession {
           (error: unknown) => ({ error }),
         ),
         idle.whenExpired.then(() => 'expired' as const),
+        fallback.then(() => 'cancelled' as const),
+        sinkFailed.then(() => 'sink-failed' as const),
       ]);
+      // Network waits may be abandoned; an already-started local disk write
+      // must finish before the caller can clean its output up.
+      await pendingSink;
+      if (sinkFailure) throw sinkFailure.error;
       if (outcome === 'expired') {
         throw new QueryIdleTimeoutError(this.idleTimeoutMs);
       }
@@ -202,6 +258,7 @@ class MysqlSession implements QuerySession {
       }
       return summary;
     } catch (error) {
+      if (sinkFailure) throw sinkFailure.error;
       // Checked before the cancel branch: when the guard is what ended the
       // read, the driver error that surfaced is a symptom of the teardown, and
       // the user needs to hear about the dead connection rather than see it
@@ -231,10 +288,18 @@ class MysqlSession implements QuerySession {
     } finally {
       settled = true;
       idle.dispose();
-      if (fallbackTimer !== undefined) {
-        clearTimeout(fallbackTimer);
-      }
       subscription.dispose();
+      try {
+        // Fence a KILL that has not been sent yet. Once sent, it must be
+        // acknowledged before this connection can run another statement, or
+        // the original connection must be discarded at the cancel deadline.
+        if (killSent && killing && !this.broken) {
+          const killed = await Promise.race([killing, fallback]);
+          if (killed === false && !this.broken) abandon();
+        }
+      } finally {
+        if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
+      }
     }
   }
 
@@ -256,7 +321,7 @@ class MysqlSession implements QuerySession {
   // tearing down the session the user is working in (USE / temp tables / session
   // variables survive). Returns false when the caller must fall back to
   // destroying the connection.
-  private async killRunningQuery(): Promise<boolean> {
+  private async killRunningQuery(isCurrent: () => boolean, onSent: () => void): Promise<boolean> {
     const threadId = this.connection.threadId;
     if (!threadId) {
       return false;
@@ -265,12 +330,20 @@ class MysqlSession implements QuerySession {
     let control: mysql.Connection | undefined;
     try {
       control = await createMysqlConnection(this.profile, this.password, { omitDatabase: true });
+      if (!isCurrent()) return true;
+      onSent();
       await control.query(`KILL QUERY ${threadId}`);
       return true;
     } catch {
       return false;
     } finally {
-      await control?.end().catch(() => undefined);
+      if (control) {
+        const closing = control;
+        // KILL's acknowledgement, rather than this separate goodbye, is what
+        // makes the original session safe to reuse.
+        void settleWithin(Promise.resolve().then(() => closing.end()).catch(() => closing.destroy()), CLOSE_TIMEOUT_MS,
+          () => closing.destroy());
+      }
     }
   }
 }

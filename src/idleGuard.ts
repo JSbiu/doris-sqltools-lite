@@ -37,6 +37,8 @@ export class QueryIdleTimeoutError extends Error {
 }
 
 export interface IdleGuard {
+  // The consumer may be waiting for local disk backpressure, not the network.
+  pause(): void;
   // Called whenever the driver has proof the connection is still alive: a row,
   // a batch. Arms the clock on the first call, resets it on every later one.
   noteActivity(): void;
@@ -72,6 +74,7 @@ export function createIdleGuard(timeoutMs: number, onIdle: () => void): IdleGuar
   };
 
   return {
+    pause: stopClock,
     noteActivity(): void {
       if (disposed || fired || timeoutMs <= 0) {
         return;
