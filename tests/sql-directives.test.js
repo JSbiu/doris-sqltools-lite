@@ -92,3 +92,15 @@ test('a cursor immediately after a semicolon belongs to the next statement', () 
   const sql = 'SELECT 1;SELECT 2;';
   assert.equal(resolveStatementContext(sql, sql.indexOf('SELECT 2')).sql, 'SELECT 2;');
 });
+
+test('@output belongs to its statement and is inherited when selecting only the SQL body', () => {
+  const sql = '-- @output: results/orders.tsv\nSELECT 1;\nSELECT 2;';
+  const start = sql.indexOf('SELECT');
+  assert.equal(resolveStatementContext(sql, start).output, 'results/orders.tsv');
+  assert.equal(resolveStatementContext(sql, start, sql.indexOf(';') + 1).output, 'results/orders.tsv');
+  assert.doesNotMatch(resolveStatementContext(sql, start).sql, /@output/);
+  assert.equal(resolveStatementContext(sql, sql.lastIndexOf('SELECT')).output, undefined);
+  for (const header of ['-- @output: ', '-- @output: a.tsv\n-- @output: b.tsv', '-- @default-output: a.tsv']) {
+    assert.throws(() => resolveStatementContext(`${header}\nSELECT 1;`, 0));
+  }
+});

@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { buildExportFileName, normalizeExportDirectory } = require('../out/exportPath.js');
+const path = require('node:path');
+const { buildExportFileName, normalizeExportDirectory, resolveOutputPath } = require('../out/exportPath.js');
 
 test('treats missing, blank, and non-string directories as not configured', () => {
   assert.equal(normalizeExportDirectory(undefined), undefined);
@@ -27,4 +28,20 @@ test('sanitizes separators that cannot appear in a file name', () => {
   const now = new Date('2026-09-10T03:04:05.678Z');
 
   assert.equal(buildExportFileName('prod/main db', 'tsv', now), 'query_prod_main_db_2026-09-10T03-04-05-678Z.tsv');
+});
+
+test('output paths resolve relative to the saved SQL file and require TSV filesystem targets', () => {
+  const source = path.resolve('queries', 'orders.sql');
+  assert.equal(resolveOutputPath(' results/orders.tsv ', source), path.resolve('queries', 'results', 'orders.tsv'));
+  assert.equal(resolveOutputPath(path.resolve('orders.tsv')), path.resolve('orders.tsv'));
+  assert.throws(() => resolveOutputPath('orders.tsv'), /先保存/);
+  for (const target of ['', 'orders.sql', 'memory://orders.tsv', 'results/${day}.tsv', 'bad\0.tsv']) {
+    assert.throws(() => resolveOutputPath(target, source));
+  }
+  if (process.platform === 'win32') {
+    for (const target of ['D:orders.tsv', '\\orders.tsv']) assert.throws(() => resolveOutputPath(target, source), /绝对路径/);
+    for (const target of ['orders.sql:output.tsv', 'NUL.tsv', 'bad?/output.tsv']) {
+      assert.throws(() => resolveOutputPath(target, source), /Windows/);
+    }
+  }
 });

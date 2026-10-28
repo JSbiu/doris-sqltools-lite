@@ -31,8 +31,8 @@ function harness(sql, options = {}) {
   }
   const editor = {
     document: {
-      languageId: 'sql', fileName: '/queries.sql',
-      uri: { scheme: 'file', toString: () => 'file:///queries.sql' },
+      languageId: 'sql', fileName: options.sourceFile ?? path.resolve('queries.sql'),
+      uri: { scheme: 'file', fsPath: options.sourceFile ?? path.resolve('queries.sql'), toString: () => 'file:///queries.sql' },
       getText: () => sql, offsetAt: (position) => position,
     },
     selection: { isEmpty: true, start: options.offset ?? 0, end: options.offset ?? 0 },
@@ -66,6 +66,7 @@ function harness(sql, options = {}) {
         sameConnectionTarget: (a, b) => a.type === b.type && a.host === b.host && a.database === b.database,
       };
       if (id === './connectionForm') return {};
+      if (id === './tsvFileWriter' && options.writerFactory) return { createTsvFileWriter: options.writerFactory };
       if (id === './parameterForm') return { openParameterForm: async (inputs) => {
         calls.forms.push(inputs);
         return options.decision;
@@ -105,7 +106,9 @@ function harness(sql, options = {}) {
     panel.metadata = calls.results[index].metadata;
     return panel;
   };
-  return { calls, hooks, editor, manager, state, session, profileSessions, profiles, options, seed, panelFor, run: (explain = false) => hooks.runQuery(manager, state, undefined, undefined, explain) };
+  return { calls, hooks, editor, manager, state, session, profileSessions, profiles, options, seed, panelFor,
+    run: (explain = false) => hooks.runQuery(manager, state, undefined, undefined, explain),
+    runToTsv: () => hooks.runQuery(manager, state, undefined, undefined, false, true) };
 }
 
 test('normal execution routes each statement, substitutes comment parameters and displays its name', async () => {
@@ -339,4 +342,142 @@ test('a database failure under the default export directory is not retried as a 
   await assert.rejects(h.panelFor().export('tsv'), /test database failure/);
   assert.equal(h.calls.saveDialogs, undefined);
   assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+function exportDirectory(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqltools-direct-export-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+test('@output executes once with resolved parameters on the existing session and streams every row without preview LIMIT', async (t) => {
+  const directory = exportDirectory(t);
+  const sql = "-- @connection: Spark数仓\n-- @name: 完整订单\n-- @param: day = 2026-10-27\n-- @output: results/orders.tsv\nSELECT '${day}';";
+  const h = harness(sql, { sourceFile: path.join(directory, 'orders.sql'), rowCount: 12001 });
+  await h.seed();
+  h.editor.selection = { isEmpty: false, start: sql.indexOf('SELECT'), end: sql.length };
+  await h.run();
+  assert.deepEqual(h.calls.executed, ["SELECT '2026-10-27';"]);
+  assert.equal(h.calls.opened.length, 0);
+  assert.equal(h.calls.results.length, 0);
+  assert.equal(h.calls.saveDialogs, undefined);
+  const text = fs.readFileSync(path.join(directory, 'results', 'orders.tsv'), 'utf8');
+  assert.equal(text.split('\r\n').length, 12003);
+  assert.ok(text.endsWith('  +- node 12000\r\n'));
+  assert.deepEqual(fs.readdirSync(path.join(directory, 'results')), ['orders.tsv']);
+  assert.ok(h.calls.notices.some((notice) => /已导出 12001 行/.test(notice)));
+  assert.equal(h.state.runningDocuments.size, 0);
+});
+
+test('Explain ignores @output and never creates a directory or result file', async (t) => {
+  const directory = exportDirectory(t);
+  const h = harness('-- @connection: Spark数仓\n-- @output: results/orders.tsv\nSELECT 1;', { sourceFile: path.join(directory, 'orders.sql') });
+  await h.run(true);
+  assert.match(h.calls.executed[0], /^EXPLAIN FORMATTED/);
+  assert.equal(h.calls.plans.length, 1);
+  assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test('explicit TSV command uses the default directory, and a cancelled save dialog starts no SQL', async (t) => {
+  const directory = exportDirectory(t);
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;', { settings: { exportDirectory: directory } });
+  await h.runToTsv();
+  assert.deepEqual(h.calls.executed, ['SELECT 1;']);
+  assert.equal(h.calls.saveDialogs, undefined);
+  assert.equal(fs.readdirSync(directory).length, 1);
+  assert.equal(h.calls.results.length, 0);
+  const cancelled = harness('-- @connection: Spark数仓\nSELECT 1;');
+  await cancelled.runToTsv();
+  assert.equal(cancelled.calls.saveDialogs, 1);
+  assert.equal(cancelled.calls.opened.length, 0);
+  assert.equal(cancelled.calls.executed.length, 0);
+});
+
+test('an existing output or invalid output type fails before opening a session or executing SQL', async (t) => {
+  const directory = exportDirectory(t);
+  fs.writeFileSync(path.join(directory, 'existing.tsv'), 'original');
+  for (const output of ['existing.tsv', 'source.sql', 'results/${day}.tsv']) {
+    const h = harness(`-- @connection: Spark数仓\n-- @output: ${output}\nSELECT 1;`, { sourceFile: path.join(directory, 'orders.sql') });
+    await assert.rejects(h.run());
+    assert.equal(h.calls.opened.length, 0);
+    assert.equal(h.calls.executed.length, 0);
+  }
+  assert.equal(fs.readFileSync(path.join(directory, 'existing.tsv'), 'utf8'), 'original');
+  const remote = harness('-- @connection: Spark数仓\nSELECT 1;', { target: memoryTarget });
+  await assert.rejects(remote.runToTsv(), /流式写入/);
+  assert.equal(remote.calls.executed.length, 0);
+});
+
+test('writes and multi-statement parameter expansion cannot execute through direct export', async (t) => {
+  const directory = exportDirectory(t);
+  for (const body of ['UPDATE orders SET id=1;', '-- @param: fragment = 1; DELETE FROM orders\nSELECT ${fragment};']) {
+    const h = harness(`-- @connection: Spark数仓\n-- @output: orders.tsv\n${body}`, { sourceFile: path.join(directory, 'orders.sql') });
+    await assert.rejects(h.run());
+    assert.equal(h.calls.executed.length, 0);
+  }
+  assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test('database failure after streaming rows cleans partial output and never retries at another path', async (t) => {
+  const directory = exportDirectory(t);
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;', { settings: { exportDirectory: directory } });
+  h.session.execute = async (sql, _signal, sink) => {
+    h.calls.executed.push(sql);
+    sink.onColumns(['id']);
+    await sink.onRow({ id: 1 });
+    throw new Error('test lost connection');
+  };
+  await assert.rejects(h.runToTsv(), /test lost connection/);
+  assert.equal(h.calls.executed.length, 1);
+  assert.equal(h.calls.saveDialogs, undefined);
+  assert.deepEqual(fs.readdirSync(directory), []);
+  assert.equal(h.state.runningDocuments.size, 0);
+});
+
+test('file close cancels direct export, waits for cleanup and releases its session', async (t) => {
+  const directory = exportDirectory(t);
+  const h = harness('-- @connection: Spark数仓\n-- @output: orders.tsv\nSELECT 1;', { sourceFile: path.join(directory, 'orders.sql') });
+  const started = deferred();
+  h.session.execute = async (_sql, signal, sink) => {
+    sink.onColumns(['id']);
+    await sink.onRow({ id: 1 });
+    started.resolve();
+    await new Promise((resolve) => signal.onRequest(resolve));
+    throw new (require('../out/querySession').QueryCancelledError)();
+  };
+  const running = h.run();
+  await started.promise;
+  const closing = h.state.sessions.closeDocument('file:///queries.sql');
+  await Promise.all([running, closing]);
+  assert.deepEqual(h.calls.closed, ['spark']);
+  assert.deepEqual(fs.readdirSync(directory), []);
+  assert.equal(h.state.runningDocuments.size, 0);
+  assert.ok(h.calls.notices.some((notice) => notice.includes('已取消执行并导出')));
+});
+
+test('direct export holds the file lock through path selection, and reset cancels a pending dialog', async () => {
+  const prompt = deferred();
+  const displayed = deferred();
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;', { saveDialog: () => { displayed.resolve(); return prompt.promise; } });
+  const running = h.runToTsv();
+  await displayed.promise;
+  await h.run();
+  assert.equal(h.calls.executed.length, 0);
+  const closing = h.state.sessions.closeDocument('file:///queries.sql');
+  await Promise.all([running, closing]);
+  prompt.resolve(memoryTarget);
+  assert.equal(h.calls.opened.length, 0);
+  assert.equal(h.state.runningDocuments.size, 0);
+});
+
+test('preview exports also refuse existing local targets before a database rerun and preserve their contents', async (t) => {
+  const directory = exportDirectory(t);
+  const target = path.join(directory, 'existing.tsv');
+  fs.writeFileSync(target, 'original contents');
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;', { rowCount: 3, target: { scheme: 'file', fsPath: target } });
+  await h.run();
+  await assert.rejects(h.panelFor().export('tsv'), /已存在/);
+  assert.equal(h.calls.executed.length, 1);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'original contents');
+  assert.deepEqual(fs.readdirSync(directory), ['existing.tsv']);
 });

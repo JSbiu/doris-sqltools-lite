@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -50,6 +50,11 @@
         "command": "dorisSqlLite.runQuery",
         "title": "Doris SQL Lite: Run Query at Cursor",
         "icon": "$(play)"
+      },
+      {
+        "command": "dorisSqlLite.runQueryToTsv",
+        "title": "Doris SQL Lite: Run Query to TSV at Cursor",
+        "icon": "$(save-as)"
       },
       {
         "command": "dorisSqlLite.cancelQuery",
@@ -142,6 +147,11 @@
           "command": "dorisSqlLite.runQuery",
           "when": "editorTextFocus && resourceLangId == sql",
           "group": "navigation@1"
+        },
+        {
+          "command": "dorisSqlLite.runQueryToTsv",
+          "when": "editorTextFocus && resourceLangId == sql",
+          "group": "navigation@1.7"
         },
         {
           "command": "dorisSqlLite.cancelQuery",

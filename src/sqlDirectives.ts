@@ -5,6 +5,7 @@ export interface StatementContext {
   sql: string;
   name?: string;
   connection?: string;
+  output?: string;
   parameters: Record<string, string>;
   line: number;
 }
@@ -15,6 +16,7 @@ interface Header {
   defaultConnection?: string;
   connection?: string;
   name?: string;
+  output?: string;
   removals: SqlStatementRange[];
 }
 
@@ -48,7 +50,7 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
       const match = /^--\s*@([a-z-]+):\s*(.*)$/.exec(comment);
       if (!match) throw new Error(`SQL 注释格式错误：${comment}`);
       const [, key, value] = match;
-      if (!['default-connection', 'default-param', 'connection', 'param', 'name'].includes(key)) {
+      if (!['default-connection', 'default-param', 'connection', 'param', 'name', 'output'].includes(key)) {
         throw new Error(`未知 SQL 注释 @${key}。`);
       }
       if (key.startsWith('default-') && !fileDefaults) {
@@ -67,6 +69,7 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
       } else {
         if (!value.trim()) throw new Error(`@${key} 不能为空。`);
         if (key === 'name') header.name = value.trim();
+        if (key === 'output') header.output = value.trim();
         if (key === 'connection') header.connection = value.trim();
         if (key === 'default-connection') header.defaultConnection = value.trim();
       }
@@ -116,6 +119,7 @@ export function resolveStatementContext(
     sql,
     name: header.name,
     connection: header.connection ?? first.defaultConnection,
+    output: header.output,
     parameters: { ...first.defaults, ...header.parameters },
     line: document.slice(0, range.start).split('\n').length,
   };

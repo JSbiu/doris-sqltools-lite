@@ -1,8 +1,6 @@
 import * as vscode from 'vscode';
-import { createWriteStream } from 'node:fs';
-import { mkdir, unlink } from 'node:fs/promises';
-import { join, basename } from 'node:path';
-import { once } from 'node:events';
+import { mkdir } from 'node:fs/promises';
+import { join, basename, dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
@@ -16,7 +14,9 @@ import {
   TSV_CHUNK_ROWS,
   type ExportFormat,
 } from './exports';
-import { buildExportFileName, normalizeExportDirectory } from './exportPath';
+import { buildExportFileName, normalizeExportDirectory, resolveOutputPath } from './exportPath';
+import { assertDirectExportSql } from './directExport';
+import { createTsvFileWriter, type TsvFileWriter } from './tsvFileWriter';
 import { openParameterForm } from './parameterForm';
 import {
   forgetParameterValues,
@@ -916,14 +916,29 @@ function createTsvWriter(
   columns: string[],
   options: WriteTsvOptions,
 ): TsvWriter {
+  if (uri.scheme === 'file') {
+    const writer = createTsvFileWriter(uri.fsPath, options);
+    return {
+      async begin() {
+        await writer.begin();
+        writer.onColumns(columns);
+      },
+      write: (row) => writer.write(row),
+      async finish() {
+        const count = await writer.finish();
+        if (writer.cleanupWarning) void vscode.window.showWarningMessage(writer.cleanupWarning);
+        return count;
+      },
+      abort: () => writer.abort(),
+    };
+  }
   const { chunkRows, escapeFormulas, token, onProgress } = options;
   const encodeOptions = { escapeFormulas };
   const header = encodeTsvHeader(columns, encodeOptions);
 
   let buffer: Row[] = [];
   let writtenRows = 0;
-  let parts: Buffer[] | undefined;
-  let stream: ReturnType<typeof createWriteStream> | undefined;
+  let parts: Buffer[] = [];
 
   const flush = async (): Promise<void> => {
     if (buffer.length === 0) {
@@ -933,30 +948,14 @@ function createTsvWriter(
     writtenRows += buffer.length;
     buffer = [];
 
-    if (parts) {
-      parts.push(Buffer.from(block, 'utf8'));
-    } else if (stream) {
-      if (!stream.write(block)) {
-        await once(stream, 'drain');
-      }
-      // When the write buffer never fills there is nothing above to await, so
-      // hand the event loop a turn; otherwise a fast disk makes the whole loop
-      // synchronous and neither the progress bar nor cancellation is observed.
-      await yieldToEventLoop();
-    }
+    parts.push(Buffer.from(block, 'utf8'));
+    await yieldToEventLoop();
     onProgress(writtenRows);
   };
 
   return {
     async begin(): Promise<void> {
-      if (uri.scheme !== 'file') {
-        parts = [Buffer.from(header, 'utf8')];
-        return;
-      }
-      stream = createWriteStream(uri.fsPath, { encoding: 'utf8' });
-      if (!stream.write(header)) {
-        await once(stream, 'drain');
-      }
+      parts = [Buffer.from(header, 'utf8')];
     },
 
     async write(row: Row): Promise<void> {
@@ -970,21 +969,13 @@ function createTsvWriter(
     async finish(): Promise<number> {
       throwIfCancelled(token);
       await flush();
-      if (parts) {
-        await vscode.workspace.fs.writeFile(uri, Buffer.concat(parts));
-      } else if (stream) {
-        stream.end();
-        await once(stream, 'finish');
-      }
+      await vscode.workspace.fs.writeFile(uri, Buffer.concat(parts));
       return writtenRows;
     },
 
     async abort(): Promise<void> {
-      stream?.destroy();
-      if (uri.scheme === 'file') {
-        // A half-written file must not be left behind looking like a complete export.
-        await unlink(uri.fsPath).catch(() => undefined);
-      }
+      buffer = [];
+      parts = [];
     },
   };
 }
@@ -1168,6 +1159,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await runQuery(manager, connectionSession, undefined, refreshStatusBars, true);
       } catch (error) {
         showError('查看执行计划失败', error);
+      }
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.runQueryToTsv', async () => {
+      try {
+        await runQuery(manager, connectionSession, undefined, refreshStatusBars, false, true);
+      } catch (error) {
+        showError('执行并导出失败', error);
       }
     }),
     vscode.commands.registerCommand('dorisSqlLite.resetFileSessions', async () => {
@@ -1413,6 +1411,7 @@ async function runQuery(
   requestedConnectionId?: string,
   onStateChanged?: () => void,
   explain = false,
+  directExport = false,
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   const documentKey = editor?.document.uri.toString();
@@ -1421,7 +1420,44 @@ async function runQuery(
     return;
   }
   await withDocumentOperation(connectionSession, documentKey, onStateChanged,
-    async (source, operation) => executeQuery(manager, connectionSession, source, operation, requestedConnectionId, onStateChanged, explain));
+    async (source, operation) => executeQuery(manager, connectionSession, source, operation, requestedConnectionId, onStateChanged, explain, directExport));
+}
+
+async function chooseDirectExportPath(
+  output: string | undefined,
+  sourceUri: vscode.Uri,
+  title: string,
+  token: vscode.CancellationToken,
+): Promise<string | undefined> {
+  let target: string;
+  if (output) {
+    target = resolveOutputPath(output, sourceUri.scheme === 'file' ? sourceUri.fsPath : undefined);
+  } else {
+    const fileName = buildExportFileName(title, 'tsv', new Date());
+    const directory = configuredExportDirectory();
+    if (directory) {
+      if (!isAbsolute(directory)) throw new Error('默认导出目录需要是绝对路径，请重新选择默认目录。');
+      target = resolveOutputPath(join(directory, fileName));
+    } else {
+      const defaultUri = sourceUri.scheme === 'file'
+        ? vscode.Uri.file(join(dirname(sourceUri.fsPath), fileName))
+        : undefined;
+      const uri = await untilCancelled(vscode.window.showSaveDialog({
+        title: `执行并导出 ${title}`,
+        saveLabel: '执行并导出 TSV',
+        filters: { TSV: ['tsv'] },
+        defaultUri,
+      }), token);
+      if (!uri || token.isCancellationRequested) return undefined;
+      if (uri.scheme !== 'file') throw new Error('执行并导出需要文件系统路径，所选位置不支持流式写入。');
+      target = resolveOutputPath(uri.fsPath);
+    }
+  }
+  if (token.isCancellationRequested) return undefined;
+  // Resolve and prepare the destination before any SQL is submitted. Do not
+  // recover by executing again at another location after a later failure.
+  await mkdir(dirname(target), { recursive: true });
+  return token.isCancellationRequested ? undefined : target;
 }
 
 async function executeQuery(
@@ -1432,6 +1468,7 @@ async function executeQuery(
   requestedConnectionId?: string,
   onStateChanged?: () => void,
   explain = false,
+  directExport = false,
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'sql') {
@@ -1472,6 +1509,8 @@ async function executeQuery(
     return;
   }
   const statement = prepared.sql;
+  const outputMode = !explain && (directExport || context?.output !== undefined);
+  if (outputMode) assertDirectExportSql(statement);
 
   const id = requestedConnectionId
     ?? connectionSession.documentConnections.get(documentKey)
@@ -1485,6 +1524,10 @@ async function executeQuery(
   // Build before touching the session: malformed / already-EXPLAIN input must
   // never fall through to executing the original statement.
   const explainSql = explain ? buildExplainSql(statement, profile.type) : undefined;
+  const targetPath = outputMode
+    ? await chooseDirectExportPath(context?.output, sourceUri, context?.name ?? profile.name, cancelSource.token)
+    : undefined;
+  if (outputMode && (!targetPath || operation.cancelled)) return;
   connectionSession.documentConnections.set(documentKey, profile.id);
   connectionSession.defaultConnectionId = profile.id;
   onStateChanged?.();
@@ -1539,14 +1582,25 @@ async function executeQuery(
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `${explain ? '查看计划' : '执行'} ${context?.name ?? profile.name}`,
+        title: `${explain ? '查看计划' : outputMode ? '执行并导出' : '执行'} ${context?.name ?? profile.name}`,
         cancellable: true,
       },
       async (progress, token) => {
         progressHandle = progress;
         if (token.isCancellationRequested) cancelSource.cancel();
         subscriptions.push(token.onCancellationRequested(() => cancelSource.cancel()));
+        let fileWriter: TsvFileWriter | undefined;
         try {
+          if (targetPath) {
+            fileWriter = createTsvFileWriter(targetPath, {
+              chunkRows: configuredExportChunkRows(),
+              escapeFormulas: configuredEscapeFormulas(),
+              token: cancelSource.token,
+              onProgress: (rows) => progress.report({ message: `已写入 ${rows} 行…` }),
+            });
+            progress.report({ message: '准备输出文件…' });
+            await fileWriter.begin();
+          }
           progress.report({ message: '准备当前文件的数据源会话…' });
           entry = await connectionSession.sessions.open(operation, profile.id, async () => {
             const current = manager.getProfiles().find((item) => item.id === profile.id);
@@ -1555,7 +1609,7 @@ async function executeQuery(
             }
             return manager.open(profile, configuredQueryIdleTimeoutMs(), cancelSource.token);
           });
-          if (operation.cancelled || token.isCancellationRequested) return;
+          if (operation.cancelled || token.isCancellationRequested) throw new QueryCancelledError();
           if (explainSql !== undefined) {
             // Plans are text, often many rows long. Never apply the result
             // display/read cap or append a LIMIT to this request.
@@ -1575,6 +1629,24 @@ async function executeQuery(
               plan: planText(result.columns, result.rows),
               generatedAt: new Date().toISOString(),
             }, sourceUri);
+            return;
+          }
+          if (fileWriter) {
+            const writer = fileWriter;
+            let noResultSet = false;
+            progress.report({ message: '正在执行并读取完整结果…' });
+            await connectionSession.sessions.startStatement(operation, entry).execute(statement, signal, {
+              onColumns: (columns) => writer.onColumns(columns),
+              onRow: (row) => writer.write(row),
+              onAffectedRows: () => { noResultSet = true; },
+            });
+            throwIfCancelled(cancelSource.token);
+            if (noResultSet) throw new Error('语句没有返回可导出的结果集，未生成 TSV 文件。');
+            const written = await writer.finish();
+            void vscode.window.showInformationMessage(
+              `已导出 ${written} 行到 ${targetPath}，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒。`,
+            );
+            if (writer.cleanupWarning) void vscode.window.showWarningMessage(writer.cleanupWarning);
             return;
           }
           const maxRows = vscode.workspace
@@ -1650,10 +1722,22 @@ async function executeQuery(
             rerun: { state: connectionSession, documentKey, onStateChanged, snapshot: connectionSession.sessions.snapshot(entry), sql: statement },
           });
         } catch (error) {
-          if (isQueryCancelled(error) || isCancelled(token)) {
-            vscode.window.showInformationMessage(`已取消 ${profile.name} 上的查询。`);
+          if (fileWriter) {
+            try {
+              await fileWriter.abort();
+            } catch (cleanupError) {
+              const reason = error instanceof Error ? error.message : String(error);
+              const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+              showError('执行并导出未完成', new Error(`${reason}；${cleanupReason}`));
+              return;
+            }
+          }
+          if (isQueryCancelled(error) || (!outputMode && isCancelled(token))) {
+            vscode.window.showInformationMessage(outputMode
+              ? '已取消执行并导出，未完成的临时文件已清理。'
+              : `已取消 ${profile.name} 上的查询。`);
           } else {
-            showError(`执行失败（${profile.name}）`, error);
+            showError(`${outputMode ? '执行并导出失败' : '执行失败'}（${profile.name}）`, error);
           }
         }
       },
