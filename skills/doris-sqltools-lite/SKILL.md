@@ -1,11 +1,11 @@
 ---
 name: doris-sqltools-lite
-description: 为 Doris SQLTools Lite VS Code 扩展编写或整理可执行 SQL，并处理该工具的执行计划审核、结果导出和会话问题。当用户或当前项目约定使用此工具时采用；不用于扩展源码开发或未选用此工具的普通 SQL 工作。
+description: 为 Doris SQLTools Lite VS Code 扩展编写或整理可执行 SQL，并处理执行计划审核、简短执行反馈、结果导出和会话问题。当用户或当前项目约定使用此工具时采用；不用于扩展源码开发或未选用此工具的普通 SQL 工作。
 ---
 
 # Doris SQLTools Lite 使用
 
-按 0.9.2 能力核对（2026-10-28）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，不默认改设置、安装扩展或连接数据库。
+按 0.9.3 能力核对（2026-10-28）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，不默认改设置、安装扩展或连接数据库。
 
 ## 编写 SQL 文件
 
@@ -52,11 +52,20 @@ WHERE dt = '${c_date}';
 复杂或大结果查询按任务需要先看计划，再审核、执行和导出；普通小查询不因此增加审批步骤。
 
 - `Ctrl+Alt+Enter` 或 `Doris SQL Lite: Explain Query at Cursor`：对光标所在或选中的单条 SQL 取计划，复用该语句的连接、参数和会话，不修改原 SQL。Spark 使用 `EXPLAIN FORMATTED`，Doris 使用 `EXPLAIN VERBOSE`，MySQL 使用普通 `EXPLAIN`。此入口不自动使用 `EXPLAIN ANALYZE`，不要为取计划重复维护两份 SQL。
-- 计划页可复制或保存 AI 审核材料，包含 SQL 名称、来源、连接名称/类型、实际参数、解析后的 SQL、完整计划和审核要求。材料保存位置与业务信息管理遵循当前项目约定。
-- 收到计划后，结合 SQL 和参数检查分区裁剪、扫描范围、过滤、Join、Shuffle/Exchange、排序与聚合。区分计划证据、估算和实际运行结果；SQL、参数、连接或会话配置改变后，原计划不能作为新版本已审核的证据。
+- 计划页默认“复制 AI 反馈 / 保存 AI 反馈…”提供简短信息，包含 SQL 名称、连接名称/类型、实际参数、原 SQL 路径和行号范围，以及完整计划的 `planFile` 路径，不重复 SQL 与计划正文。首次复制先选择 `.txt` 保存完整计划，取消则不复制；保存 `.md` 反馈时会同时生成相邻 `.plan.txt`。已保存计划后复用路径，需要全文快照才显式使用“复制完整材料”。材料保存位置与业务信息管理遵循当前项目约定。
+- 收到反馈后，按路径读取来源 SQL 和完整计划，结合实际参数检查分区裁剪、扫描范围、过滤、Join、Shuffle/Exchange、排序与聚合。区分计划证据、估算和实际运行结果；SQL、参数、连接或会话配置改变后，原计划不能作为新版本已审核的证据。
 - `Ctrl+Enter` 或 `Doris SQL Lite: Run Query at Cursor`：一次执行一条 SQL。有选区取选中语句，否则取光标所在或最近一条；只选正文仍继承前面的注释，跨多条的选区会被拒绝。有 `@output` 时直接导出完整结果，无此注释时显示普通预览；`Ctrl+Alt+Enter` 忽略输出注释，只取计划。
 
 生成 SQL、取到计划或通过审核，不等于已经执行成功。执行由当前任务授权决定；本 skill 本身不增加生产访问权限，也不自动将材料发给 AI。
+
+## 读取执行反馈
+
+普通查询、直接执行并导出、面板导出和查看计划使用同一简短格式，不附带 SQL 正文、结果行或计划全文。结果页和导出通知有复制/保存入口；失败、取消或未打开结果页时，用 `Doris SQL Lite: Copy Last SQL Feedback` / `Save Last SQL Feedback` 获取当前窗口最近完成的一次操作。Reload Window 后记录清空，不建立查询历史。
+
+- 先核对 `name`、`connectionName`、`databaseType`、`parameters`、`source.path` 及执行时行号，确认属于当前任务。`databaseType=null` 表示未确定类型，不自行猜数据源。`action` 区分 `query` / `export` / `explain`，`status` 区分 `success` / `failed` / `cancelled`。
+- `source.savedAtExecution=false` 表示当时有未保存内容，`changedSinceExecution=true` 表示后来编辑过文件，`null` 表示当前状态未核对（如文件已关闭）。这些情况下，当前磁盘文件不能直接当作执行版本；按任务需要核对或让用户提供显式“复制完整材料”的计划快照，不自动强制保存、不生成指纹。
+- `submitted=false` 表示本次未再提交 SQL，可能是执行前取消/失败，也可能是把完整内存结果保存成文件；需结合 `action` 和 `status` 判断。`totalRows=null` 表示总行数未知，`rowsRead` 不能代替总数。`previewLimit` 只表示工具自动追加的上限，SQL 自带 LIMIT 仍在来源中。
+- `resultFile` 指向完成的结果，`planFile` 指向完整计划；按需读文件，不要求用户反复粘贴全文。`temporaryFile` 是清理失败时的残留，不是成功产物。`sessionState=lost` 时先按当前任务要求恢复初始化；错误/警告已脱敏并可能明确截断，必要时再查对应信息，不自动重试 SQL。
 
 ## 结果导出与会话
 

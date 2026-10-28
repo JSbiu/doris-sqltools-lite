@@ -31,6 +31,7 @@ function harness(sql, options = {}) {
   }
   const editor = {
     document: {
+      version: 1, isDirty: false, isClosed: false,
       languageId: 'sql', fileName: options.sourceFile ?? path.resolve('queries.sql'),
       uri: { scheme: 'file', fsPath: options.sourceFile ?? path.resolve('queries.sql'), toString: () => 'file:///queries.sql' },
       getText: () => sql, offsetAt: (position) => position,
@@ -66,6 +67,10 @@ function harness(sql, options = {}) {
         sameConnectionTarget: (a, b) => a.type === b.type && a.host === b.host && a.database === b.database,
       };
       if (id === './connectionForm') return {};
+      if (id === './feedbackActions') return {
+        rememberFeedback: (record) => { calls.feedback = record; },
+        copyFeedback: async () => true, saveFeedback: async () => true,
+      };
       if (id === './tsvFileWriter' && options.writerFactory) return { createTsvFileWriter: options.writerFactory };
       if (id === './parameterForm') return { openParameterForm: async (inputs) => {
         calls.forms.push(inputs);
@@ -480,4 +485,160 @@ test('preview exports also refuse existing local targets before a database rerun
   assert.equal(h.calls.executed.length, 1);
   assert.equal(fs.readFileSync(target, 'utf8'), 'original contents');
   assert.deepEqual(fs.readdirSync(directory), ['existing.tsv']);
+});
+
+test('preview feedback references the selected SQL range and actual parameters without copying a long SQL body', async () => {
+  const marker = 'long_sql_body_'.repeat(2000);
+  const sql = `-- @default-connection: Spark数仓\nSELECT 1;\n-- @name: 核查\n-- @param: day = 2026-10-28\nSELECT '${marker}',\n'${'${day}'}';\n`;
+  const h = harness(sql, { offset: sql.lastIndexOf('SELECT'), rowCount: 3 });
+  h.editor.selection = { isEmpty: false, start: sql.lastIndexOf('SELECT'), end: sql.length };
+  await h.run();
+  const record = h.calls.feedback;
+  assert.equal(record.value.name, '核查');
+  assert.equal(record.value.connectionName, 'Spark数仓');
+  assert.equal(record.value.databaseType, 'Spark');
+  assert.equal(record.value.parameters.day, '2026-10-28');
+  assert.equal(record.value.source.path, path.resolve('queries.sql'));
+  assert.equal(record.value.source.startLine, 5);
+  assert.equal(record.value.source.endLine, 6);
+  assert.equal(record.value.rowsRead, 3);
+  assert.equal(record.value.displayedRows, 2);
+  assert.equal(record.value.totalRows, null);
+  assert.equal(record.value.previewLimit, 2);
+  assert.equal(record.value.readComplete, false);
+  const { buildSqlFeedback } = require('../out/sqlFeedback');
+  const text = buildSqlFeedback(record.value);
+  assert.ok(!text.includes(marker));
+  assert.ok(text.length < 1500);
+  assert.equal(h.calls.results[0].metadata.feedback, record);
+});
+
+test('feedback distinguishes complete reads, truncated previews, and full exports from the original session', async () => {
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;', { rowCount: 3, target: memoryTarget, settings: { readRowLimit: -1 } });
+  await h.run();
+  assert.equal(h.calls.feedback.value.readComplete, true);
+  assert.equal(h.calls.feedback.value.totalRows, 3);
+  assert.equal(h.calls.feedback.value.truncated, true);
+  assert.equal(h.calls.feedback.value.previewLimit, undefined);
+  await h.panelFor().export('tsv');
+  assert.equal(h.calls.feedback.value.action, 'export');
+  assert.equal(h.calls.feedback.value.status, 'success');
+  assert.equal(h.calls.feedback.value.submitted, true);
+  assert.equal(h.calls.feedback.value.rowsRead, 3);
+  assert.equal(h.calls.feedback.value.totalRows, 3);
+  assert.equal(h.calls.feedback.value.resultFile, memoryTarget.toString());
+  assert.equal(h.calls.feedback.value.previewLimit, undefined);
+});
+
+test('in-memory export feedback does not claim another SQL was submitted', async () => {
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;', { target: memoryTarget });
+  await h.run();
+  await h.panelFor().export('tsv');
+  assert.equal(h.calls.feedback.value.status, 'success');
+  assert.equal(h.calls.feedback.value.submitted, false);
+  assert.equal(h.calls.feedback.value.totalRows, 1);
+  assert.equal(h.calls.executed.length, 1);
+});
+
+test('successful direct-export feedback references the completed file and no SQL or result text', async (t) => {
+  const directory = exportDirectory(t);
+  const h = harness('-- @connection: Spark数仓\n-- @name: 完整核查\n-- @output: orders.tsv\nSELECT 1;', { sourceFile: path.join(directory, 'orders.sql'), rowCount: 11 });
+  await h.run();
+  const value = h.calls.feedback.value;
+  assert.equal(value.action, 'export');
+  assert.equal(value.status, 'success');
+  assert.equal(value.submitted, true);
+  assert.equal(value.totalRows, 11);
+  assert.equal(value.readComplete, true);
+  assert.equal(value.resultFile, path.join(directory, 'orders.tsv'));
+  assert.ok(fs.existsSync(value.resultFile));
+  assert.equal(value.previewLimit, undefined);
+  assert.equal(value.sessionState, 'retained');
+});
+
+test('failure feedback keeps partial counts and lost-session state without claiming an output file', async (t) => {
+  const directory = exportDirectory(t);
+  const h = harness('-- @connection: Spark数仓\n-- @output: orders.tsv\nSELECT 1;', { sourceFile: path.join(directory, 'orders.sql') });
+  h.session.execute = async (_sql, _signal, sink) => {
+    sink.onColumns(['id']);
+    await sink.onRow({ id: 1 });
+    h.session.broken = true;
+    throw new Error('test network failure');
+  };
+  await assert.rejects(h.run(), /test network failure/);
+  const value = h.calls.feedback.value;
+  assert.equal(value.status, 'failed');
+  assert.equal(value.submitted, true);
+  assert.equal(value.rowsRead, 1);
+  assert.equal(value.totalRows, null);
+  assert.equal(value.resultFile, undefined);
+  assert.equal(value.sessionState, 'lost');
+  assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test('cancelled preparation and invalid routing publish fresh feedback with submitted=false', async () => {
+  const h = harness('-- @connection: Spark数仓\nSELECT ${missing};');
+  await h.run();
+  assert.equal(h.calls.feedback.value.status, 'cancelled');
+  assert.equal(h.calls.feedback.value.submitted, false);
+  assert.equal(h.calls.feedback.value.databaseType, null);
+  const invalid = harness('-- @connection: absent\nSELECT 1;');
+  await assert.rejects(invalid.run());
+  assert.equal(invalid.calls.feedback.value.status, 'failed');
+  assert.equal(invalid.calls.feedback.value.submitted, false);
+  assert.equal(invalid.calls.feedback.value.connectionName, 'absent');
+});
+
+test('source tracking captures dirty state at execution and detects later changes or closure without saving', async () => {
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;');
+  h.editor.document.isDirty = true;
+  await h.run();
+  const record = h.calls.feedback;
+  assert.equal(record.currentSource().savedAtExecution, false);
+  assert.equal(record.currentSource().changedSinceExecution, false);
+  h.editor.document.isDirty = false;
+  h.editor.document.version++;
+  assert.equal(record.currentSource().savedAtExecution, false);
+  assert.equal(record.currentSource().changedSinceExecution, true);
+  h.editor.document.isClosed = true;
+  assert.equal(record.currentSource().changedSinceExecution, null);
+});
+
+test('plan feedback shares source and parameters but references complete plan text separately', async () => {
+  const h = harness('-- @connection: Spark数仓\n-- @name: 核查\n-- @param: n = 1\nSELECT ${n};');
+  await h.run(true);
+  const record = h.calls.feedback;
+  assert.equal(record.value.action, 'explain');
+  assert.equal(record.value.status, 'success');
+  assert.equal(record.value.explainKind, 'EXPLAIN FORMATTED');
+  assert.equal(record.value.parameters.n, '1');
+  assert.equal(record.value.planFile, undefined);
+  assert.equal(record.planText, h.calls.plans[0].plan);
+  const text = require('../out/sqlFeedback').buildSqlFeedback(record.value);
+  assert.ok(!text.includes(record.planText));
+});
+
+test('DML result pages are retained in 0.9.3 while feedback reports affected rows', async () => {
+  const h = harness('-- @connection: MySQL业务库\nINSERT INTO orders VALUES (1);');
+  h.profileSessions.get('mysql').execute = async (_sql, _signal, sink) => {
+    sink.onAffectedRows(4);
+    return { rowsRead: 0, affectedRows: 4 };
+  };
+  await h.run();
+  assert.equal(h.calls.results.length, 1);
+  assert.equal(h.calls.feedback.value.affectedRows, 4);
+  assert.equal(h.calls.feedback.value.status, 'success');
+});
+
+test('a preview ending exactly at its injected LIMIT remains incomplete and full export reruns the original query', async () => {
+  const h = harness('-- @connection: Spark数仓\nSELECT 1;', { rowCount: 2, target: memoryTarget });
+  await h.run();
+  assert.equal(h.calls.feedback.value.totalRows, null);
+  assert.equal(h.calls.results[0].result.truncated, true);
+  h.options.rowCount = 7;
+  await h.panelFor().export('tsv');
+  assert.equal(h.calls.executed.length, 2);
+  assert.equal(h.calls.executed[1], 'SELECT 1;');
+  assert.equal(h.calls.feedback.value.totalRows, 7);
+  assert.equal(h.calls.writes[0].text.split('\r\n').length, 9);
 });

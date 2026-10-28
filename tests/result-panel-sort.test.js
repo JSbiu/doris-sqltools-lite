@@ -337,11 +337,12 @@ function renderPanel(result, metadata = {}) {
 function openPanel(html) {
   const document = parseHtml(html);
   const messages = [];
+  let receiveMessage;
   const sandbox = {
     acquireVsCodeApi: () => ({ postMessage: (message) => messages.push(message) }),
     document,
     window: {
-      addEventListener: () => {},
+      addEventListener: (event, callback) => { if (event === 'message') receiveMessage = callback; },
       setTimeout: (handler) => {
         handler();
         return 0;
@@ -354,6 +355,7 @@ function openPanel(html) {
   return {
     document,
     messages,
+    receive: (data) => receiveMessage({ data }),
     rows: () => document.querySelectorAll('tbody tr[data-row]'),
     rowNumbers: () => document.querySelectorAll('tbody tr[data-row]')
       .map((row) => Number(row.querySelector('td').textContent)),
@@ -581,6 +583,25 @@ test('sorting and filtering never change copied content or the copy/export messa
   view.button('button[data-export="custom"]').dispatch('click');
   assert.deepEqual({ ...view.messages[2] }, { type: 'export', format: 'tsv', chooseLocation: true });
   assert.deepEqual(panel.result.rows.map((row) => row.v), ['b1', 'a2', 'b3', 'a4']);
+});
+
+test('feedback actions block overlapping toolbar actions and release them after cancellation or failure', () => {
+  const view = openPanel(renderPanel(resultOf([1])).html);
+  const copy = view.button('button[data-action="copy-feedback"]');
+  const save = view.button('button[data-action="save-feedback"]');
+  copy.dispatch('click');
+  assert.equal(view.messages[0].type, 'copy-feedback');
+  assert.equal(save.disabled, true);
+  assert.equal(view.button('button[data-export="default"]').disabled, true);
+  view.receive({ type: 'actionCancelled', action: 'feedback' });
+  assert.equal(copy.disabled, false);
+  assert.equal(save.disabled, false);
+  save.dispatch('click');
+  assert.equal(view.messages[1].type, 'save-feedback');
+  view.receive({ type: 'actionFailed', action: 'feedback' });
+  assert.equal(copy.disabled, false);
+  assert.equal(save.disabled, false);
+  assert.equal(save.textContent, save.dataset.defaultLabel);
 });
 
 test('renders safely escaped sort attributes and cell text', () => {

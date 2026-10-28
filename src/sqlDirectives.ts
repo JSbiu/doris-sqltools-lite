@@ -8,6 +8,7 @@ export interface StatementContext {
   output?: string;
   parameters: Record<string, string>;
   line: number;
+  endLine: number;
 }
 
 interface Header {
@@ -121,7 +122,8 @@ export function resolveStatementContext(
     connection: header.connection ?? first.defaultConnection,
     output: header.output,
     parameters: { ...first.defaults, ...header.parameters },
-    line: document.slice(0, range.start).split('\n').length,
+    line: document.slice(0, end > start ? start : range.start).split('\n').length,
+    endLine: document.slice(0, Math.max(0, (end > start ? end : range.end) - 1)).split('\n').length,
   };
 }
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "Doris SQLTools Lite 使用"
-  short_description: "编写带连接、参数、名称和输出注释的 SQL，衔接计划审核与一次执行全量导出"
-  default_prompt: "使用 $doris-sqltools-lite 整理本次 SQL 的连接、参数和名称，需要完整结果时配置 @output，并说明计划审核与执行导出步骤。"
+  short_description: "编写 SQL 注释，按简短反馈定位原 SQL、完整计划和导出文件，核对执行结果"
+  default_prompt: "使用 $doris-sqltools-lite 整理本次 SQL 的连接、参数、名称和输出，并根据简短反馈按文件位置核对执行计划与结果。"

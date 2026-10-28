@@ -17,6 +17,8 @@ import {
 import { buildExportFileName, normalizeExportDirectory, resolveOutputPath } from './exportPath';
 import { assertDirectExportSql } from './directExport';
 import { createTsvFileWriter, type TsvFileWriter } from './tsvFileWriter';
+import { copyFeedback, saveFeedback, rememberFeedback, type FeedbackRecord } from './feedbackActions';
+import { formatDatabaseError } from './connectionDiagnostics';
 import { openParameterForm } from './parameterForm';
 import {
   forgetParameterValues,
@@ -154,6 +156,7 @@ interface ResultPanelMetadata {
   // sent rather than what the file says. An empty object means the statement had
   // no parameters.
   parameters?: Record<string, string>;
+  feedback?: FeedbackRecord;
   origin?: ResultOrigin;
   // Enough to run the statement again. Rows past maxResultRows are counted but
   // never stored, so a truncated result has no full set in memory to export.
@@ -337,6 +340,17 @@ class ResultPanel {
           await panel.webview.postMessage({ type: 'actionFailed', action: 'export' });
         }
       }
+      if (message.type === 'copy-feedback' || message.type === 'save-feedback') {
+        try {
+          if (!resultPanel.metadata.feedback) throw new Error('这次结果没有可用反馈，请重新执行查询。');
+          const done = message.type === 'copy-feedback'
+            ? await copyFeedback(resultPanel.metadata.feedback) : await saveFeedback(resultPanel.metadata.feedback);
+          await panel.webview.postMessage({ type: done ? 'actionComplete' : 'actionCancelled', action: 'feedback' });
+        } catch (error) {
+          showError('反馈操作失败', error);
+          await panel.webview.postMessage({ type: 'actionFailed', action: 'feedback' });
+        }
+      }
     });
   }
 
@@ -481,6 +495,8 @@ class ResultPanel {
       <button class="ghost" data-export="custom" data-format="tsv" data-default-label="其他位置…" title="这次导出时弹出位置选择">其他位置…</button>
       <button data-action="copy" data-default-label="复制 TSV">复制 TSV</button>
     ` : ''}
+    <button class="ghost" data-action="copy-feedback" data-default-label="复制 AI 反馈">复制 AI 反馈</button>
+    <button class="ghost" data-action="save-feedback" data-default-label="保存 AI 反馈…">保存 AI 反馈…</button>
   </div>
   ${truncatedNotice}
   ${parameterNotice}
@@ -491,12 +507,20 @@ class ResultPanel {
     const copyButton = document.querySelector('button[data-action="copy"]');
     const exportButton = document.querySelector('button[data-export="default"]');
     const exportElsewhereButton = document.querySelector('button[data-export="custom"]');
+    const copyFeedbackButton = document.querySelector('button[data-action="copy-feedback"]');
+    const saveFeedbackButton = document.querySelector('button[data-action="save-feedback"]');
+    const actionButtons = [copyButton, exportButton, exportElsewhereButton, copyFeedbackButton, saveFeedbackButton];
     let pendingButton;
     const setPending = (button, label) => {
       if (!button) return;
-      button.disabled = true;
+      actionButtons.forEach((action) => { if (action) action.disabled = true; });
       button.textContent = label;
     };
+    [copyFeedbackButton, saveFeedbackButton].forEach((button) => button?.addEventListener('click', () => {
+      pendingButton = button;
+      setPending(button, '正在处理…');
+      api.postMessage({ type: button.dataset.action });
+    }));
     copyButton?.addEventListener('click', () => {
       pendingButton = copyButton;
       setPending(copyButton, '正在复制…');
@@ -615,9 +639,9 @@ class ResultPanel {
       pendingButton = undefined;
       if (!button) return;
       const completed = data.type === 'actionComplete';
-      button.textContent = completed ? (data.action === 'copy' ? '已复制' : '已导出') : button.dataset.defaultLabel;
+      button.textContent = completed ? (data.action === 'copy' ? '已复制' : data.action === 'feedback' ? '已完成' : '已导出') : button.dataset.defaultLabel;
       window.setTimeout(() => {
-        button.disabled = false;
+        actionButtons.forEach((action) => { if (action) action.disabled = false; });
         button.textContent = button.dataset.defaultLabel;
       }, completed ? 1200 : 0);
     });
@@ -628,13 +652,39 @@ class ResultPanel {
 
   private async export(format: ExportFormat, options: { chooseLocation?: boolean } = {}): Promise<boolean> {
     const origin = this.metadata.origin;
-    if (!origin) return this.exportResult(format, options);
+    const original = this.metadata.feedback;
+    const perform = async (operation?: ExportOperation): Promise<boolean> => {
+      const record: FeedbackRecord | undefined = original ? {
+        sourceUri: original.sourceUri, currentSource: original.currentSource, startedAt: Date.now(),
+        value: { name: original.value.name, connectionName: original.value.connectionName,
+          databaseType: original.value.databaseType, parameters: original.value.parameters, source: original.value.source,
+          action: 'export', status: 'cancelled', submitted: false, generatedAt: '', durationMs: 0,
+          rowsRead: 0, totalRows: null, readComplete: false, sessionState: 'not-opened' },
+      } : undefined;
+      try {
+        return await this.exportResult(format, options, operation, record);
+      } catch (error) {
+        if (record) {
+          record.value.status = isQueryCancelled(error) ? 'cancelled' : 'failed';
+          record.value.error ??= formatDatabaseError(error);
+        }
+        throw error;
+      } finally {
+        if (record) {
+          record.value.durationMs = Date.now() - record.startedAt;
+          record.value.generatedAt = new Date().toISOString();
+          rememberFeedback(record);
+          if (this.metadata.feedback === original) this.metadata.feedback = record;
+        }
+      }
+    };
+    if (!origin) return perform();
     return (await withDocumentOperation(origin.state, origin.documentKey, origin.onStateChanged,
-      async (source, operation) => this.exportResult(format, options, { source, operation }))) ?? false;
+      async (source, operation) => perform({ source, operation }))) ?? false;
   }
 
   private async exportResult(
-    format: ExportFormat, options: { chooseLocation?: boolean }, operation?: ExportOperation,
+    format: ExportFormat, options: { chooseLocation?: boolean }, operation?: ExportOperation, feedback?: FeedbackRecord,
   ): Promise<boolean> {
     const extension = format;
     const title = this.title;
@@ -692,7 +742,7 @@ class ResultPanel {
       const target = join(directory, defaultName);
       try {
         await mkdir(directory, { recursive: true });
-        const written = await this.exportTo(vscode.Uri.file(target), columns, keptRows, rerun, operation);
+        const written = await this.exportTo(vscode.Uri.file(target), columns, keptRows, rerun, operation, feedback);
         if (written === undefined) {
           return false;
         }
@@ -721,7 +771,7 @@ class ResultPanel {
       return false;
     }
 
-    const written = await this.exportTo(uri, columns, keptRows, rerun, operation);
+    const written = await this.exportTo(uri, columns, keptRows, rerun, operation, feedback);
     if (written === undefined) {
       return false;
     }
@@ -739,6 +789,7 @@ class ResultPanel {
     keptRows: Row[],
     rerun: ResultRerun | undefined,
     operation?: ExportOperation,
+    feedback?: FeedbackRecord,
   ): Promise<number | undefined> {
     const chunkRows = configuredExportChunkRows();
     const escapeFormulas = configuredEscapeFormulas();
@@ -782,16 +833,25 @@ class ResultPanel {
           writerStarted = true;
           await writer.begin();
           if (rerun) {
-            await runForExport(rerun, writer, exportToken, operation!.operation);
+            await runForExport(rerun, writer, exportToken, operation!.operation, feedback);
           } else {
             for (const row of keptRows) {
               await writer.write(row);
             }
           }
           written = await writer.finish();
+          if (feedback) {
+            Object.assign(feedback.value, { status: 'success', rowsRead: written, totalRows: written,
+              readComplete: true, resultFile: uri.scheme === 'file' ? uri.fsPath : uri.toString() });
+          }
           if (rerun) rerun.snapshot.revision = rerun.snapshot.entry.revision;
         } catch (error) {
-          if (writerStarted) await writer.abort();
+          if (writerStarted) {
+            try { await writer.abort(); } catch (cleanupError) {
+              if (feedback) { feedback.value.error = formatDatabaseError(error); feedback.value.warning = formatDatabaseError(cleanupError); }
+              throw cleanupError;
+            }
+          }
           if (!isQueryCancelled(error)) {
             throw error;
           }
@@ -829,6 +889,7 @@ async function runForExport(
   writer: TsvWriter,
   token: vscode.CancellationToken,
   operation: DocumentOperation,
+  feedback?: FeedbackRecord,
 ): Promise<void> {
   const entry = rerun.state.sessions.validate(rerun.snapshot);
   const listeners = new Set<() => void>();
@@ -860,9 +921,10 @@ async function runForExport(
     const sink: RowSink = {
       onColumns: () => undefined,
       onAffectedRows: () => undefined,
-      onRow: (row) => writer.write(row),
+      onRow: (row) => { if (feedback) feedback.value.rowsRead = (feedback.value.rowsRead ?? 0) + 1; return writer.write(row); },
     };
     const session = rerun.state.sessions.startStatement(operation, entry);
+    if (feedback) feedback.value.submitted = true;
     await session.execute(rerun.sql, signal, sink);
     if (token.isCancellationRequested) {
       throw new QueryCancelledError('导出已取消。');
@@ -874,6 +936,7 @@ async function runForExport(
       await rerun.state.sessions.discard(entry);
       void vscode.window.showWarningMessage('导出使用的会话已断开，USE、SET 等会话状态已丢失，请重新初始化后查询。');
     }
+    if (feedback) feedback.value.sessionState = entry.valid && !entry.session?.broken ? 'retained' : 'lost';
   }
 }
 
@@ -1168,6 +1231,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         showError('执行并导出失败', error);
       }
     }),
+    vscode.commands.registerCommand('dorisSqlLite.copyLastFeedback', async () => {
+      try { await copyFeedback(); } catch (error) { showError('复制反馈失败', error); }
+    }),
+    vscode.commands.registerCommand('dorisSqlLite.saveLastFeedback', async () => {
+      try { await saveFeedback(); } catch (error) { showError('保存反馈失败', error); }
+    }),
     vscode.commands.registerCommand('dorisSqlLite.resetFileSessions', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.languageId !== 'sql') {
@@ -1420,7 +1489,36 @@ async function runQuery(
     return;
   }
   await withDocumentOperation(connectionSession, documentKey, onStateChanged,
-    async (source, operation) => executeQuery(manager, connectionSession, source, operation, requestedConnectionId, onStateChanged, explain, directExport));
+    async (source, operation) => {
+      const document = editor.document;
+      const version = document.version;
+      const origin = {
+        path: document.uri.scheme === 'file' ? document.uri.fsPath : document.uri.toString(),
+        startLine: 1, endLine: 1,
+        savedAtExecution: document.uri.scheme !== 'untitled' && !document.isDirty,
+        changedSinceExecution: false as boolean | null,
+      };
+      const record: FeedbackRecord = {
+        sourceUri: document.uri, startedAt: Date.now(),
+        currentSource: () => ({ ...origin, changedSinceExecution: document.isClosed ? null : document.version !== version }),
+        value: { name: basename(document.fileName), connectionName: '未选择', databaseType: null,
+          parameters: {}, source: origin, action: explain ? 'explain' : directExport ? 'export' : 'query',
+          status: 'cancelled', submitted: false, generatedAt: '', durationMs: 0, sessionState: 'not-opened' },
+      };
+      try {
+        await executeQuery(manager, connectionSession, source, operation, requestedConnectionId, onStateChanged, explain, directExport, record);
+      } catch (error) {
+        if (record.value.status !== 'failed') {
+          record.value.status = isQueryCancelled(error) ? 'cancelled' : 'failed';
+          record.value.error = formatDatabaseError(error);
+        }
+        throw error;
+      } finally {
+        record.value.durationMs = Date.now() - record.startedAt;
+        record.value.generatedAt = new Date().toISOString();
+        rememberFeedback(record);
+      }
+    });
 }
 
 async function chooseDirectExportPath(
@@ -1469,6 +1567,7 @@ async function executeQuery(
   onStateChanged?: () => void,
   explain = false,
   directExport = false,
+  feedback?: FeedbackRecord,
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'sql') {
@@ -1483,6 +1582,14 @@ async function executeQuery(
     editor.document.offsetAt(editor.selection.end),
   );
   const sql = context?.sql;
+  const details = feedback?.value;
+  if (details && context) {
+    details.name = context.name ?? sourceLabel;
+    details.source.startLine = context.line;
+    details.source.endLine = context.endLine;
+    details.connectionName = context.connection ?? '未选择';
+    details.action = explain ? 'explain' : directExport || context.output ? 'export' : 'query';
+  }
   if (!sql?.trim()) {
     vscode.window.showInformationMessage('没有可执行的 SQL。');
     return;
@@ -1509,6 +1616,7 @@ async function executeQuery(
     return;
   }
   const statement = prepared.sql;
+  if (details) details.parameters = prepared.used;
   const outputMode = !explain && (directExport || context?.output !== undefined);
   if (outputMode) assertDirectExportSql(statement);
 
@@ -1520,6 +1628,10 @@ async function executeQuery(
     : await chooseProfile(manager, id, cancelSource.token);
   if (!profile || operation.cancelled) {
     return;
+  }
+  if (details) {
+    details.connectionName = profile.name;
+    details.databaseType = profile.type;
   }
   // Build before touching the session: malformed / already-EXPLAIN input must
   // never fall through to executing the original statement.
@@ -1533,6 +1645,7 @@ async function executeQuery(
   onStateChanged?.();
 
   const startedAt = Date.now();
+  if (feedback) feedback.startedAt = startedAt;
   let progressHandle: vscode.Progress<{ message?: string }> | undefined;
   let entry: SessionEntry | undefined;
   let cancelled = false;
@@ -1609,43 +1722,62 @@ async function executeQuery(
             }
             return manager.open(profile, configuredQueryIdleTimeoutMs(), cancelSource.token);
           });
+          if (details) details.sessionState = 'retained';
           if (operation.cancelled || token.isCancellationRequested) throw new QueryCancelledError();
           if (explainSql !== undefined) {
             // Plans are text, often many rows long. Never apply the result
             // display/read cap or append a LIMIT to this request.
             const collector = createRowCollector(Number.MAX_SAFE_INTEGER);
             progress.report({ message: '正在获取完整执行计划…' });
-            await connectionSession.sessions.startStatement(operation, entry).execute(explainSql, signal, collector);
+            const session = connectionSession.sessions.startStatement(operation, entry);
+            if (details) {
+              details.submitted = true;
+              details.explainKind = explainSql.split('\n')[0];
+            }
+            await session.execute(explainSql, signal, collector);
             if (signal.requested || operation.cancelled) return;
             const result = collector.toView();
+            const plan = planText(result.columns, result.rows);
+            if (details) details.status = 'success';
+            if (feedback) feedback.planText = plan;
             openPlanPanel({
               name: context?.name ?? sourceLabel,
-              source: `${sourceUri.toString()}:${context?.line ?? 1}`,
+              source: `${details?.source.path ?? sourceUri.toString()}:${context?.line ?? 1}-${context?.endLine ?? 1}`,
               connectionName: profile.name,
               databaseType: profile.type,
               parameters: prepared.used,
               sql: statement,
               explainSql,
-              plan: planText(result.columns, result.rows),
+              plan,
               generatedAt: new Date().toISOString(),
-            }, sourceUri);
+            }, sourceUri, feedback);
             return;
           }
           if (fileWriter) {
             const writer = fileWriter;
             let noResultSet = false;
             progress.report({ message: '正在执行并读取完整结果…' });
-            await connectionSession.sessions.startStatement(operation, entry).execute(statement, signal, {
+            const session = connectionSession.sessions.startStatement(operation, entry);
+            if (details) { details.submitted = true; details.rowsRead = 0; details.totalRows = null; details.readComplete = false; }
+            await session.execute(statement, signal, {
               onColumns: (columns) => writer.onColumns(columns),
-              onRow: (row) => writer.write(row),
+              onRow: (row) => { if (details) details.rowsRead = (details.rowsRead ?? 0) + 1; return writer.write(row); },
               onAffectedRows: () => { noResultSet = true; },
             });
             throwIfCancelled(cancelSource.token);
+            if (details) { details.readComplete = true; details.totalRows = details.rowsRead ?? 0; }
             if (noResultSet) throw new Error('语句没有返回可导出的结果集，未生成 TSV 文件。');
             const written = await writer.finish();
+            if (details) { details.status = 'success'; details.resultFile = targetPath; details.warning = writer.cleanupWarning; }
             void vscode.window.showInformationMessage(
               `已导出 ${written} 行到 ${targetPath}，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒。`,
-            );
+              '复制 AI 反馈', '保存 AI 反馈…',
+            ).then(async (answer) => {
+              try {
+                if (answer === '复制 AI 反馈') await copyFeedback(feedback);
+                if (answer === '保存 AI 反馈…') await saveFeedback(feedback);
+              } catch (error) { showError('反馈操作失败', error); }
+            });
             if (writer.cleanupWarning) void vscode.window.showWarningMessage(writer.cleanupWarning);
             return;
           }
@@ -1670,6 +1802,10 @@ async function executeQuery(
           const injectedSql =
             readLimit === undefined ? undefined : applyRowLimit(statement, readLimit);
           const executedSql = injectedSql ?? statement;
+          if (details) {
+            details.rowsRead = 0; details.totalRows = null; details.readComplete = false;
+            details.previewLimit = injectedSql !== undefined ? readLimit : undefined;
+          }
           let reportedRows = 0;
           const collector = createRowCollector(
             maxRows,
@@ -1681,6 +1817,7 @@ async function executeQuery(
             onRow: (row) => {
               collector.onRow(row);
               const total = collector.totalRows();
+              if (details) details.rowsRead = total;
               if (total - reportedRows >= 1000) {
                 reportedRows = total;
                 progress.report({ message: `已读取 ${total} 行…` });
@@ -1689,7 +1826,9 @@ async function executeQuery(
           };
 
           progress.report({ message: '正在执行…' });
-          await connectionSession.sessions.startStatement(operation, entry).execute(executedSql, signal, sink);
+          const session = connectionSession.sessions.startStatement(operation, entry);
+          if (details) details.submitted = true;
+          await session.execute(executedSql, signal, sink);
           // Only a user cancel abandons the result here. A limit stop returns
           // the rows on purpose: they are exactly what was asked for.
           if (stopReason === 'user' || operation.cancelled) {
@@ -1705,16 +1844,29 @@ async function executeQuery(
             injectedSql !== undefined &&
             readLimit !== undefined &&
             collector.totalRows() >= readLimit;
-          ResultPanel.open(collector.toView(), {
+          const view = collector.toView();
+          const readComplete = stopReason !== 'limit' && !capReached;
+          // An injected LIMIT can stop exactly at the panel cap, without an
+          // extra row reaching the collector. The full answer is still unknown
+          // and must be rerun for an export instead of saving only that preview.
+          if (!readComplete) view.truncated = true;
+          if (details) {
+            details.status = 'success'; details.readComplete = readComplete;
+            details.totalRows = details.readComplete ? view.totalRows : null;
+            details.displayedRows = view.rows.length; details.truncated = view.truncated;
+            if (view.columns.length === 0) details.affectedRows = view.affectedRows;
+          }
+          ResultPanel.open(view, {
             connectionName: profile.name,
             statementName: context?.name,
             database: profile.database,
             durationMs: Date.now() - startedAt,
             maxRows,
             parameters: prepared.used,
+            feedback,
             // False when the answer was cut short, so the panel can say "已读取
             // N 行" instead of claiming an exact total it does not have.
-            readComplete: stopReason !== 'limit' && !capReached,
+            readComplete,
             // The resolved statement, not the template, and deliberately not the
             // injected one: an export that has to run the query again wants every
             // row, so it must not inherit this run's cap.
@@ -1728,15 +1880,18 @@ async function executeQuery(
             } catch (cleanupError) {
               const reason = error instanceof Error ? error.message : String(error);
               const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+              if (details) { details.status = 'failed'; details.error = formatDatabaseError(error); details.warning = cleanupReason; details.temporaryFile = fileWriter.temporaryPath; }
               showError('执行并导出未完成', new Error(`${reason}；${cleanupReason}`));
               return;
             }
           }
           if (isQueryCancelled(error) || (!outputMode && isCancelled(token))) {
+            if (details) details.status = 'cancelled';
             vscode.window.showInformationMessage(outputMode
               ? '已取消执行并导出，未完成的临时文件已清理。'
               : `已取消 ${profile.name} 上的查询。`);
           } else {
+            if (details) { details.status = 'failed'; details.error = formatDatabaseError(error); }
             showError(`${outputMode ? '执行并导出失败' : '执行失败'}（${profile.name}）`, error);
           }
         }
@@ -1753,6 +1908,7 @@ async function executeQuery(
       await connectionSession.sessions.discard(entry);
       void vscode.window.showWarningMessage('连接会话已断开，USE、SET 等状态已丢失，请重新初始化后查询；失败语句不会自动重试。');
     }
+    if (details && entry) details.sessionState = entry.valid && !entry.session?.broken ? 'retained' : 'lost';
   }
 }
 
