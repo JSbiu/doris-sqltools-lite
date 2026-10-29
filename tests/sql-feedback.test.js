@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { randomUUID } = require('node:crypto');
-const { buildSqlFeedback } = require('../out/sqlFeedback.js');
+const { buildSqlFeedback, buildBatchReport, hasBatchDetails } = require('../out/sqlFeedback.js');
 
 function feedback(overrides = {}) {
   return {
@@ -207,4 +207,113 @@ test('messages keep multiline diagnostics but omit supplied stack frames and att
   for (const text of ['runner.js', 'Driver.java', 'attached stack', secret]) {
     assert.ok(!markdown.includes(text));
   }
+});
+
+function batchFeedback(count = 3) {
+  const record = (name, batchIndex) => ({
+    phase: batchIndex === undefined ? 'init' : 'batch', batchIndex, name,
+    connectionName: name === '回填' ? 'Spark数仓' : '本地 Doris',
+    databaseType: name === '回填' ? 'Spark' : 'Doris',
+    parameters: batchIndex === undefined ? {} : { day: `day-${batchIndex}` },
+    startLine: name === '回填' ? 20 : 8, endLine: name === '回填' ? 25 : 9,
+    status: 'success', submitted: true, durationMs: 7, affectedRows: null, sessionState: 'retained',
+  });
+  return feedback({
+    action: 'batch', databaseType: null, batchReportFile: 'D:\\reports\\orders.batch-report.json',
+    batch: { script: 'D:\\queries\\params.ps1', batchCount: count, completedBatches: count,
+      initSteps: ['会话设置'], steps: ['清理', '回填'], records: [record('会话设置'),
+        ...Array.from({ length: count }, (_, index) => [record('清理', index + 1), record('回填', index + 1)]).flat()] },
+  });
+}
+
+test('batch summaries keep fixed-size endpoint samples and reports retain all records at 1, 180 and 1000 batches', () => {
+  const lengths = [];
+  for (const count of [1, 180, 1000]) {
+    const input = batchFeedback(count);
+    const markdown = buildSqlFeedback(input);
+    const data = contents(markdown);
+    const report = JSON.parse(buildBatchReport(input));
+    assert.equal(data.batch.records, undefined);
+    assert.equal(data.batchReportFile, input.batchReportFile);
+    assert.equal(data.batch.steps.length, 3);
+    assert.equal(data.batch.firstBatch.batchIndex, 1);
+    assert.equal(data.batch.firstBatch.steps[0].parameters.day, 'day-1');
+    assert.equal(data.batch.firstBatch.steps[0].submitted, true);
+    assert.equal(data.batch.lastBatch?.batchIndex, count === 1 ? undefined : count);
+    assert.equal(data.batch.stopped, undefined);
+    assert.equal(report.batch.records.length, 1 + count * 2);
+    assert.deepEqual(report.batch.records.at(-1), input.batch.records.at(-1));
+    assert.equal(hasBatchDetails(input), true);
+    lengths.push(markdown.length);
+  }
+  assert.ok(lengths[2] - lengths[1] < 100, 'more batches do not append per-batch records to the summary');
+});
+
+test('a failed INSERT summary identifies its successful DELETE and leaves last-batch samples explicitly unsubmitted', () => {
+  const input = batchFeedback();
+  input.status = 'failed';
+  input.batch.completedBatches = 0;
+  Object.assign(input.batch.records[2], { status: 'failed', needsReview: true, sessionState: 'lost', error: '连接断开' });
+  for (const record of input.batch.records.slice(3)) Object.assign(record, { status: 'not-run', submitted: false });
+  const data = contents(buildSqlFeedback(input));
+  assert.equal(data.batch.stopped.name, '回填');
+  assert.equal(data.batch.stopped.batchIndex, 1);
+  assert.deepEqual(data.batch.stopped.parameters, { day: 'day-1' });
+  assert.deepEqual(data.batch.stopped.completedSteps, ['清理']);
+  assert.deepEqual(data.batch.stopped.needsReviewSteps, ['回填']);
+  assert.ok(data.batch.lastBatch.steps.every((step) => step.status === 'not-run' && !step.submitted));
+  assert.equal(data.batch.steps.find((step) => step.name === '回填').startLine, 20);
+});
+
+test('summaries distinguish initialization failure, cancellation between steps, and success followed by session loss', () => {
+  const initialization = batchFeedback();
+  initialization.status = 'failed';
+  Object.assign(initialization.batch.records[0], { status: 'failed', error: '初始化失败' });
+  assert.equal(contents(buildSqlFeedback(initialization)).batch.stopped.phase, 'init');
+
+  const cancelled = batchFeedback();
+  cancelled.status = 'cancelled';
+  for (const record of cancelled.batch.records.slice(2)) Object.assign(record, { status: 'not-run', submitted: false });
+  const interrupted = contents(buildSqlFeedback(cancelled)).batch.stopped;
+  assert.equal(interrupted.name, '回填');
+  assert.equal(interrupted.status, 'not-run');
+  assert.equal(interrupted.submitted, false);
+  assert.deepEqual(interrupted.completedSteps, ['清理']);
+
+  const lost = batchFeedback();
+  lost.status = 'failed';
+  lost.batch.error = '语句已完成，但会话已断开';
+  lost.batch.records[0].sessionState = 'lost';
+  const stopped = contents(buildSqlFeedback(lost)).batch.stopped;
+  assert.equal(stopped.status, 'success');
+  assert.equal(stopped.sessionState, 'lost');
+  assert.equal(stopped.error, lost.batch.error);
+});
+
+test('reports whitelist every level, redact diagnostics and retain actual parameters and unknown row counts', () => {
+  const input = batchFeedback(1);
+  const secret = randomUUID();
+  input.sql = 'excluded-long-sql';
+  input.batch.sql = 'excluded-batch-sql';
+  Object.assign(input.batch.records[1], {
+    sql: 'excluded-step-sql', password: secret, error: `password=${secret}; ` + '错'.repeat(3000),
+    parameters: Object.fromEntries([['__proto__', '参数值'], ['day', '2026-10-29']]),
+  });
+  const text = buildBatchReport(input);
+  const report = JSON.parse(text);
+  for (const omitted of [secret, input.sql, input.batch.sql, input.batch.records[1].sql]) assert.ok(!text.includes(omitted));
+  assert.equal(report.batch.records[1].parameters.__proto__, '参数值');
+  assert.equal(report.batch.records[1].affectedRows, null);
+  assert.ok(report.batch.records[1].error.length <= 2000);
+  assert.match(report.batch.records[1].error, /已截断/);
+});
+
+test('tasks that submitted no SQL do not require detailed report files', () => {
+  const input = batchFeedback(1);
+  input.submitted = false;
+  input.batchReportFile = undefined;
+  for (const record of input.batch.records) Object.assign(record, { status: 'not-run', submitted: false });
+  assert.equal(hasBatchDetails(input), false);
+  assert.equal(hasBatchDetails(feedback({ action: 'batch', submitted: false })), false);
+  assert.ok(!buildSqlFeedback(input).includes('完整批次报告尚未保存'));
 });

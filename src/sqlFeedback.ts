@@ -30,6 +30,7 @@ export interface SqlFeedback {
   affectedRows?: number | null;
   needsReview?: boolean;
   batch?: BatchFeedback;
+  batchReportFile?: string;
   resultFile?: string;
   planFile?: string;
   temporaryFile?: string;
@@ -47,10 +48,10 @@ function feedbackMessage(message: string | undefined): string | undefined {
   return safe.length > 2000 ? safe.slice(0, 2000 - suffix.length) + suffix : safe;
 }
 
-export function buildSqlFeedback(feedback: SqlFeedback): string {
+function feedbackData(feedback: SqlFeedback): SqlFeedback {
   // Explicitly select both levels: runtime snapshots can also carry SQL,
   // plans, result rows and connection credentials that do not belong here.
-  const data: SqlFeedback = {
+  return {
     name: feedback.name,
     connectionName: feedback.connectionName,
     databaseType: feedback.databaseType,
@@ -92,6 +93,7 @@ export function buildSqlFeedback(feedback: SqlFeedback): string {
       })),
     } : undefined,
     resultFile: feedback.resultFile,
+    batchReportFile: feedback.batchReportFile,
     planFile: feedback.planFile,
     temporaryFile: feedback.temporaryFile,
     explainKind: feedback.explainKind,
@@ -99,9 +101,61 @@ export function buildSqlFeedback(feedback: SqlFeedback): string {
     warning: feedbackMessage(feedback.warning),
     sessionState: feedback.sessionState,
   };
+}
+
+export function hasBatchDetails(feedback: SqlFeedback): boolean {
+  return feedback.action === 'batch' && feedback.batch?.records.some((record) => record.submitted) === true;
+}
+
+// A report keeps every whitelisted record. The default clipboard summary only
+// samples the endpoints and identifies the interrupted batch.
+export function buildBatchReport(feedback: SqlFeedback): string {
+  return JSON.stringify(feedbackData(feedback), null, 2) + '\n';
+}
+
+function summarizeBatch(batch: BatchFeedback, status: SqlFeedback['status']) {
+  const definitions = new Map<string, object>();
+  for (const record of batch.records) {
+    const key = `${record.phase}\0${record.name}`;
+    if (!definitions.has(key)) definitions.set(key, {
+      phase: record.phase, name: record.name, connectionName: record.connectionName,
+      databaseType: record.databaseType, startLine: record.startLine, endLine: record.endLine,
+    });
+  }
+  const sample = (index: number) => ({
+    batchIndex: index,
+    steps: batch.records.filter((record) => record.batchIndex === index).map((record) => ({
+      name: record.name, parameters: record.parameters, submitted: record.submitted, status: record.status,
+    })),
+  });
+  const stopped = status === 'success' ? undefined
+    : batch.records.find((record) => record.status === 'failed' || record.status === 'cancelled')
+      ?? (batch.error ? batch.records.find((record) => record.submitted && record.sessionState === 'lost') : undefined)
+      ?? batch.records.find((record) => record.status === 'not-run');
+  const group = stopped ? batch.records.filter((record) => record.phase === stopped.phase && record.batchIndex === stopped.batchIndex) : [];
+  return {
+    script: batch.script, batchCount: batch.batchCount, completedBatches: batch.completedBatches,
+    steps: [...definitions.values()],
+    firstBatch: batch.batchCount > 0 ? sample(1) : undefined,
+    lastBatch: batch.batchCount > 1 ? sample(batch.batchCount) : undefined,
+    stopped: stopped ? {
+      phase: stopped.phase, batchIndex: stopped.batchIndex, name: stopped.name,
+      parameters: stopped.parameters, status: stopped.status, submitted: stopped.submitted,
+      sessionState: stopped.sessionState, needsReview: stopped.needsReview,
+      completedSteps: group.filter((record) => record.status === 'success').map((record) => record.name),
+      needsReviewSteps: group.filter((record) => record.needsReview).map((record) => record.name),
+      error: stopped.error ?? batch.error,
+    } : undefined,
+    error: batch.error,
+  };
+}
+
+export function buildSqlFeedback(feedback: SqlFeedback): string {
+  const data = feedbackData(feedback);
+  const output = data.batch ? { ...data, batch: summarizeBatch(data.batch, data.status) } : data;
   const notes: string[] = [];
   if (data.databaseType === null) notes.push(data.batch
-    ? '- 各步骤的连接、类型、实际参数与执行状态见 `batch.records`。'
+    ? '- 各步骤的连接与类型见 `batch.steps`，逐步明细见完整报告的 `batch.records`。'
     : '- `databaseType=null`：数据库类型未知。');
   if (data.affectedRows === null || data.batch?.records.some((record) => record.affectedRows === null)) {
     notes.push('- `affectedRows=null`：服务端未提供影响行数。');
@@ -109,7 +163,10 @@ export function buildSqlFeedback(feedback: SqlFeedback): string {
   if (data.needsReview || data.batch?.records.some((record) => record.needsReview)) {
     notes.push('- `needsReview=true`：已提交操作的写入结果需核对；不会自动重试或回滚。');
   }
-  if (data.batch) notes.push('- `batch.records` 的行号对应 `source.path`；`batchIndex` 从 1 开始，`not-run` 表示未执行。');
+  if (data.batch) {
+    notes.push('- 步骤行号对应 `source.path`；`batchIndex` 从 1 开始，`not-run` 表示未执行。首尾参数仅为样例，是否执行以 `submitted` 和状态为准。');
+    if (hasBatchDetails(data) && !data.batchReportFile) notes.push('- 完整批次报告尚未保存。');
+  }
   if (data.totalRows === null) notes.push('- `totalRows=null`：总行数未知。');
   if (!data.source.savedAtExecution) notes.push('- `source.savedAtExecution=false`：当时来源未保存。');
   if (data.source.changedSinceExecution === true) {
@@ -121,7 +178,7 @@ export function buildSqlFeedback(feedback: SqlFeedback): string {
   // JSON.stringify escapes embedded newlines, so parameter values cannot close
   // this fence or turn their Markdown characters into document structure.
   return [
-    '# SQL 执行反馈', '', '```json', JSON.stringify(data), '```',
+    '# SQL 执行反馈', '', '```json', JSON.stringify(output), '```',
     ...(notes.length ? ['', ...notes] : []), '',
   ].join('\n');
 }
