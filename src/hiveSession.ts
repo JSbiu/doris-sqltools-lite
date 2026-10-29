@@ -77,6 +77,14 @@ type HiveSessionHandle = Awaited<ReturnType<HiveClientInstance['openSession']>>;
 type HiveOperation = Awaited<ReturnType<HiveSessionHandle['executeStatement']>>;
 type HiveOperationStatus = Awaited<ReturnType<HiveOperation['status']>>;
 
+// hive-driver 1.0.1 keeps these as ordinary properties but marks them private in
+// its types. status() updates hasResultSet; the original handle holds the
+// optional modifiedRowCount used when status omits numModifiedRows.
+interface HiveOperationMetadata {
+  hasResultSet?: boolean;
+  operationHandle?: { hasResultSet?: boolean; modifiedRowCount?: number };
+}
+
 // The slice of the driver's operation object the fetch loop actually uses,
 // declared narrowly so `node --test` can drive the loop with a fake.
 export interface HiveFetchable {
@@ -452,7 +460,7 @@ class HiveQuerySession implements QuerySession {
     const subscription = signal.onRequest(cancel);
     if (signal.requested) cancel();
 
-    let rowsRead = 0;
+    const summary: QuerySummary = { hasResultSet: false, rowsRead: 0, affectedRows: null };
     const failSink = (error: unknown): never => {
       sinkFailure = { error };
       // Hive fetches are separate requests. Closing the operation below frees
@@ -460,10 +468,16 @@ class HiveQuerySession implements QuerySession {
       throw error;
     };
     const guardedSink: RowSink = {
-      onColumns: (columns) => sink.onColumns(columns),
+      onColumns: (columns) => {
+        summary.hasResultSet = true;
+        summary.affectedRows = null;
+        sink.onColumns(columns);
+      },
       onAffectedRows: (count) => sink.onAffectedRows(count),
       onRow: (row) => {
-        rowsRead += 1;
+        summary.hasResultSet = true;
+        summary.affectedRows = null;
+        summary.rowsRead += 1;
         try {
           const pending = sink.onRow(row);
           if (pending) {
@@ -486,6 +500,7 @@ class HiveQuerySession implements QuerySession {
           void this.closeOperation(value);
         } else {
           operation = value;
+          Object.assign(summary, hiveResultMetadata(value));
           if (cancelled) cancelOperation();
         }
         return value;
@@ -501,10 +516,15 @@ class HiveQuerySession implements QuerySession {
       }
       operation.setMaxRows(FETCH_ROWS);
       if (cancelled) throw new QueryCancelledError();
-      const status = await this.pollUntilFinished(operation, () => cancelled, cancelledSignal,
-        (request) => { statusRequest = request.catch(() => undefined); });
+      await this.pollUntilFinished(operation, () => cancelled, cancelledSignal,
+        (request) => { statusRequest = request.catch(() => undefined); },
+        (status) => { Object.assign(summary, hiveResultMetadata(operation!, status)); });
       if (cancelled && signal.reason !== 'limit') {
         throw new QueryCancelledError();
+      }
+      if (!summary.hasResultSet) {
+        sink.onAffectedRows(summary.affectedRows);
+        return summary;
       }
       // Started before the first fetch rather than after the first batch: the
       // answer is already materialised at this point, so even the very first
@@ -534,11 +554,11 @@ class HiveQuerySession implements QuerySession {
       if ('error' in outcome) {
         throw outcome.error;
       }
-      rowsRead = outcome.count;
+      summary.rowsRead = outcome.count;
       if (cancelled && signal.reason !== 'limit') {
         throw new QueryCancelledError();
       }
-      return { rowsRead, affectedRows: modifiedRowCount(status) };
+      return summary;
     } catch (error) {
       if (sinkFailure) throw sinkFailure.error;
       // Checked first: when the guard fired, the error that surfaced is a
@@ -558,7 +578,7 @@ class HiveQuerySession implements QuerySession {
         // buys: the fetch phase is short, the server's own work is not saveable
         // because an async statement has usually finished before we fetch.
         if (signal.reason === 'limit') {
-          return { rowsRead, affectedRows: 0 };
+          return summary;
         }
         // A cancel that arrived mid-flight surfaces as a driver error; report it
         // as a cancellation so the user does not see a scary failure toast.
@@ -654,6 +674,7 @@ class HiveQuerySession implements QuerySession {
     isCancelled: () => boolean,
     cancelled: Promise<void>,
     trackRequest: (request: Promise<unknown>) => void,
+    onStatus: (status: HiveOperationStatus) => void,
   ): Promise<HiveOperationStatus> {
     const states = TCLIService_types.TOperationState;
     // Shares the same limit as the read phase below, but measured per request
@@ -688,6 +709,7 @@ class HiveQuerySession implements QuerySession {
         }
 
         const status = outcome.value;
+        onStatus(status);
         const state = status.operationState;
 
         if (state === states.FINISHED_STATE) {
@@ -731,9 +753,19 @@ function describeFailure(status: HiveOperationStatus): string {
   return parts.join(' ') || '查询在服务端执行失败。';
 }
 
-function modifiedRowCount(status: HiveOperationStatus): number {
-  const decoded = decodeHiveValue('i64Val', status.numModifiedRows);
-  return typeof decoded === 'number' && Number.isFinite(decoded) && decoded > 0 ? decoded : 0;
+function hiveResultMetadata(
+  operation: HiveOperation,
+  status?: HiveOperationStatus,
+): Pick<QuerySummary, 'hasResultSet' | 'affectedRows'> {
+  const metadata = operation as unknown as HiveOperationMetadata;
+  const hasResultSet = status?.hasResultSet ?? metadata.hasResultSet
+    ?? metadata.operationHandle?.hasResultSet ?? false;
+  const decoded = status?.numModifiedRows == null
+    ? metadata.operationHandle?.modifiedRowCount
+    : decodeHiveValue('i64Val', status.numModifiedRows);
+  const affectedRows = !hasResultSet && typeof decoded === 'number'
+    && Number.isFinite(decoded) && decoded >= 0 ? decoded : null;
+  return { hasResultSet, affectedRows };
 }
 
 // The driver's errors are plain classes, not Error subclasses, and it splits the

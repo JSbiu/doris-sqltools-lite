@@ -25,7 +25,7 @@ export interface SqlFeedback {
   readComplete?: boolean;
   truncated?: boolean;
   previewLimit?: number;
-  affectedRows?: number;
+  affectedRows?: number | null;
   resultFile?: string;
   planFile?: string;
   temporaryFile?: string;

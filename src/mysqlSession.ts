@@ -62,7 +62,7 @@ export async function consumeMysqlStream(
   // Filled in as the stream is read. Passed in rather than returned so the
   // counts survive an interruption: a stop part-way through leaves the caller
   // with an accurate "read this many rows" instead of nothing at all.
-  summary: QuerySummary = { rowsRead: 0, affectedRows: 0 },
+  summary: QuerySummary = { hasResultSet: false, rowsRead: 0, affectedRows: null },
   // Called once per item that arrives, which is the only proof available that
   // the socket is still alive -- the caller's idle guard is armed and reset
   // from here. Deliberately not called for `fields`: that fires before the
@@ -79,6 +79,8 @@ export async function consumeMysqlStream(
   stream.on('fields', (fields) => {
     if (Array.isArray(fields)) {
       hasResultSet = true;
+      summary.hasResultSet = true;
+      summary.affectedRows = null;
       sink.onColumns(columnNamesFromFields(fields));
     }
   });
@@ -114,12 +116,12 @@ export async function consumeMysqlStream(
   return summary;
 }
 
-function affectedRowCount(header: unknown): number {
+function affectedRowCount(header: unknown): number | null {
   if (header && typeof header === 'object' && 'affectedRows' in header) {
-    const value = Number((header as { affectedRows?: unknown }).affectedRows ?? 0);
-    return Number.isFinite(value) ? value : 0;
+    const value = (header as { affectedRows?: unknown }).affectedRows;
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
   }
-  return 0;
+  return null;
 }
 
 class MysqlSession implements QuerySession {
@@ -190,7 +192,7 @@ class MysqlSession implements QuerySession {
     if (signal.requested) cancel();
 
     // Owned by the caller so the counts survive an interrupted read.
-    const summary: QuerySummary = { rowsRead: 0, affectedRows: 0 };
+    const summary: QuerySummary = { hasResultSet: false, rowsRead: 0, affectedRows: null };
     let sinkFailure: { error: unknown } | undefined;
     let pendingSink: Promise<void> | undefined;
     let announceSinkFailure: () => void;

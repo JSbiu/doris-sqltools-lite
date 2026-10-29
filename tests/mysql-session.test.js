@@ -59,11 +59,13 @@ test('keeps a partial row count when the stream fails mid-way', async () => {
     this.push(this.items[0]);
     this.destroy(new Error('ER_QUERY_INTERRUPTED: Query execution was interrupted'));
   };
-  const summary = { rowsRead: 0, affectedRows: 0 };
+  const summary = { hasResultSet: false, rowsRead: 0, affectedRows: null };
 
   await assert.rejects(() => consumeMysqlStream(stream, sink, () => false, summary));
 
   assert.equal(summary.rowsRead, 1, 'the row that did arrive is still counted');
+  assert.equal(summary.hasResultSet, true);
+  assert.equal(summary.affectedRows, null);
   assert.equal(sink.rows.length, 1);
 });
 
@@ -76,7 +78,8 @@ test('streams result rows into the sink with their column names', async () => {
   assert.deepEqual(sink.columns, ['id']);
   assert.deepEqual(sink.rows, [{ id: 1 }, { id: 2 }]);
   assert.equal(summary.rowsRead, 2);
-  assert.equal(summary.affectedRows, 0);
+  assert.equal(summary.hasResultSet, true);
+  assert.equal(summary.affectedRows, null);
 });
 
 test('announces columns for a result set that turns out to be empty', async () => {
@@ -88,6 +91,9 @@ test('announces columns for a result set that turns out to be empty', async () =
   assert.deepEqual(sink.columns, ['id']);
   assert.deepEqual(sink.rows, []);
   assert.equal(summary.rowsRead, 0);
+  assert.equal(summary.hasResultSet, true);
+  assert.equal(summary.affectedRows, null);
+  assert.deepEqual(sink.affected, []);
 });
 
 test('reads affected rows from the header of a statement with no result set', async () => {
@@ -102,6 +108,56 @@ test('reads affected rows from the header of a statement with no result set', as
   assert.deepEqual(sink.affected, [3]);
   assert.equal(summary.affectedRows, 3);
   assert.equal(summary.rowsRead, 0);
+  assert.equal(summary.hasResultSet, false);
+});
+
+for (const [label, header, expected] of [
+  ['zero', { affectedRows: 0 }, 0],
+  ['missing', { fieldCount: 0 }, null],
+  ['undefined', { affectedRows: undefined }, null],
+  ['null', { affectedRows: null }, null],
+  ['negative', { affectedRows: -1 }, null],
+  ['non-finite', { affectedRows: NaN }, null],
+]) {
+  test(`keeps ${label} affected rows distinct from a result set`, async () => {
+    const sink = recordingSink();
+    const summary = await consumeMysqlStream(new FakeQueryStream([header], undefined), sink, () => false);
+
+    assert.equal(summary.hasResultSet, false);
+    assert.equal(summary.rowsRead, 0);
+    assert.equal(summary.affectedRows, expected);
+    assert.equal(sink.columns, undefined);
+    assert.deepEqual(sink.rows, []);
+    assert.deepEqual(sink.affected, [expected]);
+  });
+}
+
+test('treats an affectedRows data column as a row when fields identify a result set', async () => {
+  const sink = recordingSink();
+  const stream = new FakeQueryStream([{ affectedRows: 9 }], [{ name: 'affectedRows' }]);
+  const summary = await consumeMysqlStream(stream, sink, () => false);
+
+  assert.equal(summary.hasResultSet, true);
+  assert.equal(summary.affectedRows, null);
+  assert.deepEqual(sink.rows, [{ affectedRows: 9 }]);
+  assert.deepEqual(sink.affected, []);
+});
+
+test('forwards every result-set header so sinks can reject multiple result sets', async () => {
+  const columns = [];
+  const sink = recordingSink();
+  sink.onColumns = (names) => columns.push(names);
+  const stream = Readable.from((async function* () {
+    stream.emit('fields', [{ name: 'id' }]);
+    yield { id: 1 };
+    stream.emit('fields', [{ name: 'id' }]);
+    yield { id: 2 };
+  })());
+
+  const summary = await consumeMysqlStream(stream, sink, () => false);
+
+  assert.deepEqual(columns, [['id'], ['id']]);
+  assert.equal(summary.hasResultSet, true);
 });
 
 test('keeps draining after a cancel so the socket is left clean', async () => {
@@ -125,6 +181,8 @@ test('keeps draining after a cancel so the socket is left clean', async () => {
 
   // Nothing past the cancel point reached the sink...
   assert.equal(summary.rowsRead, 2);
+  assert.equal(summary.hasResultSet, true);
+  assert.equal(summary.affectedRows, null);
   // ...but the stream was still read through to its end. Breaking out instead
   // would leave unread packets on the wire to be parsed as the next statement's
   // answer. `destroyed` is true either way -- Readable destroys itself on a

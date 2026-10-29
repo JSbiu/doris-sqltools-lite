@@ -10,7 +10,7 @@ export type { Row };
 // keep; a driver must never accumulate the whole result set on its own, which
 // is what used to make a wide answer cost hundreds of megabytes.
 export interface RowSink {
-  // Called once, before the first row, with the answer's column names.
+  // Called once for each result set, even when it has no rows or column names.
   onColumns(columns: string[]): void;
   // Returning a promise makes the driver wait for it, which is what keeps a
   // fetch loop from outrunning a sink that writes to disk. A synchronous sink
@@ -18,14 +18,18 @@ export interface RowSink {
   onRow(row: Row): void | Promise<void>;
   // A statement that returns no result set (INSERT/UPDATE/DDL). Never combined
   // with onColumns/onRow for the same statement.
-  onAffectedRows(count: number): void;
+  // null means the driver did not provide a known affected-row count.
+  onAffectedRows(count: number | null): void;
 }
 
 export interface QuerySummary {
+  // Based on driver metadata, independent of SQL text and returned row count.
+  hasResultSet: boolean;
   // Every row the server sent, including the ones the sink discarded. This is
   // what the "共 N 行" line reports.
   rowsRead: number;
-  affectedRows: number;
+  // null for result sets and for statements whose affected-row count is unknown.
+  affectedRows: number | null;
 }
 
 // The extension owns a vscode.CancellationToken. Adapters only need to know

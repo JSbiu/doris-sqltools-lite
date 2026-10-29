@@ -284,6 +284,7 @@ class ResultPanel {
     rows: [],
     columns: [],
     affectedRows: 0,
+    hasResultSet: true,
     truncated: false,
     totalRows: 0,
   };
@@ -423,7 +424,7 @@ class ResultPanel {
           .join('')}</div>`;
     const resultContent = hasTable
       ? `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，未返回数据</td></tr>`}</tbody></table></div>`
-      : `<section class="success-state"><span class="success-icon">✓</span><div><strong>执行成功</strong><p>${this.result.affectedRows} 行受到影响 · ${formatDuration(this.metadata.durationMs)}</p></div></section>`;
+      : `<section class="success-state"><span class="success-icon">✓</span><div><strong>执行成功</strong><p>${this.result.affectedRows === null ? '影响行数未知' : `${this.result.affectedRows} 行受到影响`} · ${formatDuration(this.metadata.durationMs)}</p></div></section>`;
     // Sorting and filtering only ever reorder what is already in the panel, so
     // say that next to the table instead of implying a server-side ORDER BY.
     const sortScopeNotice = !hasTable

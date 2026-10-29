@@ -6,7 +6,8 @@ export interface QueryResultView {
   // Rows kept for the panel, capped by maxResultRows. Copy uses these.
   rows: Row[];
   columns: string[];
-  affectedRows: number;
+  hasResultSet: boolean;
+  affectedRows: number | null;
   truncated: boolean;
   totalRows: number;
 }
@@ -36,14 +37,19 @@ export function createRowCollector(
   const kept: Row[] = [];
   let total = 0;
   let columns: string[] = [];
-  let affectedRows = 0;
+  let hasResultSet = false;
+  let affectedRows: number | null = null;
   let limitSignalled = false;
 
   return {
     onColumns(next) {
+      hasResultSet = true;
+      affectedRows = null;
       columns = next;
     },
     onRow(row) {
+      hasResultSet = true;
+      affectedRows = null;
       total += 1;
       if (kept.length < safeMaxRows) {
         kept.push(row);
@@ -64,6 +70,7 @@ export function createRowCollector(
       return {
         rows: kept,
         columns: columns.length > 0 ? columns : Object.keys(kept[0] ?? {}),
+        hasResultSet,
         affectedRows,
         truncated: total > kept.length,
         totalRows: total,

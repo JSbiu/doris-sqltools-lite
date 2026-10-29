@@ -23,6 +23,8 @@ test('keeps field headers and zero rows for an empty SELECT', () => {
   const view = collector.toView();
   assert.deepEqual(view.rows, []);
   assert.deepEqual(view.columns, ['id']);
+  assert.equal(view.hasResultSet, true);
+  assert.equal(view.affectedRows, null);
   assert.equal(view.truncated, false);
   assert.equal(view.totalRows, 0);
 });
@@ -34,7 +36,34 @@ test('represents an affected-row statement without pretending it returned rows',
   const view = collector.toView();
   assert.deepEqual(view.rows, []);
   assert.deepEqual(view.columns, []);
+  assert.equal(view.hasResultSet, false);
   assert.equal(view.affectedRows, 2);
+});
+
+test('recognizes a result set even when the driver supplies no column names or rows', () => {
+  const collector = createRowCollector(1000);
+  collector.onColumns([]);
+
+  assert.equal(collector.toView().hasResultSet, true);
+  assert.equal(collector.toView().affectedRows, null);
+});
+
+for (const count of [0, null]) {
+  test(`preserves ${count === null ? 'unknown' : 'zero'} affected rows without a result set`, () => {
+    const collector = createRowCollector(1000);
+    collector.onAffectedRows(count);
+
+    const view = collector.toView();
+    assert.equal(view.hasResultSet, false);
+    assert.equal(view.affectedRows, count);
+    assert.equal(view.totalRows, 0);
+  });
+}
+
+test('does not invent an affected-row count before the driver supplies one', () => {
+  const view = createRowCollector(1000).toView();
+  assert.equal(view.hasResultSet, false);
+  assert.equal(view.affectedRows, null);
 });
 
 test('caps the kept rows and counts every row that streamed past', () => {
@@ -88,7 +117,10 @@ test('falls back to the row keys when the driver reports no columns', () => {
   const collector = createRowCollector(10);
   collector.onRow({ first: 1, second: 2 });
 
-  assert.deepEqual(collector.toView().columns, ['first', 'second']);
+  const view = collector.toView();
+  assert.deepEqual(view.columns, ['first', 'second']);
+  assert.equal(view.hasResultSet, true);
+  assert.equal(view.affectedRows, null);
 });
 
 test('reads column names out of mysql2 field packets', () => {

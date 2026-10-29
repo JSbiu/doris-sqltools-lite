@@ -19,11 +19,12 @@ function deferred() {
 function cancellation() {
   const listeners = new Set();
   let requested = false;
+  let reason;
   return {
     get requested() { return requested; },
-    get reason() { return requested ? 'user' : undefined; },
+    get reason() { return reason; },
     onRequest(listener) { listeners.add(listener); return { dispose: () => listeners.delete(listener) }; },
-    cancel() { requested = true; for (const listener of [...listeners]) listener(); },
+    cancel(nextReason = 'user') { requested = true; reason = nextReason; for (const listener of [...listeners]) listener(); },
   };
 }
 async function bounded(promise) {
@@ -88,7 +89,7 @@ function hive(options = {}) {
   const calls = { sql: [], clientClosed: 0, operationClosed: 0, cancelled: 0, flushed: 0, fetches: 0 };
   const operation = {
     setMaxRows() {},
-    status: async () => ({ operationState: thrift.TCLIService_types.TOperationState.FINISHED_STATE }),
+    status: async () => ({ operationState: thrift.TCLIService_types.TOperationState.FINISHED_STATE, hasResultSet: true }),
     fetch: async () => { calls.fetches++; await options.fetch?.(); },
     getSchema: () => ({ columns: [{ columnName: 'id', position: 0 }] }),
     getData: () => [{ columns: [{ i32Val: { values: [1, 2] } }] }],
@@ -137,6 +138,15 @@ for (const asynchronous of [false, true]) {
 }
 
 for (const factory of [mysql, hive]) {
+  test(`${factory.name} row-limit summaries retain the result-set flag and an unknown affected count`, async () => {
+    const h = factory();
+    const signal = cancellation();
+    const summary = await bounded(h.session.execute('SELECT id', signal, sink(() => signal.cancel('limit'))));
+
+    assert.equal(summary.hasResultSet, true);
+    assert.equal(summary.rowsRead, 1);
+    assert.equal(summary.affectedRows, null);
+  });
   test(`${factory.name} does not count local disk backpressure as network silence`, async () => {
     const h = factory({ idleMs: 10 });
     const summary = await bounded(h.session.execute('SELECT id', neverCancelled, sink(() => sleep(45))));
