@@ -5,7 +5,7 @@ description: 为 Doris SQLTools Lite VS Code 扩展编写或整理可执行 SQL�
 
 # Doris SQLTools Lite 使用
 
-按 0.9.4 能力核对（2026-10-29）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，不默认改设置、安装扩展或连接数据库。
+按 0.9.5 能力核对（2026-10-29）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，不默认改设置、安装扩展或连接数据库。
 
 ## 编写 SQL 文件
 
@@ -88,6 +88,7 @@ SELECT * FROM order_source WHERE dt = '${biz_date}';
 - 脚本 stdout 只输出非空 UTF-8 JSON 数组，例如 `[{"biz_date":"2026-10-01"},{"biz_date":"2026-10-02"}]`。每项为参数对象；值可为非空字符串、有限数字或布尔值，最终按文本替换。无参数可用 `[{}]`；单批也必须输出数组，PowerShell 可用 `ConvertTo-Json -InputObject $batches -Compress` 保留数组。
 - 右键/命令面板 `Doris SQL Lite: Run SQL Batches` 才运行脚本；普通执行/计划只处理当前语句。脚本生成参数后，扩展检查全部批次并显示数量、首尾参数、初始化、步骤与连接，点击“开始执行”才提交 SQL。`throw`、`Write-Error`、非零退出码、非法参数或脚本取消都会阻止提交；诊断可写 stderr。stdout/stderr 上限分别为 4 MiB/8 KiB，整次任务最多执行 10,000 个步骤，过大时缩小脚本日期范围。
 - SQL 和参数在启动时固定，编辑只影响下一次任务。同一文件锁贯穿脚本、确认和执行；批次、步骤依次等待完成，其他文件可独立操作。所选步骤不支持 `@output`；实际返回结果集会停止任务，不提供批量结果预览或多批 TSV 导出。
+- 运行通知约每秒显示当前阶段、已完整完成批数、当前批次/步骤、连接、参数摘要以及任务和本步耗时。任务计时从确认启动开始，本步包含准备会话的时间；耗时不能当作完成百分比或预计剩余时间。通知最多展示三个参数，每项至多前 48 个字符，超量/超长/换行会明确省略，完整值读最终报告。取消后等待“取消收尾”完成。
 - 失败、取消或连接断开后停止后续步骤，等待当前操作收尾，不自动重连、重试、重放初始化、回滚或补偿。即使清理当天成功、回填失败，该清理也不会自动恢复。核对已完成步骤和不确定写入后再调整脚本起始日期重跑，不直接从首批重复执行。
 
 ## 读取执行反馈
@@ -95,10 +96,12 @@ SELECT * FROM order_source WHERE dt = '${biz_date}';
 普通查询、直接执行并导出、面板导出、计划及分批任务使用同一简短格式，不附带 SQL 正文、结果行或计划全文。结果页、导出通知、无结果集操作及批次结束通知有复制/保存入口；也可用 `Doris SQL Lite: Copy Last SQL Feedback` / `Save Last SQL Feedback` 获取当前窗口最近完成的一次操作。Reload Window 后记录清空，不建立查询历史。
 
 - 先核对 `name`、`connectionName`、`databaseType`、`parameters`、`source.path` 及执行时行号，确认属于当前任务。普通操作 `databaseType=null` 表示未确定类型，不自行猜数据源。`action` 区分 `query` / `export` / `explain` / `batch`，`status` 区分 `success` / `failed` / `cancelled`。`hasResultSet` 按驱动实际返回判断，`affectedRows=null` 表示服务端未提供影响行数，不能说成 0 行。
-- 分批任务读 `batch.records`：各步有连接名/类型、实际参数、`startLine` / `endLine`，共用根 `source.path`。`phase=init` 为一次性初始化，`batchIndex` 从 1 开始；`not-run` 未执行，`submitted=false` 未提交该步，`completedBatches` 只统计整批全部成功。混合引擎时以各记录的类型为准。`needsReview=true` 的已提交步骤需核对实际写入，不能按“失败/取消”推断未改数据；先定位成功清理和失败回填的边界，再决定重跑范围。
+- 分批任务的默认摘要用 `batch.steps` 将名称、连接类型和 SQL 行号各列一次，行号共用根 `source.path`。`firstBatch` / `lastBatch` 是首尾参数和状态样例，不代表中间连续或全部成功；仅一批时不重复末批。`batch.stopped` 标出停止位置、该批参数、`completedSteps` 和 `needsReviewSteps`，先据此定位成功清理和失败回填的边界。
+- 通过 `batchReportFile` 读取完整 JSON 报告的 `batch.records`，核对全部步骤和实际参数。`phase=init` 为初始化，`batchIndex` 从 1 开始；`not-run` 未执行，`submitted=false` 未提交该步，`completedBatches` 只计整批全部成功。混合引擎以各步骤类型为准。`needsReview=true` 需核对实际写入，不能按“失败/取消”推断未改数据；已成功但随后会话断开的步骤仍可为 `success`，结合任务错误判断停止原因。
+- 已提交 SQL 的任务首次复制先选择本地 `.json` 保存完整报告，默认文件名以 `.batch-report.json` 结尾；保存 `.md` 反馈会自动配套报告，只选一次位置。后续复用路径，报告被删则重新保存。报告和批次 Markdown 不覆盖已有文件；取消或保存失败不复制缺少报告位置的材料。尚未提交任何 SQL 时直接给简短反馈，不要求报告。保存失败只重试保存，不重复执行 SQL；清理失败给出的残留不能当作完整报告。
 - `source.savedAtExecution=false` 表示当时有未保存内容，`changedSinceExecution=true` 表示后来编辑过文件，`null` 表示当前状态未核对（如文件已关闭）。这些情况下，当前磁盘文件不能直接当作执行版本；按任务需要核对或让用户提供显式“复制完整材料”的计划快照，不自动强制保存、不生成指纹。
 - `submitted=false` 表示本次未再提交 SQL，可能是执行前取消/失败，也可能是把完整内存结果保存成文件；需结合 `action` 和 `status` 判断。`totalRows=null` 表示总行数未知，`rowsRead` 不能代替总数。`previewLimit` 只表示工具自动追加的上限，SQL 自带 LIMIT 仍在来源中。
-- `resultFile` 指向完成的结果，`planFile` 指向完整计划；按需读文件，不要求用户反复粘贴全文。`temporaryFile` 是清理失败时的残留，不是成功产物。`sessionState=lost` 时先按当前任务要求恢复初始化；错误/警告已脱敏并可能明确截断，必要时再查对应信息，不自动重试 SQL。
+- `resultFile` 指向完成的结果，`planFile` 指向完整计划，`batchReportFile` 指向完整逐步报告；按需读文件，不要求用户反复粘贴全文。`temporaryFile` 是清理失败时的残留，不是成功产物。`sessionState=lost` 时先按当前任务要求恢复初始化；错误/警告已脱敏并可能明确截断，必要时再查对应信息，不自动重试 SQL。
 
 ## 结果导出与会话
 

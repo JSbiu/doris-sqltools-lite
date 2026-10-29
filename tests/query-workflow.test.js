@@ -10,7 +10,7 @@ const { DocumentSessions } = require('../out/documentSessions');
 // Exercise the real runner with fake database sessions: no network or VS Code
 // host is needed, and a mistakenly executed original SQL is observable here.
 function harness(sql, options = {}) {
-  const calls = { executed: [], opened: [], closed: [], forms: [], plans: [], results: [], notices: [], writes: [], scripts: [] };
+  const calls = { executed: [], opened: [], closed: [], forms: [], plans: [], results: [], notices: [], writes: [], scripts: [], progress: [] };
   const profiles = [
     { id: 'spark', name: 'Spark数仓', type: 'Spark' },
     { id: 'mysql', name: 'MySQL业务库', type: 'MySQL' },
@@ -51,7 +51,7 @@ function harness(sql, options = {}) {
         return buttons.includes('继续导出') ? '继续导出' : undefined;
       },
       showSaveDialog: async () => { calls.saveDialogs = (calls.saveDialogs ?? 0) + 1; return options.saveDialog ? options.saveDialog() : options.target; },
-      withProgress: async (_config, task) => task({ report() {} }, new CancellationTokenSource().token),
+      withProgress: async (_config, task) => task({ report: ({ message }) => calls.progress.push(message) }, new CancellationTokenSource().token),
       showQuickPick: async () => { throw new Error('unexpected connection picker'); },
     },
     workspace: {
@@ -86,6 +86,12 @@ function harness(sql, options = {}) {
         calls.scripts.push(args);
         return options.batchScript ? options.batchScript(...args) : options.batchOutput;
       } };
+      if (id === './batchProgress' && options.progressOptions) {
+        const { BatchProgress } = realRequire(id);
+        return { BatchProgress: class extends BatchProgress {
+          constructor(report) { super(report, options.progressOptions); }
+        } };
+      }
       if (id === './planPanel') return { openPlanPanel: (snapshot) => calls.plans.push(snapshot) };
       return realRequire(id);
     },
@@ -739,12 +745,14 @@ test('script errors, invalid arrays, missing last-batch parameters and declined 
     { batchScript: () => { throw new Error('script failed'); } },
     { trusted: false }, { settings: { sqlParameters: false } },
   ]) {
-    const h = harness(batchSql, { ...batchOptions, ...options });
+    const clock = batchProgressClock();
+    const h = harness(batchSql, { ...batchOptions, ...options, progressOptions: clock.options });
     await h.runBatch();
     assert.equal(h.calls.executed.length, 0);
     assert.equal(h.calls.opened.length, 0);
     assert.equal(h.calls.feedback.value.submitted, false);
     assert.equal(h.state.runningDocuments.size, 0);
+    assert.equal(clock.pending(), 0);
   }
   const unsaved = harness(batchSql, batchOptions);
   unsaved.editor.document.uri.scheme = 'untitled';
@@ -838,6 +846,75 @@ test('editing the source after launch leaves captured batch SQL and parameters i
   assert.equal(h.calls.executed.length, 5);
   assert.ok(h.calls.executed.every((statement) => !statement.includes('wrong_table')));
   assert.equal(h.calls.feedback.currentSource().changedSinceExecution, true);
+});
+
+function batchProgressClock() {
+  let now = 0;
+  const timers = new Set();
+  const callbacks = [];
+  return {
+    options: {
+      now: () => now,
+      schedule: (callback) => {
+        timers.add(callback);
+        callbacks.push(callback);
+        return { dispose: () => timers.delete(callback) };
+      },
+    },
+    advance: (ms) => { now += ms; for (const callback of timers) callback(); },
+    pending: () => timers.size,
+    callbacks,
+  };
+}
+
+test('a silent long batch step refreshes actual parameters and elapsed time and disposes after completion', async () => {
+  const clock = batchProgressClock();
+  const h = harness(batchSql, { ...batchOptions, progressOptions: clock.options });
+  const started = deferred();
+  const gate = deferred();
+  const original = h.session.execute;
+  h.session.execute = async (...args) => {
+    if (args[0].startsWith('DELETE')) { started.resolve(); await gate.promise; }
+    return original(...args);
+  };
+  const running = h.runBatch();
+  await started.promise;
+  clock.advance(130000);
+  assert.match(h.calls.progress.at(-1), /执行 SQL.*已完成 0\/2 批.*第 1 批.*清理.*day=2024-02-29.*任务 2分10秒.*本步 2分10秒/);
+  assert.equal(clock.pending(), 1);
+  gate.resolve();
+  await running;
+  assert.equal(clock.pending(), 0);
+  const reports = h.calls.progress.length;
+  for (const callback of clock.callbacks) callback();
+  assert.equal(h.calls.progress.length, reports);
+});
+
+test('batch cancellation keeps reporting cleanup until the driver finishes and then clears its timer', async () => {
+  const clock = batchProgressClock();
+  const h = harness(batchSql, { ...batchOptions, progressOptions: clock.options });
+  const started = deferred();
+  const cancellation = deferred();
+  const cleanup = deferred();
+  h.session.execute = async (_sql, signal) => {
+    started.resolve();
+    await new Promise((resolve) => signal.onRequest(resolve));
+    cancellation.resolve();
+    await cleanup.promise;
+    throw new (require('../out/querySession').QueryCancelledError)();
+  };
+  const running = h.runBatch();
+  await started.promise;
+  h.state.cancellationSources.get('file:///queries.sql').cancel();
+  await cancellation.promise;
+  clock.advance(2000);
+  assert.match(h.calls.progress.at(-1), /^取消收尾.*本步 2秒$/);
+  assert.equal(clock.pending(), 1);
+  cleanup.resolve();
+  await running;
+  assert.equal(clock.pending(), 0);
+  assert.equal(h.calls.executed.length, 0);
+  assert.equal(h.calls.feedback.value.status, 'cancelled');
 });
 
 test('a preview ending exactly at its injected LIMIT remains incomplete and full export reruns the original query', async () => {

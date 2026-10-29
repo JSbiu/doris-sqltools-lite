@@ -17,6 +17,7 @@ import {
 import { buildExportFileName, normalizeExportDirectory, resolveOutputPath } from './exportPath';
 import { assertDirectExportSql } from './directExport';
 import { runBatchScript } from './batchScript';
+import { BatchProgress } from './batchProgress';
 import { readBatchDefinition, parseBatchParameters, prepareBatchTask, createBatchFeedback, runBatchTask } from './batchExecution';
 import { createTsvFileWriter, type TsvFileWriter } from './tsvFileWriter';
 import { copyFeedback, saveFeedback, rememberFeedback, type FeedbackRecord } from './feedbackActions';
@@ -1600,11 +1601,12 @@ async function runBatch(
       await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification, title: `分批执行 ${details.name}`, cancellable: true,
       }, async (progress, token) => {
+        const batchProgress = new BatchProgress((message) => progress.report({ message }));
+        const cancelProgress = source.token.onCancellationRequested(() => batchProgress.setPhase('cancelling'));
         const subscription = token.onCancellationRequested(() => source.cancel());
         if (token.isCancellationRequested) source.cancel();
         const signal = tokenSignal(source.token);
         try {
-          progress.report({ message: '正在运行参数脚本…' });
           const output = await runBatchScript(definition.script, dirname(document.uri.fsPath), signal);
           if (signal.requested) throw new QueryCancelledError();
           const task = prepareBatchTask(definition, parseBatchParameters(output), (context) => context.connection
@@ -1621,7 +1623,7 @@ async function runBatch(
           };
           const describe = (steps: typeof allSteps): string => steps.length
             ? steps.map((step) => `${step.name} → ${step.profile.name} (${step.profile.type})`).join('\n') : '无';
-          progress.report({ message: `已生成 ${task.batches.length} 批，等待启动确认…` });
+          batchProgress.prepare(batch);
           const answer = await untilCancelled(vscode.window.showWarningMessage(
             `即将顺序执行 ${task.batches.length} 批 SQL`,
             { modal: true, detail: [
@@ -1633,6 +1635,7 @@ async function runBatch(
           ), source.token);
           if (answer !== '开始执行' || signal.requested) return;
           feedback.startedAt = Date.now();
+          batchProgress.startTask();
           details.status = await runBatchTask(task, batch, signal, async (step, sql, record) => {
             let entry = entries.get(step.profile.id);
             try {
@@ -1644,7 +1647,7 @@ async function runBatch(
               operation.profileId = step.profile.id;
               if (entry) state.sessions.validate(state.sessions.snapshot(entry));
               else {
-                progress.report({ message: `准备会话：${step.profile.name}…` });
+                batchProgress.setPhase('connecting', step.profile.name);
                 entry = await state.sessions.open(operation, step.profile.id,
                   () => manager.open(step.profile, configuredQueryIdleTimeoutMs(), source.token));
                 entries.set(step.profile.id, entry);
@@ -1652,6 +1655,7 @@ async function runBatch(
               record.sessionState = 'retained';
               if (signal.requested) throw new QueryCancelledError();
               const session = state.sessions.startStatement(operation, entry);
+              batchProgress.setPhase('executing');
               record.submitted = true;
               details.submitted = true;
               return await session.execute(sql, signal, {
@@ -1667,12 +1671,14 @@ async function runBatch(
                 record.sessionState = entry.valid && !entry.session?.broken ? 'retained' : 'lost';
               }
             }
-          }, (record) => progress.report({
-            message: `${record.phase === 'init' ? '初始化' : `第 ${record.batchIndex}/${batch.batchCount} 批`}：${record.name} · ${record.connectionName}…`,
-          }));
+          }, (record) => batchProgress.setStep(record));
           details.needsReview = batch.records.some((record) => record.needsReview);
           details.error = batch.records.find((record) => record.status === 'failed' || record.status === 'cancelled')?.error ?? batch.error;
-        } finally { subscription.dispose(); }
+        } finally {
+          batchProgress.dispose();
+          cancelProgress.dispose();
+          subscription.dispose();
+        }
       });
     } catch (error) {
       details.status = source.token.isCancellationRequested || isQueryCancelled(error) ? 'cancelled' : 'failed';
