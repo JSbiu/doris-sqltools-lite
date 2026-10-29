@@ -10,7 +10,7 @@ const { DocumentSessions } = require('../out/documentSessions');
 // Exercise the real runner with fake database sessions: no network or VS Code
 // host is needed, and a mistakenly executed original SQL is observable here.
 function harness(sql, options = {}) {
-  const calls = { executed: [], opened: [], closed: [], forms: [], plans: [], results: [], notices: [], writes: [] };
+  const calls = { executed: [], opened: [], closed: [], forms: [], plans: [], results: [], notices: [], writes: [], scripts: [] };
   const profiles = [
     { id: 'spark', name: 'Spark数仓', type: 'Spark' },
     { id: 'mysql', name: 'MySQL业务库', type: 'MySQL' },
@@ -44,12 +44,18 @@ function harness(sql, options = {}) {
     window: {
       activeTextEditor: editor,
       showInformationMessage: async (text) => { calls.notices.push(text); },
-      showWarningMessage: async (text, ...buttons) => { calls.notices.push(text); return buttons.includes('继续导出') ? '继续导出' : undefined; },
+      showErrorMessage: async (text) => { calls.notices.push(text); },
+      showWarningMessage: async (text, ...buttons) => {
+        calls.notices.push(text);
+        if (buttons.includes('开始执行')) return options.confirmBatch ? options.confirmBatch(text, ...buttons) : options.startBatch ? '开始执行' : undefined;
+        return buttons.includes('继续导出') ? '继续导出' : undefined;
+      },
       showSaveDialog: async () => { calls.saveDialogs = (calls.saveDialogs ?? 0) + 1; return options.saveDialog ? options.saveDialog() : options.target; },
       withProgress: async (_config, task) => task({ report() {} }, new CancellationTokenSource().token),
       showQuickPick: async () => { throw new Error('unexpected connection picker'); },
     },
     workspace: {
+      isTrusted: options.trusted ?? true,
       fs: { writeFile: async (uri, bytes) => calls.writes.push({ uri, text: bytes.toString('utf8') }) },
       getConfiguration: () => ({ get: (key, fallback) => ({ maxResultRows: 2, readRowLimit: 0, ...options.settings })[key] ?? fallback }),
     },
@@ -76,20 +82,28 @@ function harness(sql, options = {}) {
         calls.forms.push(inputs);
         return options.decision;
       } };
+      if (id === './batchScript') return { runBatchScript: async (...args) => {
+        calls.scripts.push(args);
+        return options.batchScript ? options.batchScript(...args) : options.batchOutput;
+      } };
       if (id === './planPanel') return { openPlanPanel: (snapshot) => calls.plans.push(snapshot) };
       return realRequire(id);
     },
   };
-  vm.runInNewContext(fs.readFileSync(filename, 'utf8') + '\nmodule.exports.hooks = { runQuery, prepareStatementSql, ResultPanel, setParameterState: (state) => { parameterState = state; } };', sandbox);
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8') + '\nmodule.exports.hooks = { runQuery, runBatch, prepareStatementSql, ResultPanel, setParameterState: (state) => { parameterState = state; } };', sandbox);
   const hooks = module.exports.hooks;
   hooks.ResultPanel.open = (result, metadata) => calls.results.push({ result, metadata });
   const makeSession = (id) => ({
     broken: false, close: async () => { calls.closed.push(id); },
     execute: async (statement, signal, sink) => {
       calls.executed.push(statement);
+      if (options.batchMode) {
+        sink.onAffectedRows(options.affectedRows ?? null);
+        return { hasResultSet: false, rowsRead: 0, affectedRows: options.affectedRows ?? null };
+      }
       sink.onColumns(['plan']);
       for (let i = 0; i < (options.rowCount ?? 1); i++) await sink.onRow({ plan: `  +- node ${i}` });
-      return { rowsRead: options.rowCount ?? 1, affectedRows: 0 };
+      return { hasResultSet: true, rowsRead: options.rowCount ?? 1, affectedRows: null };
     },
   });
   const session = makeSession('spark');
@@ -113,7 +127,8 @@ function harness(sql, options = {}) {
   };
   return { calls, hooks, editor, manager, state, session, profileSessions, profiles, options, seed, panelFor,
     run: (explain = false) => hooks.runQuery(manager, state, undefined, undefined, explain),
-    runToTsv: () => hooks.runQuery(manager, state, undefined, undefined, false, true) };
+    runToTsv: () => hooks.runQuery(manager, state, undefined, undefined, false, true),
+    runBatch: () => hooks.runBatch(manager, state) };
 }
 
 test('normal execution routes each statement, substitutes comment parameters and displays its name', async () => {
@@ -289,7 +304,7 @@ test('export blocks another operation in the same file while another file can st
   await started.promise;
   await h.run(true);
   assert.equal(h.calls.plans.length, 0);
-  assert.ok(h.calls.notices.some((text) => text.includes('已有查询、计划或导出')));
+  assert.ok(h.calls.notices.some((text) => text.includes('已有查询、计划、导出或分批任务')));
   h.editor.document.uri = { scheme: 'file', toString: () => 'file:///other.sql' };
   h.manager.open = async () => ({ broken: false, close: async () => {}, execute: originalExecute });
   await h.run();
@@ -618,16 +633,211 @@ test('plan feedback shares source and parameters but references complete plan te
   assert.ok(!text.includes(record.planText));
 });
 
-test('DML result pages are retained in 0.9.3 while feedback reports affected rows', async () => {
+test('DML without result sets only notifies, while zero-row SELECT keeps an empty result panel', async () => {
   const h = harness('-- @connection: MySQL业务库\nINSERT INTO orders VALUES (1);');
   h.profileSessions.get('mysql').execute = async (_sql, _signal, sink) => {
     sink.onAffectedRows(4);
-    return { rowsRead: 0, affectedRows: 4 };
+    return { hasResultSet: false, rowsRead: 0, affectedRows: 4 };
   };
   await h.run();
-  assert.equal(h.calls.results.length, 1);
+  assert.equal(h.calls.results.length, 0);
+  assert.ok(h.calls.notices.some((text) => /执行成功.*影响 4 行.*耗时/.test(text)));
   assert.equal(h.calls.feedback.value.affectedRows, 4);
   assert.equal(h.calls.feedback.value.status, 'success');
+  for (const count of [0, null]) {
+    const dml = harness('-- @connection: Spark数仓\nSET spark.test=true;', { batchMode: true, affectedRows: count });
+    await dml.run();
+    assert.equal(dml.calls.results.length, 0);
+    assert.equal(dml.calls.feedback.value.affectedRows, count);
+    assert.equal(dml.calls.feedback.value.hasResultSet, false);
+    assert.ok(dml.calls.notices.some((text) => text.includes(count === null ? '影响行数未知' : '影响 0 行')));
+  }
+  const empty = harness('-- @connection: Spark数仓\nSELECT 1 WHERE FALSE;', { rowCount: 0 });
+  await empty.run();
+  assert.equal(empty.calls.results.length, 1);
+  assert.equal(empty.calls.feedback.value.hasResultSet, true);
+  assert.equal(empty.calls.feedback.value.totalRows, 0);
+});
+
+test('failed writes notify the statement name and duration and retain feedback without a result panel', async () => {
+  const h = harness('-- @connection: MySQL业务库\n-- @name: 清理当天\nDELETE FROM target;');
+  h.profileSessions.get('mysql').execute = async () => { throw Object.assign(new Error('syntax error'), { code: 'ER_PARSE_ERROR' }); };
+  await h.run();
+  assert.equal(h.calls.results.length, 0);
+  assert.ok(h.calls.notices.some((text) => /清理当天.*执行失败.*耗时/.test(text)));
+  assert.equal(h.calls.feedback.value.status, 'failed');
+  assert.equal(h.calls.feedback.value.submitted, true);
+  assert.equal(h.calls.feedback.value.needsReview, false);
+});
+
+test('cancelled submitted statements without result metadata need review, while known result queries do not', async () => {
+  for (const knownQuery of [false, true]) {
+    const h = harness(`-- @connection: Spark数仓\n${knownQuery ? 'SELECT 1;' : 'INSERT INTO target VALUES (1);'}`);
+    const started = deferred();
+    h.session.execute = async (_statement, signal, sink) => {
+      if (knownQuery) sink.onColumns(['x']);
+      started.resolve();
+      await new Promise((resolve) => signal.onRequest(resolve));
+      throw new (require('../out/querySession').QueryCancelledError)();
+    };
+    const running = h.run();
+    await started.promise;
+    h.state.cancellationSources.get('file:///queries.sql').cancel();
+    await running;
+    assert.equal(h.calls.feedback.value.status, 'cancelled');
+    assert.equal(h.calls.feedback.value.submitted, true);
+    assert.equal(h.calls.feedback.value.needsReview, !knownQuery);
+    assert.equal(h.calls.notices.some((text) => text.includes('完成情况需核对')), !knownQuery);
+  }
+});
+
+const batchSql = [
+  '-- @default-connection: Spark数仓', '-- @batch-script: ./params.ps1',
+  '-- @batch-steps: ["清理", "回填"]', '-- @batch-init: ["初始化"]',
+  '-- @name: 初始化', 'SET spark.test=true;',
+  '-- @name: 清理', "DELETE FROM target WHERE dt='${day}';",
+  '-- @name: 不执行', 'DROP TABLE unrelated;',
+  '-- @name: 回填', '-- @connection: MySQL业务库', "INSERT INTO target VALUES ('${day}');",
+].join('\n');
+const batchOptions = { batchMode: true, startBatch: true, batchOutput: '[{"day":"2024-02-29"},{"day":"2024-03-01"}]' };
+
+test('batch command runs only named steps with reused sessions and compact feedback, without result pages', async () => {
+  const h = harness(batchSql, batchOptions);
+  await h.seed();
+  await h.runBatch();
+  assert.deepEqual(h.calls.opened, ['mysql']);
+  assert.deepEqual(h.calls.executed, [
+    'SET spark.test=true;', "DELETE FROM target WHERE dt='2024-02-29';", "INSERT INTO target VALUES ('2024-02-29');",
+    "DELETE FROM target WHERE dt='2024-03-01';", "INSERT INTO target VALUES ('2024-03-01');",
+  ]);
+  assert.equal(h.calls.scripts.length, 1);
+  assert.equal(h.calls.scripts[0][0], path.resolve('params.ps1'));
+  assert.equal(h.calls.results.length, 0);
+  assert.equal(h.calls.feedback.value.action, 'batch');
+  assert.equal(h.calls.feedback.value.status, 'success');
+  assert.equal(h.calls.feedback.value.batch.completedBatches, 2);
+  assert.equal(h.calls.feedback.value.batch.records[2].databaseType, 'MySQL');
+  assert.equal(h.calls.feedback.value.batch.records[2].parameters.day, '2024-02-29');
+  assert.equal(h.state.runningDocuments.size, 0);
+  assert.equal(h.state.cancellationSources.size, 0);
+});
+
+test('ordinary execution and explain strip batch directives without running scripts or other steps', async () => {
+  for (const explain of [false, true]) {
+    const h = harness(batchSql, { ...batchOptions, offset: batchSql.lastIndexOf('INSERT'), decision: { action: 'execute', values: { day: '2024-03-01' } } });
+    await h.run(explain);
+    assert.equal(h.calls.scripts.length, 0);
+    assert.equal(h.calls.executed.length, 1);
+    assert.ok(h.calls.executed[0].includes('INSERT INTO target'));
+    assert.doesNotMatch(h.calls.executed[0], /@batch/);
+  }
+});
+
+test('script errors, invalid arrays, missing last-batch parameters and declined launch submit no SQL', async () => {
+  for (const options of [
+    { startBatch: false }, { batchOutput: 'bad output' }, { batchOutput: '[{"day":"ok"},{}]' },
+    { batchScript: () => { throw new Error('script failed'); } },
+    { trusted: false }, { settings: { sqlParameters: false } },
+  ]) {
+    const h = harness(batchSql, { ...batchOptions, ...options });
+    await h.runBatch();
+    assert.equal(h.calls.executed.length, 0);
+    assert.equal(h.calls.opened.length, 0);
+    assert.equal(h.calls.feedback.value.submitted, false);
+    assert.equal(h.state.runningDocuments.size, 0);
+  }
+  const unsaved = harness(batchSql, batchOptions);
+  unsaved.editor.document.uri.scheme = 'untitled';
+  await unsaved.runBatch();
+  assert.equal(unsaved.calls.scripts.length, 0);
+});
+
+test('batch lock spans parameter generation and cancellation prevents any SQL submission', async () => {
+  const started = deferred();
+  const h = harness(batchSql, { ...batchOptions, batchScript: async (_path, _cwd, signal) => {
+    started.resolve();
+    await new Promise((resolve) => signal.onRequest(resolve));
+    throw new (require('../out/querySession').QueryCancelledError)();
+  } });
+  const running = h.runBatch();
+  await started.promise;
+  await h.run(true);
+  await h.runBatch();
+  assert.equal(h.calls.scripts.length, 1);
+  h.state.cancellationSources.get('file:///queries.sql').cancel();
+  await running;
+  assert.equal(h.calls.executed.length, 0);
+  assert.equal(h.calls.feedback.value.status, 'cancelled');
+  assert.equal(h.state.runningDocuments.size, 0);
+});
+
+test('batch connection loss after DELETE stops INSERT, never reconnects and reports indeterminate writes', async () => {
+  const h = harness(batchSql, batchOptions);
+  const mysql = h.profileSessions.get('mysql');
+  mysql.execute = async (statement) => {
+    h.calls.executed.push(statement);
+    mysql.broken = true;
+    throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+  };
+  await h.runBatch();
+  assert.equal(h.calls.executed.length, 3);
+  assert.deepEqual(h.calls.opened, ['spark', 'mysql']);
+  assert.deepEqual(h.calls.closed, ['mysql']);
+  assert.equal(h.calls.feedback.value.batch.completedBatches, 0);
+  assert.deepEqual(h.calls.feedback.value.batch.records.map((record) => record.status), ['success', 'success', 'failed', 'not-run', 'not-run']);
+  assert.equal(h.calls.feedback.value.batch.records[2].needsReview, true);
+  assert.ok(h.calls.notices.some((text) => text.includes('第 1 批「回填」') && text.includes('需核对')));
+});
+
+test('closing a batch file cancels, awaits current cleanup and does not execute later steps', async () => {
+  const h = harness(batchSql, batchOptions);
+  const started = deferred();
+  let cleaned = false;
+  h.session.execute = async (statement, signal) => {
+    h.calls.executed.push(statement);
+    started.resolve();
+    await new Promise((resolve) => signal.onRequest(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    cleaned = true;
+    throw new (require('../out/querySession').QueryCancelledError)();
+  };
+  const running = h.runBatch();
+  await started.promise;
+  const closing = h.state.sessions.closeDocument('file:///queries.sql');
+  await running;
+  await closing;
+  assert.equal(cleaned, true);
+  assert.equal(h.calls.executed.length, 1);
+  assert.deepEqual(h.calls.closed, ['spark']);
+  assert.equal(h.calls.feedback.value.batch.records[0].status, 'cancelled');
+  assert.ok(h.calls.feedback.value.batch.records.slice(1).every((record) => !record.submitted));
+});
+
+test('batch session loss during acknowledged completion stops before switching to another connection', async () => {
+  const h = harness(batchSql, batchOptions);
+  h.session.execute = async (statement) => {
+    h.calls.executed.push(statement);
+    h.session.broken = true;
+    return { hasResultSet: false, rowsRead: 0, affectedRows: 0 };
+  };
+  await h.runBatch();
+  assert.equal(h.calls.executed.length, 1);
+  assert.deepEqual(h.calls.opened, ['spark']);
+  assert.equal(h.calls.feedback.value.batch.records[0].status, 'success');
+  assert.equal(h.calls.feedback.value.status, 'failed');
+  assert.ok(h.calls.feedback.value.batch.records.slice(1).every((record) => record.status === 'not-run'));
+});
+
+test('editing the source after launch leaves captured batch SQL and parameters intact', async () => {
+  const h = harness(batchSql, { ...batchOptions, confirmBatch: () => {
+    h.editor.document.getText = () => batchSql.replaceAll('target', 'wrong_table');
+    h.editor.document.version++;
+    return '开始执行';
+  } });
+  await h.runBatch();
+  assert.equal(h.calls.executed.length, 5);
+  assert.ok(h.calls.executed.every((statement) => !statement.includes('wrong_table')));
+  assert.equal(h.calls.feedback.currentSource().changedSinceExecution, true);
 });
 
 test('a preview ending exactly at its injected LIMIT remains incomplete and full export reruns the original query', async () => {

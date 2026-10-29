@@ -1,11 +1,11 @@
 ---
 name: doris-sqltools-lite
-description: 为 Doris SQLTools Lite VS Code 扩展编写或整理可执行 SQL，并处理执行计划审核、简短执行反馈、结果导出和会话问题。当用户或当前项目约定使用此工具时采用；不用于扩展源码开发或未选用此工具的普通 SQL 工作。
+description: 为 Doris SQLTools Lite VS Code 扩展编写或整理可执行 SQL，并处理计划审核、顺序分批补数、简短反馈、导出和会话问题。当用户或当前项目约定使用此工具时采用；不用于扩展源码开发或未选用此工具的普通 SQL 工作。
 ---
 
 # Doris SQLTools Lite 使用
 
-按 0.9.3 能力核对（2026-10-28）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，不默认改设置、安装扩展或连接数据库。
+按 0.9.4 能力核对（2026-10-29）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，不默认改设置、安装扩展或连接数据库。
 
 ## 编写 SQL 文件
 
@@ -19,6 +19,9 @@ description: 为 Doris SQLTools Lite VS Code 扩展编写或整理可执行 SQL�
 | `-- @connection: 连接名称或ID` | 覆盖当前语句的连接，不延续到下一条 |
 | `-- @param: 参数名 = 值` | 覆盖当前语句的参数，不延续到下一条 |
 | `-- @output: 路径.tsv` | 只为当前语句指定完整结果文件，`Ctrl+Enter` 执行一次并导出，取计划时忽略 |
+| `-- @batch-script: ./backfill-params.ps1` | 文件头指定生成批次参数的 PowerShell 脚本，普通执行和计划不运行它 |
+| `-- @batch-steps: ["清理当天", "回填当天"]` | 文件头指定每批执行的 `@name` 及顺序 |
+| `-- @batch-init: ["会话设置"]` | 文件头指定任务开始时只执行一次的初始化步骤，可省略 |
 
 为独立语句写有业务含义的 `@name`。注释字段使用上述英文小写与半角冒号；同一范围内不重复声明同一设置或参数。只有 SQL 前的 `--` 注释有效，块注释和 SQL 正文中的同名文字不作为配置。
 
@@ -54,15 +57,45 @@ WHERE dt = '${c_date}';
 - `Ctrl+Alt+Enter` 或 `Doris SQL Lite: Explain Query at Cursor`：对光标所在或选中的单条 SQL 取计划，复用该语句的连接、参数和会话，不修改原 SQL。Spark 使用 `EXPLAIN FORMATTED`，Doris 使用 `EXPLAIN VERBOSE`，MySQL 使用普通 `EXPLAIN`。此入口不自动使用 `EXPLAIN ANALYZE`，不要为取计划重复维护两份 SQL。
 - 计划页默认“复制 AI 反馈 / 保存 AI 反馈…”提供简短信息，包含 SQL 名称、连接名称/类型、实际参数、原 SQL 路径和行号范围，以及完整计划的 `planFile` 路径，不重复 SQL 与计划正文。首次复制先选择 `.txt` 保存完整计划，取消则不复制；保存 `.md` 反馈时会同时生成相邻 `.plan.txt`。已保存计划后复用路径，需要全文快照才显式使用“复制完整材料”。材料保存位置与业务信息管理遵循当前项目约定。
 - 收到反馈后，按路径读取来源 SQL 和完整计划，结合实际参数检查分区裁剪、扫描范围、过滤、Join、Shuffle/Exchange、排序与聚合。区分计划证据、估算和实际运行结果；SQL、参数、连接或会话配置改变后，原计划不能作为新版本已审核的证据。
-- `Ctrl+Enter` 或 `Doris SQL Lite: Run Query at Cursor`：一次执行一条 SQL。有选区取选中语句，否则取光标所在或最近一条；只选正文仍继承前面的注释，跨多条的选区会被拒绝。有 `@output` 时直接导出完整结果，无此注释时显示普通预览；`Ctrl+Alt+Enter` 忽略输出注释，只取计划。
+- `Ctrl+Enter` 或 `Doris SQL Lite: Run Query at Cursor`：一次执行一条 SQL。有选区取选中语句，否则取光标所在或最近一条；只选正文仍继承前面的注释，跨多条的选区会被拒绝。有 `@output` 时直接导出完整结果，无此注释时有结果集则显示预览，实际无结果集则只通知，零行 SELECT 仍显示空结果页；`Ctrl+Alt+Enter` 忽略输出注释，只取计划。
 
 生成 SQL、取到计划或通过审核，不等于已经执行成功。执行由当前任务授权决定；本 skill 本身不增加生产访问权限，也不自动将材料发给 AI。
 
+## 顺序分批补数
+
+用于当前电脑、VS Code 保持打开的补数写入与初始化。每条 SQL 仍放在同一源文件，`.ps1` 只生成参数；连接和密码由扩展使用，不向脚本传递数据库密码。按当前任务确认每批过滤范围和步骤，工具不会把长时间区间自动改写为日/小时。
+
+```sql
+-- @default-connection: Doris数仓
+-- @batch-script: ./backfill-params.ps1
+-- @batch-steps: ["清理当天", "回填当天"]
+-- @batch-init: ["会话设置"]
+
+-- @name: 会话设置
+SET time_zone = '+08:00';
+
+-- @name: 清理当天
+DELETE FROM order_summary WHERE dt = '${biz_date}';
+
+-- @name: 回填当天
+INSERT INTO order_summary
+SELECT * FROM order_source WHERE dt = '${biz_date}';
+```
+
+连接和表名按任务实际替换；每步仍可单独声明 `@connection`、`@param`。名称精确匹配、全文件唯一；初始化与每批步骤不能重叠，不执行未列出的其他 SQL。初始化只用自身注释和行内默认值。每批参数优先级为：脚本当前批参数 > 语句 `@param` > 文件 `@default-param` > 行内默认值；不写回文件或参数记忆。
+
+- SQL 先保存为本地文件；`.ps1` 路径不加外围引号，相对 SQL 文件解析，工作目录也是该文件目录。需受信任工作区、启用 `dorisSqlLite.sqlParameters`、本机可用 PowerShell：优先 `pwsh`，Windows 未找到时回退 `powershell.exe`，不绕过本机执行策略。
+- 脚本 stdout 只输出非空 UTF-8 JSON 数组，例如 `[{"biz_date":"2026-10-01"},{"biz_date":"2026-10-02"}]`。每项为参数对象；值可为非空字符串、有限数字或布尔值，最终按文本替换。无参数可用 `[{}]`；单批也必须输出数组，PowerShell 可用 `ConvertTo-Json -InputObject $batches -Compress` 保留数组。
+- 右键/命令面板 `Doris SQL Lite: Run SQL Batches` 才运行脚本；普通执行/计划只处理当前语句。脚本生成参数后，扩展检查全部批次并显示数量、首尾参数、初始化、步骤与连接，点击“开始执行”才提交 SQL。`throw`、`Write-Error`、非零退出码、非法参数或脚本取消都会阻止提交；诊断可写 stderr。stdout/stderr 上限分别为 4 MiB/8 KiB，整次任务最多执行 10,000 个步骤，过大时缩小脚本日期范围。
+- SQL 和参数在启动时固定，编辑只影响下一次任务。同一文件锁贯穿脚本、确认和执行；批次、步骤依次等待完成，其他文件可独立操作。所选步骤不支持 `@output`；实际返回结果集会停止任务，不提供批量结果预览或多批 TSV 导出。
+- 失败、取消或连接断开后停止后续步骤，等待当前操作收尾，不自动重连、重试、重放初始化、回滚或补偿。即使清理当天成功、回填失败，该清理也不会自动恢复。核对已完成步骤和不确定写入后再调整脚本起始日期重跑，不直接从首批重复执行。
+
 ## 读取执行反馈
 
-普通查询、直接执行并导出、面板导出和查看计划使用同一简短格式，不附带 SQL 正文、结果行或计划全文。结果页和导出通知有复制/保存入口；失败、取消或未打开结果页时，用 `Doris SQL Lite: Copy Last SQL Feedback` / `Save Last SQL Feedback` 获取当前窗口最近完成的一次操作。Reload Window 后记录清空，不建立查询历史。
+普通查询、直接执行并导出、面板导出、计划及分批任务使用同一简短格式，不附带 SQL 正文、结果行或计划全文。结果页、导出通知、无结果集操作及批次结束通知有复制/保存入口；也可用 `Doris SQL Lite: Copy Last SQL Feedback` / `Save Last SQL Feedback` 获取当前窗口最近完成的一次操作。Reload Window 后记录清空，不建立查询历史。
 
-- 先核对 `name`、`connectionName`、`databaseType`、`parameters`、`source.path` 及执行时行号，确认属于当前任务。`databaseType=null` 表示未确定类型，不自行猜数据源。`action` 区分 `query` / `export` / `explain`，`status` 区分 `success` / `failed` / `cancelled`。
+- 先核对 `name`、`connectionName`、`databaseType`、`parameters`、`source.path` 及执行时行号，确认属于当前任务。普通操作 `databaseType=null` 表示未确定类型，不自行猜数据源。`action` 区分 `query` / `export` / `explain` / `batch`，`status` 区分 `success` / `failed` / `cancelled`。`hasResultSet` 按驱动实际返回判断，`affectedRows=null` 表示服务端未提供影响行数，不能说成 0 行。
+- 分批任务读 `batch.records`：各步有连接名/类型、实际参数、`startLine` / `endLine`，共用根 `source.path`。`phase=init` 为一次性初始化，`batchIndex` 从 1 开始；`not-run` 未执行，`submitted=false` 未提交该步，`completedBatches` 只统计整批全部成功。混合引擎时以各记录的类型为准。`needsReview=true` 的已提交步骤需核对实际写入，不能按“失败/取消”推断未改数据；先定位成功清理和失败回填的边界，再决定重跑范围。
 - `source.savedAtExecution=false` 表示当时有未保存内容，`changedSinceExecution=true` 表示后来编辑过文件，`null` 表示当前状态未核对（如文件已关闭）。这些情况下，当前磁盘文件不能直接当作执行版本；按任务需要核对或让用户提供显式“复制完整材料”的计划快照，不自动强制保存、不生成指纹。
 - `submitted=false` 表示本次未再提交 SQL，可能是执行前取消/失败，也可能是把完整内存结果保存成文件；需结合 `action` 和 `status` 判断。`totalRows=null` 表示总行数未知，`rowsRead` 不能代替总数。`previewLimit` 只表示工具自动追加的上限，SQL 自带 LIMIT 仍在来源中。
 - `resultFile` 指向完成的结果，`planFile` 指向完整计划；按需读文件，不要求用户反复粘贴全文。`temporaryFile` 是清理失败时的残留，不是成功产物。`sessionState=lost` 时先按当前任务要求恢复初始化；错误/警告已脱敏并可能明确截断，必要时再查对应信息，不自动重试 SQL。
@@ -76,8 +109,8 @@ WHERE dt = '${c_date}';
 - 预览默认最多保留 1000 行，并可能追加 `LIMIT` 或提前停止读取；截断或提前停止时不能据显示行数推断总数。计划按原 SQL 完整获取，不追加预览 `LIMIT`。
 - 复制 TSV 只取面板保留的行。排序与筛选只作用于已加载行，不改变复制和导出的内容或顺序。预览后仍可用面板“导出 TSV”取全量；各入口均使用 UTF-8、无 BOM，默认启用表格公式转义，需原值时按下游要求处理该设置。
 - 完整保留的结果直接导出。截断结果会在原会话重跑原查询，数据以重跑时为准；同一会话执行过其他语句（包括查看计划和失败的语句）、关闭、断线或重置后，旧结果不能重跑导出，需要重新查询。因此需要全量结果时，在本次查询后及时导出，不在中间插入其他语句。
-- 每个文件按连接 ID 保留独立会话，切换数据源再回来保留原 `USE`、`SET` 等状态；不同文件互相隔离。同一文件的查询、计划、参数选择和导出互斥，其他文件可独立执行。
+- 每个文件按连接 ID 保留独立会话，切换数据源再回来保留原 `USE`、`SET` 等状态；不同文件互相隔离。同一文件的查询、计划、参数选择、导出和分批任务互斥，其他文件可独立执行。
 - 取消可用进度通知、状态栏或 `Doris SQL Lite: Cancel Query`。取消后会话仍健康则保留；已断开时重新执行必要初始化，不自动重放或重试失败语句。
 - 关闭文件、重置会话、修改连接目标/认证信息等会释放相应会话。`Doris SQL Lite: Reset This File's Sessions` 取消当前操作并重置该文件全部会话；之后重新执行初始化。连接按实际使用懒建立，不自动回收空闲会话，多文件、多数据源会增加保留的连接数。
 
-当前未支持整文件批量执行、路径参数替换及自动 AI 审核；交付时不要发明其他指令。已生成 SQL、通过审核、开始导出与文件完整生成是不同状态，按实际结果说明。
+当前未支持自动执行文件全部语句、独立命令行/服务器调度、并行批次、自动断点续跑、路径参数替换及自动 AI 审核；交付时不要发明其他指令。已生成 SQL、通过审核、开始导出与文件完整生成是不同状态，按实际结果说明。

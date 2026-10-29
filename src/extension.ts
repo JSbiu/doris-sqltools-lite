@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { mkdir } from 'node:fs/promises';
-import { join, basename, dirname, isAbsolute } from 'node:path';
+import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
@@ -16,9 +16,11 @@ import {
 } from './exports';
 import { buildExportFileName, normalizeExportDirectory, resolveOutputPath } from './exportPath';
 import { assertDirectExportSql } from './directExport';
+import { runBatchScript } from './batchScript';
+import { readBatchDefinition, parseBatchParameters, prepareBatchTask, createBatchFeedback, runBatchTask } from './batchExecution';
 import { createTsvFileWriter, type TsvFileWriter } from './tsvFileWriter';
 import { copyFeedback, saveFeedback, rememberFeedback, type FeedbackRecord } from './feedbackActions';
-import { formatDatabaseError } from './connectionDiagnostics';
+import { classifyDatabaseError, formatDatabaseError } from './connectionDiagnostics';
 import { openParameterForm } from './parameterForm';
 import {
   forgetParameterValues,
@@ -207,7 +209,7 @@ async function withDocumentOperation<T>(
     source.dispose();
     const active = state.cancellationSources.get(documentKey);
     const answer = active
-      ? await vscode.window.showInformationMessage('当前 SQL 文件已有查询、计划或导出正在执行。', '取消该操作')
+      ? await vscode.window.showInformationMessage('当前 SQL 文件已有查询、计划、导出或分批任务正在执行。', '取消该操作')
       : await vscode.window.showInformationMessage('当前 SQL 文件正在释放会话，请稍后重试。');
     if (answer === '取消该操作') active?.cancel();
     return undefined;
@@ -1218,6 +1220,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         showError('执行失败', error);
       }
     }),
+    vscode.commands.registerCommand('dorisSqlLite.runBatch', async () => {
+      try { await runBatch(manager, connectionSession, refreshStatusBars); }
+      catch (error) { showError('分批执行失败', error); }
+    }),
     vscode.commands.registerCommand('dorisSqlLite.explainQuery', async () => {
       try {
         await runQuery(manager, connectionSession, undefined, refreshStatusBars, true);
@@ -1522,6 +1528,174 @@ async function runQuery(
     });
 }
 
+function notifyWithFeedback(
+  message: string, feedback: FeedbackRecord | undefined, kind: 'info' | 'error' = 'info',
+): void {
+  const actions = ['复制 AI 反馈', '保存 AI 反馈…'];
+  const notice = kind === 'error'
+    ? vscode.window.showErrorMessage(message, ...actions)
+    : vscode.window.showInformationMessage(message, ...actions);
+  void notice.then(async (answer) => {
+    try {
+      if (answer === actions[0]) await copyFeedback(feedback);
+      if (answer === actions[1]) await saveFeedback(feedback);
+    } catch (error) { showError('反馈操作失败', error); }
+  });
+}
+
+function tokenSignal(token: vscode.CancellationToken): CancelSignal {
+  return {
+    get requested() { return token.isCancellationRequested; },
+    get reason() { return token.isCancellationRequested ? 'user' as const : undefined; },
+    onRequest: (listener) => token.onCancellationRequested(listener),
+  };
+}
+
+async function runBatch(
+  manager: ConnectionManager, state: ConnectionSessionState, onStateChanged?: () => void,
+): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== 'sql') {
+    void vscode.window.showInformationMessage('请先打开 SQL 文件。');
+    return;
+  }
+  const document = editor.document;
+  const text = document.getText();
+  const version = document.version;
+  const documentKey = document.uri.toString();
+  await withDocumentOperation(state, documentKey, onStateChanged, async (source, operation) => {
+    const origin = {
+      path: document.uri.scheme === 'file' ? document.uri.fsPath : document.uri.toString(),
+      startLine: 1, endLine: text.split('\n').length,
+      savedAtExecution: document.uri.scheme === 'file' && !document.isDirty,
+      changedSinceExecution: false as boolean | null,
+    };
+    const feedback: FeedbackRecord = {
+      sourceUri: document.uri, startedAt: Date.now(),
+      currentSource: () => ({ ...origin, changedSinceExecution: document.isClosed ? null : document.version !== version }),
+      value: {
+        name: basename(document.fileName), connectionName: '未选择', databaseType: null,
+        parameters: {}, source: origin, action: 'batch', status: 'cancelled', submitted: false,
+        generatedAt: '', durationMs: 0, sessionState: 'not-opened',
+      },
+    };
+    const details = feedback.value;
+    const entries = new Map<string, SessionEntry>();
+    try {
+      if (document.uri.scheme !== 'file') throw new Error('分批执行需要先把 SQL 保存为本地文件，以便定位参数脚本。');
+      if (vscode.workspace.isTrusted === false) throw new Error('参数脚本需要在受信任的工作区运行，请先核对并信任当前工作区。');
+      if (!configuredSqlParameters()) throw new Error('分批执行需要启用 dorisSqlLite.sqlParameters，以明确解析每批参数。');
+      const definition = readBatchDefinition(text);
+      definition.script = resolve(dirname(document.uri.fsPath), definition.script);
+      const profiles = manager.getProfiles();
+      // Resolve explicit connections before running the script. One optional
+      // picker supplies the fallback for every step without its own directive.
+      for (const step of [...definition.init, ...definition.steps]) {
+        if (step.connection) findDirectiveConnection(profiles, step.connection);
+      }
+      const fallback = [...definition.init, ...definition.steps].some((step) => !step.connection)
+        ? await chooseProfile(manager, state.documentConnections.get(documentKey) ?? state.defaultConnectionId, source.token)
+        : undefined;
+      if (source.token.isCancellationRequested || ([...definition.init, ...definition.steps].some((step) => !step.connection) && !fallback)) return;
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification, title: `分批执行 ${details.name}`, cancellable: true,
+      }, async (progress, token) => {
+        const subscription = token.onCancellationRequested(() => source.cancel());
+        if (token.isCancellationRequested) source.cancel();
+        const signal = tokenSignal(source.token);
+        try {
+          progress.report({ message: '正在运行参数脚本…' });
+          const output = await runBatchScript(definition.script, dirname(document.uri.fsPath), signal);
+          if (signal.requested) throw new QueryCancelledError();
+          const task = prepareBatchTask(definition, parseBatchParameters(output), (context) => context.connection
+            ? findDirectiveConnection(profiles, context.connection) : fallback!);
+          const batch = createBatchFeedback(task);
+          details.batch = batch;
+          const allSteps = [...task.init, ...task.steps];
+          details.connectionName = [...new Set(allSteps.map((step) => step.profile.name))].join('、');
+          const types = [...new Set(allSteps.map((step) => step.profile.type))];
+          details.databaseType = types.length === 1 ? types[0] : null;
+          const parameterText = (value: unknown): string => {
+            const json = JSON.stringify(value);
+            return json.length > 1500 ? json.slice(0, 1500) + '…（参数较长，已截断显示）' : json;
+          };
+          const describe = (steps: typeof allSteps): string => steps.length
+            ? steps.map((step) => `${step.name} → ${step.profile.name} (${step.profile.type})`).join('\n') : '无';
+          progress.report({ message: `已生成 ${task.batches.length} 批，等待启动确认…` });
+          const answer = await untilCancelled(vscode.window.showWarningMessage(
+            `即将顺序执行 ${task.batches.length} 批 SQL`,
+            { modal: true, detail: [
+              `SQL：${origin.path}`, `参数脚本：${task.script}`,
+              `初始化（仅一次）：\n${describe(task.init)}`, `每批步骤（按顺序）：\n${describe(task.steps)}`,
+              `首批参数：${parameterText(task.batches[0])}`, `末批参数：${parameterText(task.batches.at(-1))}`,
+              '失败或取消后停止后续步骤；已完成写入不会自动回滚、补偿或重试。执行期间请保持 VS Code 打开。',
+            ].join('\n\n') }, '开始执行',
+          ), source.token);
+          if (answer !== '开始执行' || signal.requested) return;
+          feedback.startedAt = Date.now();
+          details.status = await runBatchTask(task, batch, signal, async (step, sql, record) => {
+            let entry = entries.get(step.profile.id);
+            try {
+              if (signal.requested) throw new QueryCancelledError();
+              const current = manager.getProfiles().find((item) => item.id === step.profile.id);
+              if (!current || !sameConnectionTarget(step.profile, current) || step.profile.hiveAuth !== current.hiveAuth) {
+                throw new Error('连接配置已变化，分批任务已停止；不会重新连接或重放初始化。');
+              }
+              operation.profileId = step.profile.id;
+              if (entry) state.sessions.validate(state.sessions.snapshot(entry));
+              else {
+                progress.report({ message: `准备会话：${step.profile.name}…` });
+                entry = await state.sessions.open(operation, step.profile.id,
+                  () => manager.open(step.profile, configuredQueryIdleTimeoutMs(), source.token));
+                entries.set(step.profile.id, entry);
+              }
+              record.sessionState = 'retained';
+              if (signal.requested) throw new QueryCancelledError();
+              const session = state.sessions.startStatement(operation, entry);
+              record.submitted = true;
+              details.submitted = true;
+              return await session.execute(sql, signal, {
+                // MySQL announces columns from an event callback. Rejecting
+                // there would throw outside the async execution promise.
+                onColumns: () => undefined,
+                onRow: () => { throw new Error('分批步骤返回了结果行，任务已停止；请使用普通查询查看结果。'); },
+                onAffectedRows: () => undefined,
+              });
+            } finally {
+              if (entry) {
+                if (entry.valid && entry.session?.broken) await state.sessions.discard(entry);
+                record.sessionState = entry.valid && !entry.session?.broken ? 'retained' : 'lost';
+              }
+            }
+          }, (record) => progress.report({
+            message: `${record.phase === 'init' ? '初始化' : `第 ${record.batchIndex}/${batch.batchCount} 批`}：${record.name} · ${record.connectionName}…`,
+          }));
+          details.needsReview = batch.records.some((record) => record.needsReview);
+          details.error = batch.records.find((record) => record.status === 'failed' || record.status === 'cancelled')?.error ?? batch.error;
+        } finally { subscription.dispose(); }
+      });
+    } catch (error) {
+      details.status = source.token.isCancellationRequested || isQueryCancelled(error) ? 'cancelled' : 'failed';
+      details.error = formatDatabaseError(error);
+    } finally {
+      details.durationMs = Date.now() - feedback.startedAt;
+      details.generatedAt = new Date().toISOString();
+      const states = details.batch?.records.map((record) => record.sessionState) ?? [];
+      details.sessionState = states.includes('lost') ? 'lost' : states.includes('retained') ? 'retained' : 'not-opened';
+      rememberFeedback(feedback);
+      const stopped = details.batch?.records.find((record) => record.status === 'failed' || record.status === 'cancelled');
+      const completion = details.batch ? `已完成 ${details.batch.completedBatches}/${details.batch.batchCount} 批` : '尚未提交 SQL';
+      const position = stopped ? `；停止于${stopped.phase === 'init' ? '初始化' : `第 ${stopped.batchIndex} 批`}「${stopped.name}」` : '';
+      notifyWithFeedback(
+        `${details.name}：${details.status === 'success' ? '分批执行成功' : details.status === 'cancelled' ? '分批执行已取消' : '分批执行失败'}，${completion}${position}，耗时 ${formatDuration(details.durationMs)}。`
+          + (details.needsReview ? ' 已提交步骤的写入结果需核对。' : '')
+          + (details.error && (details.status === 'failed' || details.error.includes('进程树终止失败')) ? ` ${details.error}` : ''),
+        feedback, details.status === 'failed' ? 'error' : 'info',
+      );
+    }
+  });
+}
+
 async function chooseDirectExportPath(
   output: string | undefined,
   sourceUri: vscode.Uri,
@@ -1813,8 +1987,8 @@ async function executeQuery(
             readLimit === undefined ? {} : { onLimitReached: () => stop('limit') },
           );
           const sink: RowSink = {
-            onColumns: (columns) => collector.onColumns(columns),
-            onAffectedRows: (count) => collector.onAffectedRows(count),
+            onColumns: (columns) => { collector.onColumns(columns); if (details) details.hasResultSet = true; },
+            onAffectedRows: (count) => { collector.onAffectedRows(count); if (details) details.hasResultSet = false; },
             onRow: (row) => {
               collector.onRow(row);
               const total = collector.totalRows();
@@ -1829,10 +2003,17 @@ async function executeQuery(
           progress.report({ message: '正在执行…' });
           const session = connectionSession.sessions.startStatement(operation, entry);
           if (details) details.submitted = true;
-          await session.execute(executedSql, signal, sink);
+          const summary = await session.execute(executedSql, signal, sink);
+          if (details) details.hasResultSet = summary.hasResultSet;
           // Only a user cancel abandons the result here. A limit stop returns
           // the rows on purpose: they are exactly what was asked for.
-          if (stopReason === 'user' || operation.cancelled) {
+          if ((stopReason === 'user' || operation.cancelled) && summary.hasResultSet !== false) {
+            if (details) {
+              details.status = 'cancelled';
+              details.needsReview = details.submitted && details.hasResultSet !== true;
+            }
+            notifyWithFeedback(`已取消「${context?.name ?? profile.name}」，耗时 ${formatDuration(Date.now() - startedAt)}。`
+              + (details?.needsReview ? ' 已提交操作的完成情况需核对。' : ''), feedback);
             return;
           }
           // An injected statement ends by itself, so stopReason stays undefined
@@ -1846,6 +2027,8 @@ async function executeQuery(
             readLimit !== undefined &&
             collector.totalRows() >= readLimit;
           const view = collector.toView();
+          view.hasResultSet = summary.hasResultSet ?? view.hasResultSet;
+          view.affectedRows = summary.affectedRows;
           const readComplete = stopReason !== 'limit' && !capReached;
           // An injected LIMIT can stop exactly at the panel cap, without an
           // extra row reaching the collector. The full answer is still unknown
@@ -1853,9 +2036,16 @@ async function executeQuery(
           if (!readComplete) view.truncated = true;
           if (details) {
             details.status = 'success'; details.readComplete = readComplete;
+            details.hasResultSet = view.hasResultSet;
             details.totalRows = details.readComplete ? view.totalRows : null;
             details.displayedRows = view.rows.length; details.truncated = view.truncated;
-            if (view.columns.length === 0) details.affectedRows = view.affectedRows;
+            if (!view.hasResultSet) details.affectedRows = view.affectedRows;
+          }
+          if (!view.hasResultSet) {
+            notifyWithFeedback(
+              `「${context?.name ?? profile.name}」执行成功，${view.affectedRows === null ? '影响行数未知' : `影响 ${view.affectedRows} 行`}，耗时 ${formatDuration(Date.now() - startedAt)}。`, feedback,
+            );
+            return;
           }
           ResultPanel.open(view, {
             connectionName: profile.name,
@@ -1887,13 +2077,21 @@ async function executeQuery(
             }
           }
           if (isQueryCancelled(error) || (!outputMode && isCancelled(token))) {
-            if (details) details.status = 'cancelled';
-            vscode.window.showInformationMessage(outputMode
+            if (details) { details.status = 'cancelled'; details.needsReview = !outputMode && details.submitted && details.hasResultSet !== true; }
+            notifyWithFeedback(outputMode
               ? '已取消执行并导出，未完成的临时文件已清理。'
-              : `已取消 ${profile.name} 上的查询。`);
+              : `已取消「${context?.name ?? profile.name}」，耗时 ${formatDuration(Date.now() - startedAt)}。`
+                + (details?.needsReview ? ' 已提交操作的完成情况需核对。' : ''), feedback);
           } else {
-            if (details) { details.status = 'failed'; details.error = formatDatabaseError(error); }
-            showError(`${outputMode ? '执行并导出失败' : '执行失败'}（${profile.name}）`, error);
+            if (details) {
+              details.status = 'failed'; details.error = formatDatabaseError(error);
+              details.needsReview = !outputMode && details.submitted && (entry?.session?.broken === true || classifyDatabaseError(error).kind === 'network');
+            }
+            if (outputMode) showError(`执行并导出失败（${profile.name}）`, error);
+            else notifyWithFeedback(
+              `「${context?.name ?? profile.name}」执行失败，耗时 ${formatDuration(Date.now() - startedAt)}。 ${formatDatabaseError(error)}`
+                + (details?.needsReview ? ' 已提交操作的写入结果需核对。' : ''), feedback, 'error',
+            );
           }
         }
       },
