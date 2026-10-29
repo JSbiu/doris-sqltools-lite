@@ -1,4 +1,5 @@
 import { redactErrorMessage, type DatabaseType } from './connectionSecurity';
+import type { BatchFeedback } from './batchExecution';
 
 export interface FeedbackSource {
   path: string;
@@ -14,7 +15,7 @@ export interface SqlFeedback {
   databaseType: DatabaseType | null;
   parameters: Readonly<Record<string, string>>;
   source: FeedbackSource;
-  action: 'query' | 'export' | 'explain';
+  action: 'query' | 'export' | 'explain' | 'batch';
   status: 'success' | 'failed' | 'cancelled';
   submitted: boolean;
   generatedAt: string;
@@ -25,7 +26,10 @@ export interface SqlFeedback {
   readComplete?: boolean;
   truncated?: boolean;
   previewLimit?: number;
+  hasResultSet?: boolean;
   affectedRows?: number | null;
+  needsReview?: boolean;
+  batch?: BatchFeedback;
   resultFile?: string;
   planFile?: string;
   temporaryFile?: string;
@@ -69,7 +73,24 @@ export function buildSqlFeedback(feedback: SqlFeedback): string {
     readComplete: feedback.readComplete,
     truncated: feedback.truncated,
     previewLimit: feedback.previewLimit,
+    hasResultSet: feedback.hasResultSet,
     affectedRows: feedback.affectedRows,
+    needsReview: feedback.needsReview,
+    batch: feedback.batch ? {
+      script: feedback.batch.script, batchCount: feedback.batch.batchCount,
+      completedBatches: feedback.batch.completedBatches,
+      error: feedbackMessage(feedback.batch.error),
+      initSteps: [...feedback.batch.initSteps], steps: [...feedback.batch.steps],
+      records: feedback.batch.records.map((record) => ({
+        phase: record.phase, batchIndex: record.batchIndex, name: record.name,
+        connectionName: record.connectionName, databaseType: record.databaseType,
+        parameters: Object.fromEntries(Object.entries(record.parameters)),
+        startLine: record.startLine, endLine: record.endLine,
+        status: record.status, submitted: record.submitted, durationMs: record.durationMs,
+        affectedRows: record.affectedRows, sessionState: record.sessionState,
+        needsReview: record.needsReview, error: feedbackMessage(record.error),
+      })),
+    } : undefined,
     resultFile: feedback.resultFile,
     planFile: feedback.planFile,
     temporaryFile: feedback.temporaryFile,
@@ -79,7 +100,16 @@ export function buildSqlFeedback(feedback: SqlFeedback): string {
     sessionState: feedback.sessionState,
   };
   const notes: string[] = [];
-  if (data.databaseType === null) notes.push('- `databaseType=null`：数据库类型未知。');
+  if (data.databaseType === null) notes.push(data.batch
+    ? '- 各步骤的连接、类型、实际参数与执行状态见 `batch.records`。'
+    : '- `databaseType=null`：数据库类型未知。');
+  if (data.affectedRows === null || data.batch?.records.some((record) => record.affectedRows === null)) {
+    notes.push('- `affectedRows=null`：服务端未提供影响行数。');
+  }
+  if (data.needsReview || data.batch?.records.some((record) => record.needsReview)) {
+    notes.push('- `needsReview=true`：已提交操作的写入结果需核对；不会自动重试或回滚。');
+  }
+  if (data.batch) notes.push('- `batch.records` 的行号对应 `source.path`；`batchIndex` 从 1 开始，`not-run` 表示未执行。');
   if (data.totalRows === null) notes.push('- `totalRows=null`：总行数未知。');
   if (!data.source.savedAtExecution) notes.push('- `source.savedAtExecution=false`：当时来源未保存。');
   if (data.source.changedSinceExecution === true) {

@@ -104,3 +104,13 @@ test('@output belongs to its statement and is inherited when selecting only the 
     assert.throws(() => resolveStatementContext(`${header}\nSELECT 1;`, 0));
   }
 });
+
+test('file batch directives are stripped in ordinary execution and cannot appear on later statements', () => {
+  const header = '-- @batch-script: ./params.ps1\n-- @batch-steps: ["写入"]\n-- @batch-init: []\n';
+  const sql = header + '-- @name: 写入\nINSERT INTO target VALUES (1);';
+  const context = resolveStatementContext(sql, 0);
+  assert.equal(context.sql, 'INSERT INTO target VALUES (1);');
+  assert.equal(context.name, '写入');
+  assert.throws(() => resolveStatementContext('SELECT 1;\n' + sql, 100), /第一条 SQL/);
+  assert.throws(() => resolveStatementContext(header.replace('["写入"]', '写入') + 'SELECT 1;', 0), /JSON 数组/);
+});

@@ -18,6 +18,9 @@ interface Header {
   connection?: string;
   name?: string;
   output?: string;
+  batchScript?: string;
+  batchSteps?: string[];
+  batchInit?: string[];
   removals: SqlStatementRange[];
 }
 
@@ -51,10 +54,11 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
       const match = /^--\s*@([a-z-]+):\s*(.*)$/.exec(comment);
       if (!match) throw new Error(`SQL 注释格式错误：${comment}`);
       const [, key, value] = match;
-      if (!['default-connection', 'default-param', 'connection', 'param', 'name', 'output'].includes(key)) {
+      if (!['default-connection', 'default-param', 'connection', 'param', 'name', 'output',
+        'batch-script', 'batch-steps', 'batch-init'].includes(key)) {
         throw new Error(`未知 SQL 注释 @${key}。`);
       }
-      if (key.startsWith('default-') && !fileDefaults) {
+      if ((key.startsWith('default-') || key.startsWith('batch-')) && !fileDefaults) {
         throw new Error(`@${key} 只能写在文件第一条 SQL 之前。`);
       }
       let unique = key;
@@ -73,6 +77,9 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
         if (key === 'output') header.output = value.trim();
         if (key === 'connection') header.connection = value.trim();
         if (key === 'default-connection') header.defaultConnection = value.trim();
+        if (key === 'batch-script') header.batchScript = value.trim();
+        if (key === 'batch-steps') header.batchSteps = batchNames(value, key);
+        if (key === 'batch-init') header.batchInit = batchNames(value, key);
       }
       if (seen.has(unique)) throw new Error(`重复的 SQL 注释 @${unique}。`);
       seen.add(unique);
@@ -81,6 +88,30 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
     index = end;
   }
   return header;
+}
+
+function batchNames(value: string, key: string): string[] {
+  let names: unknown;
+  try { names = JSON.parse(value); } catch { /* Report the directive, not JSON internals. */ }
+  if (!Array.isArray(names) || names.some((name) => typeof name !== 'string' || !name.trim())) {
+    throw new Error(`@${key} 应为 SQL 名称的 JSON 数组，例如 ["清理当天", "回填当天"]。`);
+  }
+  if (new Set(names).size !== names.length) throw new Error(`@${key} 中的名称不能重复。`);
+  return names;
+}
+
+export function readBatchDirectives(document: string): { script: string; steps: string[]; init: string[] } {
+  const first = findSqlStatementRanges(document)[0];
+  if (!first) throw new Error('没有可分批执行的 SQL。');
+  const header = readHeader(document.slice(first.start, first.end), true);
+  if (!header.batchScript || !header.batchSteps?.length) {
+    throw new Error('分批执行需要在文件头声明 @batch-script 和非空的 @batch-steps。');
+  }
+  const init = header.batchInit ?? [];
+  if (init.some((name) => header.batchSteps!.includes(name))) {
+    throw new Error('@batch-init 和 @batch-steps 不能包含同一个 SQL 名称。');
+  }
+  return { script: header.batchScript, steps: header.batchSteps, init };
 }
 
 function withoutDirectives(sql: string, header: Header): string {
