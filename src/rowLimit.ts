@@ -45,6 +45,10 @@ export function applyRowLimit(sql: string, limit: number): string | undefined {
     return undefined;
   }
 
+  if (hasUnsafeTailClause(split.body)) {
+    return undefined;
+  }
+
   // A cap of our own would collide with the user's: `... LIMIT 10 LIMIT 1000` is
   // a syntax error, and silently rewriting a LIMIT the user wrote is worse.
   if (hasTopLevelLimit(split.body)) {
@@ -174,14 +178,28 @@ function endOfLine(sql: string, index: number): number {
   return newline < 0 ? sql.length : newline + 1;
 }
 
-// True when the statement already carries a LIMIT of its own. Only depth 0
-// counts: `WHERE id IN (SELECT id FROM t LIMIT 5)` has a LIMIT that bounds the
-// subquery, not the answer, and appending an outer one is both valid and exactly
-// what we want. Strings and comments are skipped so that `SELECT 'limit'` and
-// `-- LIMIT 10` in a note do not disable the optimisation.
-function hasTopLevelLimit(sql: string): boolean {
+// Some SELECT variants place syntax after the point where a normal LIMIT is
+// accepted. Their plans still benefit from the interrupt path, so keep the
+// rewrite conservative rather than changing the statement into a syntax error.
+function hasUnsafeTailClause(sql: string): boolean {
+  const words = topLevelWords(sql);
+  const has = (word: string): boolean => words.includes(word);
+  const sequence = (...expected: string[]): boolean =>
+    words.some((_, start) => expected.every((word, index) => words[start + index] === word));
+
+  return has('INTO') || has('PROCEDURE')
+    || sequence('FOR', 'UPDATE') || sequence('FOR', 'SHARE')
+    || sequence('LOCK', 'IN', 'SHARE', 'MODE')
+    || sequence('DISTRIBUTE', 'BY') || sequence('SORT', 'BY') || sequence('CLUSTER', 'BY');
+}
+
+// Only depth 0 counts: `WHERE id IN (SELECT id FROM t LIMIT 5)` has a LIMIT that
+// bounds the subquery rather than the answer. Strings and comments are skipped,
+// so words in them cannot disable or trigger the rewrite.
+function topLevelWords(sql: string): string[] {
   let depth = 0;
   let index = 0;
+  const words: string[] = [];
 
   while (index < sql.length) {
     const character = sql[index];
@@ -214,16 +232,21 @@ function hasTopLevelLimit(sql: string): boolean {
       index += 1;
       continue;
     }
-    if (depth === 0 && (character === 'l' || character === 'L')) {
-      // The 6-character window is `limit` plus one: `\b` then rejects `LIMITED`.
-      if (/^limit\b/i.test(sql.slice(index, index + 6))) {
-        return true;
-      }
+    if (depth === 0 && /[A-Za-z_]/.test(character)) {
+      let end = index + 1;
+      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end])) end += 1;
+      words.push(sql.slice(index, end).toUpperCase());
+      index = end;
+      continue;
     }
     index += 1;
   }
 
-  return false;
+  return words;
+}
+
+function hasTopLevelLimit(sql: string): boolean {
+  return topLevelWords(sql).includes('LIMIT');
 }
 
 // Returns the index just past the closing quote. Doubled quotes (`''`) and
