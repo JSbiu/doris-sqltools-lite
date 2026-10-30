@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -68,6 +68,23 @@
       {
         "command": "dorisSqlLite.saveLastFeedback",
         "title": "Doris SQL Lite: Save Last SQL Feedback"
+      },
+      {
+        "command": "dorisSqlLite.toggleDataMode",
+        "title": "Doris SQL Lite: Toggle Plain / Encrypted Mode",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "dorisSqlLite.exportDataKeys",
+        "title": "Doris SQL Lite: Export Data Encryption Keys"
+      },
+      {
+        "command": "dorisSqlLite.importDataKeys",
+        "title": "Doris SQL Lite: Import Data Encryption Keys"
+      },
+      {
+        "command": "dorisSqlLite.decryptSelectedValue",
+        "title": "Doris SQL Lite: Decrypt Selected Value"
       },
       {
         "command": "dorisSqlLite.cancelQuery",
@@ -141,6 +158,11 @@
     },
     "menus": {
       "editor/context": [
+        {
+          "command": "dorisSqlLite.decryptSelectedValue",
+          "when": "editorHasSelection",
+          "group": "navigation@4"
+        },
         {
           "command": "dorisSqlLite.resetFileSessions",
           "when": "editorTextFocus && resourceLangId == sql",

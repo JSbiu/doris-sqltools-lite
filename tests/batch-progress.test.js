@@ -59,6 +59,24 @@ function fixture(t, clock = virtualClock()) {
   return { clock, messages, progress, latest: () => messages.at(-1) };
 }
 
+test('live mode changes replace parameter text immediately without changing execution records or task counters', (t) => {
+  const { createDataKey } = require('../out/fieldEncryption');
+  const { createProtection, setDataMode, getDataMode } = require('../out/dataProtection');
+  const key = createDataKey();
+  const protection = createProtection({ biz_date: 'date' }, [], key, () => key, 'encrypted');
+  const clock = virtualClock(); const messages = [];
+  const progress = new BatchProgress((message) => messages.push(message), { ...clock.options,
+    parameters: (record) => protection.withMode(getDataMode()).parameters(record.parameters) });
+  t.after(() => { progress.dispose(); setDataMode('encrypted'); });
+  const record = step({ parameters: { biz_date: 'private-parameter' } });
+  const live = feedback([record]); progress.prepare(live); progress.startTask();
+  setDataMode('plain'); progress.setStep(record); assert.match(messages.at(-1), /private-parameter/);
+  setDataMode('encrypted'); progress.refresh();
+  assert.ok(!messages.at(-1).includes('private-parameter')); assert.match(messages.at(-1), /enc:v1:/);
+  live.completedBatches = 1; clock.advance(1000); assert.match(messages.at(-1), /已完成 1\/60 批/);
+  assert.equal(record.parameters.biz_date, 'private-parameter');
+});
+
 test('generation and confirmation refresh elapsed time without starting the task clock', (t) => {
   const { clock, messages, progress, latest } = fixture(t);
   assert.match(latest(), /^生成参数 · 任务未启动 · 阶段 0秒$/);

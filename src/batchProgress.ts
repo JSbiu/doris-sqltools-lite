@@ -5,6 +5,7 @@ export type BatchProgressPhase = 'generating' | 'confirming' | 'connecting' | 'e
 export interface BatchProgressOptions {
   now?: () => number;
   schedule?: (callback: () => void, intervalMs: number) => { dispose(): void };
+  parameters?: (record: BatchStepFeedback) => BatchParameters;
 }
 
 const PHASE_LABELS: Record<BatchProgressPhase, string> = {
@@ -54,7 +55,7 @@ export class BatchProgress {
   private step: BatchStepFeedback | undefined;
   private connectionName: string | undefined;
 
-  public constructor(private readonly report: (message: string) => void, options: BatchProgressOptions = {}) {
+  public constructor(private readonly report: (message: string) => void, private readonly options: BatchProgressOptions = {}) {
     this.now = options.now ?? Date.now;
     this.phaseStartedAt = this.now();
     this.timer = (options.schedule ?? scheduleRefresh)(() => this.publish(), 1000);
@@ -100,6 +101,8 @@ export class BatchProgress {
     this.timer.dispose();
   }
 
+  public refresh(): void { this.publish(); }
+
   private publish(): void {
     if (this.disposed) return;
     const now = this.now();
@@ -109,7 +112,7 @@ export class BatchProgress {
       parts.push(this.step.phase === 'init' ? '初始化' : `第 ${this.step.batchIndex} 批`, `步骤：${this.step.name}`);
     }
     if (this.connectionName !== undefined) parts.push(`连接：${this.connectionName}`);
-    if (this.step) parts.push(summarizeParameters(this.step.parameters));
+    if (this.step) parts.push(summarizeParameters(this.options.parameters?.(this.step) ?? this.step.parameters));
     if (this.taskStartedAt === undefined) {
       parts.push('任务未启动', `阶段 ${formatElapsed(now - this.phaseStartedAt)}`);
     } else {

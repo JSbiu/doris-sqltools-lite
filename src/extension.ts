@@ -2,6 +2,12 @@ import * as vscode from 'vscode';
 import { mkdir } from 'node:fs/promises';
 import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { DataKeys } from './dataKeys';
+import { registerDataCommands } from './dataCommands';
+import {
+  createProtection, decodeParameter, getDataMode, loadParameterKeys,
+  onDataModeChange, protectSink, PROTECTED_MATERIAL_NOTICE, type ProtectionProjection,
+} from './dataProtection';
 import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, sameConnectionTarget, showError } from './connectionManager';
 import { openConnectionForm } from './connectionForm';
@@ -52,7 +58,6 @@ import {
   neverCancelled,
   type CancelSignal,
   type QuerySession,
-  type RowSink,
   type StopReason,
 } from './querySession';
 
@@ -145,6 +150,28 @@ let activeConnectionSession: ConnectionSessionState | undefined;
 // Settings Sync, and neither is settings.json -- these are business values, not
 // configuration.
 let parameterState: ParameterMemento | undefined;
+let dataKeys: DataKeys | undefined;
+
+function protectedMessage(error: unknown, protection?: ProtectionProjection, protectRaw = false): string {
+  return (getDataMode() === 'encrypted' || protection?.mode === 'encrypted') && (protection || protectRaw)
+    ? `${classifyDatabaseError(error).kind}：${PROTECTED_MATERIAL_NOTICE}` : formatDatabaseError(error);
+}
+
+function modeLabel(protection?: ProtectionProjection): string {
+  return protection ? `（${protection.mode === 'encrypted' ? '加密' : '明文'}模式）` : '';
+}
+
+function declaresProtection(sql: string): boolean {
+  return /--\s*@(?:default-)?encrypt\b/i.test(sql);
+}
+
+async function statementProtection(context: { encryption?: Readonly<Record<string, string>>; requiredEncryption?: readonly string[] }): Promise<ProtectionProjection | undefined> {
+  if (!context.encryption || !Object.keys(context.encryption).length) return undefined;
+  if (!dataKeys) throw new Error('字段加密密钥存储尚未就绪，请重新加载窗口。');
+  const mode = getDataMode();
+  const key = await dataKeys.active();
+  return createProtection(context.encryption, context.requiredEncryption ?? [], key, (id) => dataKeys!.lookup(id), mode);
+}
 
 interface ResultPanelMetadata {
   connectionName: string;
@@ -160,6 +187,7 @@ interface ResultPanelMetadata {
   // no parameters.
   parameters?: Record<string, string>;
   feedback?: FeedbackRecord;
+  protection?: ProtectionProjection;
   origin?: ResultOrigin;
   // Enough to run the statement again. Rows past maxResultRows are counted but
   // never stored, so a truncated result has no full set in memory to export.
@@ -175,6 +203,8 @@ interface ResultOrigin {
 interface ResultRerun extends ResultOrigin {
   snapshot: SessionSnapshot;
   sql: string;
+  protection?: ProtectionProjection;
+  parameters?: Readonly<Record<string, string>>;
 }
 
 interface ExportOperation {
@@ -315,14 +345,20 @@ class ResultPanel {
     );
 
     const resultPanel = new ResultPanel(panel);
+    const modeSubscription = onDataModeChange(() => resultPanel.render());
     ResultPanel.current = resultPanel;
     resultPanel.update(result, metadata);
     panel.onDidDispose(() => {
+      modeSubscription.dispose();
       if (ResultPanel.current === resultPanel) {
         ResultPanel.current = undefined;
       }
     });
     panel.webview.onDidReceiveMessage(async (message: { type?: unknown; format?: unknown; chooseLocation?: unknown }) => {
+      if (message.type === 'toggle-mode') {
+        await vscode.commands.executeCommand('dorisSqlLite.toggleDataMode');
+        return;
+      }
       if (message.type === 'copy') {
         try {
           await resultPanel.copyToClipboard();
@@ -366,7 +402,8 @@ class ResultPanel {
   }
 
   private get rows(): Row[] {
-    return this.result.rows;
+    const projection = this.metadata.protection?.withMode(getDataMode());
+    return projection ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
   }
 
   private get columns(): string[] {
@@ -378,6 +415,15 @@ class ResultPanel {
   }
 
   private render(): void {
+    try { this.renderResult(); }
+    catch (error) {
+      if (!this.metadata.protection) throw error;
+      // Clear a previous plain DOM even if the new projection fails.
+      this.panel.webview.html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none';"></head><body>受保护结果暂时无法显示，请核对字段类型或通过状态栏切换模式。</body></html>`;
+    }
+  }
+
+  private renderResult(): void {
     const scriptNonce = nonce();
     const shownRows = this.rows.map((row) =>
       this.columns.map((column) => {
@@ -419,7 +465,8 @@ class ResultPanel {
         : `<div class="notice">已读取 ${this.result.totalRows} 行后停止（达到读取上限，结果不止这些）。显示前 ${this.metadata.maxRows} 行，复制同样只取这些行；导出不受影响，会重新执行该查询并写出全部结果。</div>`;
     // What was actually substituted, not what the file says: with ${...} in the
     // statement the editor no longer shows the values that ran.
-    const parameterEntries = Object.entries(this.metadata.parameters ?? {});
+    const projection = this.metadata.protection?.withMode(getDataMode());
+    const parameterEntries = Object.entries(projection?.parameters(this.metadata.parameters ?? {}) ?? this.metadata.parameters ?? {});
     const parameterNotice = parameterEntries.length === 0
       ? ''
       : `<div class="params"><span class="params-label">本次参数</span>${parameterEntries
@@ -481,6 +528,7 @@ class ResultPanel {
     .success-state { display: flex; align-items: center; gap: 12px; padding: 24px; border: 1px solid var(--vscode-panel-border); }
     .success-state p { margin: 4px 0 0; color: var(--vscode-descriptionForeground); }
     .success-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-testing-iconPassed); font-weight: 700; }
+    .data-mode { font-weight: 600; border: 1px solid var(--vscode-focusBorder); }
   </style>
 </head>
 <body>
@@ -501,6 +549,7 @@ class ResultPanel {
     ` : ''}
     <button class="ghost" data-action="copy-feedback" data-default-label="复制 AI 反馈">复制 AI 反馈</button>
     <button class="ghost" data-action="save-feedback" data-default-label="保存 AI 反馈…">保存 AI 反馈…</button>
+    <button class="ghost data-mode" id="data-mode" title="统一切换当前窗口的输出模式，仅保护注释声明字段">${projection ? (projection.mode === 'encrypted' ? '加密模式' : '明文模式') : '未配置加密字段'}</button>
   </div>
   ${truncatedNotice}
   ${parameterNotice}
@@ -508,6 +557,7 @@ class ResultPanel {
   ${resultContent}
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
+    document.getElementById('data-mode')?.addEventListener('click', () => api.postMessage({ type: 'toggle-mode' }));
     const copyButton = document.querySelector('button[data-action="copy"]');
     const exportButton = document.querySelector('button[data-export="default"]');
     const exportElsewhereButton = document.querySelector('button[data-export="custom"]');
@@ -655,24 +705,26 @@ class ResultPanel {
   }
 
   private async export(format: ExportFormat, options: { chooseLocation?: boolean } = {}): Promise<boolean> {
+    const projection = this.metadata.protection?.withMode(getDataMode());
     const origin = this.metadata.origin;
     const original = this.metadata.feedback;
     const perform = async (operation?: ExportOperation): Promise<boolean> => {
       const record: FeedbackRecord | undefined = original ? {
         sourceUri: original.sourceUri, currentSource: original.currentSource, startedAt: Date.now(),
+        protection: projection,
         value: { name: original.value.name, connectionName: original.value.connectionName,
           databaseType: original.value.databaseType, parameters: original.value.parameters, source: original.value.source,
           action: 'export', status: 'cancelled', submitted: false, generatedAt: '', durationMs: 0,
           rowsRead: 0, totalRows: null, readComplete: false, sessionState: 'not-opened' },
       } : undefined;
       try {
-        return await this.exportResult(format, options, operation, record);
+        return await this.exportResult(format, options, operation, record, projection);
       } catch (error) {
         if (record) {
           record.value.status = isQueryCancelled(error) ? 'cancelled' : 'failed';
           record.value.error ??= formatDatabaseError(error);
         }
-        throw error;
+        throw new Error(protectedMessage(error, projection), { cause: error });
       } finally {
         if (record) {
           record.value.durationMs = Date.now() - record.startedAt;
@@ -689,11 +741,12 @@ class ResultPanel {
 
   private async exportResult(
     format: ExportFormat, options: { chooseLocation?: boolean }, operation?: ExportOperation, feedback?: FeedbackRecord,
+    projection?: ProtectionProjection,
   ): Promise<boolean> {
     const extension = format;
     const title = this.title;
     const columns = this.columns;
-    const keptRows = this.rows;
+    const keptRows = this.result.rows;
     const totalRows = this.result.totalRows;
     // Rows past maxResultRows are counted but discarded, so a truncated result
     // can only be exported by running the statement a second time.
@@ -746,16 +799,16 @@ class ResultPanel {
       const target = join(directory, defaultName);
       try {
         await mkdir(directory, { recursive: true });
-        const written = await this.exportTo(vscode.Uri.file(target), columns, keptRows, rerun, operation, feedback);
+        const written = await this.exportTo(vscode.Uri.file(target), columns, keptRows, rerun, operation, feedback, projection);
         if (written === undefined) {
           return false;
         }
-        vscode.window.showInformationMessage(`已导出 ${written} 行到 ${target}`);
+        vscode.window.showInformationMessage(`已导出 ${written} 行到 ${target}${modeLabel(projection)}`);
         return true;
       } catch (error) {
         // A database failure or a later file-write failure must not silently
         // run the SQL a second time via the alternate-location fallback.
-        if (error instanceof SessionExpiredError || (rerun && rerun.snapshot.entry.revision !== rerun.snapshot.revision)) throw error;
+        if (projection || error instanceof SessionExpiredError || (rerun && rerun.snapshot.entry.revision !== rerun.snapshot.revision)) throw error;
         // A stale or unwritable default directory must never block the export.
         const reason = error instanceof Error ? error.message : String(error);
         void vscode.window.showWarningMessage(`写入默认导出目录失败（${reason}），请选择其他位置。`);
@@ -775,11 +828,11 @@ class ResultPanel {
       return false;
     }
 
-    const written = await this.exportTo(uri, columns, keptRows, rerun, operation, feedback);
+    const written = await this.exportTo(uri, columns, keptRows, rerun, operation, feedback, projection);
     if (written === undefined) {
       return false;
     }
-    vscode.window.showInformationMessage(`已导出 ${written} 行到 ${uri.fsPath}`);
+    vscode.window.showInformationMessage(`已导出 ${written} 行到 ${uri.fsPath}${modeLabel(projection)}`);
     return true;
   }
 
@@ -794,6 +847,7 @@ class ResultPanel {
     rerun: ResultRerun | undefined,
     operation?: ExportOperation,
     feedback?: FeedbackRecord,
+    projection?: ProtectionProjection,
   ): Promise<number | undefined> {
     const chunkRows = configuredExportChunkRows();
     const escapeFormulas = configuredEscapeFormulas();
@@ -837,10 +891,11 @@ class ResultPanel {
           writerStarted = true;
           await writer.begin();
           if (rerun) {
-            await runForExport(rerun, writer, exportToken, operation!.operation, feedback);
+            await runForExport(rerun, writer, exportToken, operation!.operation, feedback, projection);
           } else {
+            projection?.validate(columns, this.metadata.parameters ?? {}, true);
             for (const row of keptRows) {
-              await writer.write(row);
+              await writer.write(projection?.row(row) ?? row);
             }
           }
           written = await writer.finish();
@@ -874,7 +929,8 @@ class ResultPanel {
   }
 
   public async copyToClipboard(): Promise<void> {
-    const rows = this.rows;
+    const projection = this.metadata.protection?.withMode(getDataMode());
+    const rows = projection ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
     await vscode.env.clipboard.writeText(toTsv(rows, this.columns));
     if (this.result.truncated) {
       vscode.window.showInformationMessage(
@@ -894,6 +950,7 @@ async function runForExport(
   token: vscode.CancellationToken,
   operation: DocumentOperation,
   feedback?: FeedbackRecord,
+  projection?: ProtectionProjection,
 ): Promise<void> {
   const entry = rerun.state.sessions.validate(rerun.snapshot);
   const listeners = new Set<() => void>();
@@ -922,14 +979,15 @@ async function runForExport(
   });
 
   try {
-    const sink: RowSink = {
+    const protectedRows = protectSink({
       onColumns: () => undefined,
       onAffectedRows: () => undefined,
       onRow: (row) => { if (feedback) feedback.value.rowsRead = (feedback.value.rowsRead ?? 0) + 1; return writer.write(row); },
-    };
+    }, projection, rerun.parameters ?? {});
     const session = rerun.state.sessions.startStatement(operation, entry);
     if (feedback) feedback.value.submitted = true;
-    await session.execute(rerun.sql, signal, sink);
+    await session.execute(rerun.sql, signal, protectedRows.sink);
+    protectedRows.check();
     if (token.isCancellationRequested) {
       throw new QueryCancelledError('导出已取消。');
     }
@@ -1048,6 +1106,8 @@ function createTsvWriter(
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  dataKeys = new DataKeys(context.secrets);
+  registerDataCommands(context, dataKeys);
   const manager = new ConnectionManager(context);
   const provider = new ConnectionProvider(manager);
   // Kept only for the current extension host session; never persisted to settings.
@@ -1421,6 +1481,7 @@ async function prepareStatementSql(
   documentLabel: string,
   commentValues: Readonly<Record<string, string>> = {},
   cancellationToken?: vscode.CancellationToken,
+  protection?: ProtectionProjection,
 ): Promise<{ sql: string; used: Record<string, string> } | undefined> {
   if (!configuredSqlParameters()) {
     // Still unwrap $$ escapes: they are part of the template's meaning either way.
@@ -1432,27 +1493,39 @@ async function prepareStatementSql(
     return { sql: unescapeDollarPlaceholders(sql), used: {} };
   }
 
+  const load = async (values: Readonly<Record<string, string>>): Promise<void> => {
+    if (protection) await loadParameterKeys(values, protection.rules, dataKeys!);
+  };
+  for (const parameter of parameters) {
+    for (const candidate of parameter.candidates) await load({ [parameter.name]: candidate });
+  }
+  await load(commentValues);
+  const transform = protection ? (name: string, value: string) => decodeParameter(name, value, protection.rules, dataKeys!) : undefined;
+
   // Explicit comment values and inline defaults need no second confirmation.
   // Only unresolved values need the existing parameter form.
-  const supplied = resolveSqlParameters(sql, commentValues);
+  const supplied = resolveSqlParameters(sql, commentValues, transform);
   if (supplied.missing.length === 0) {
     return { sql: supplied.sql, used: { ...supplied.used } };
   }
 
   const declarations: Record<string, string> = {};
   for (const parameter of parameters) {
-    declarations[parameter.name] = declarationText(parameter);
+    declarations[parameter.name] = protection && Object.hasOwn(protection.rules, parameter.name)
+      ? parameter.candidates.map((value) => protection.withMode('encrypted').parameters({ [parameter.name]: value }, true)[parameter.name]).join(', ')
+      : declarationText(parameter);
   }
+  const initialValues = { ...(parameterState ? readParameterValues(parameterState, documentKey, declarations) : {}), ...commentValues };
+  await load(initialValues);
 
   const decision = await openParameterForm({
     documentLabel,
     sql,
     parameters,
     fixedValues: commentValues,
+    protection: protection?.withMode(getDataMode()),
     cancellationToken,
-    initialValues: { ...(parameterState
-      ? readParameterValues(parameterState, documentKey, declarations)
-      : {}), ...commentValues },
+    initialValues,
   });
   if (!decision) {
     return undefined;
@@ -1461,7 +1534,8 @@ async function prepareStatementSql(
     return { sql: unescapeDollarPlaceholders(sql), used: {} };
   }
 
-  const resolution = resolveSqlParameters(sql, { ...decision.values, ...commentValues });
+  await load(decision.values);
+  const resolution = resolveSqlParameters(sql, { ...decision.values, ...commentValues }, transform);
   if (resolution.missing.length > 0) {
     // The panel will not submit with an unanswered parameter, so this is a
     // backstop: a placeholder must never reach the server by accident, because
@@ -1474,7 +1548,8 @@ async function prepareStatementSql(
 
   if (parameterState) {
     try {
-      await rememberParameterValues(parameterState, documentKey, decision.values, declarations);
+      const remembered = protection?.withMode('encrypted').parameters(decision.values, true) ?? decision.values;
+      await rememberParameterValues(parameterState, documentKey, remembered, declarations);
     } catch {
       // Remembering is a convenience; a state write failure must not block a query.
     }
@@ -1508,6 +1583,7 @@ async function runQuery(
       };
       const record: FeedbackRecord = {
         sourceUri: document.uri, startedAt: Date.now(),
+        protectRaw: declaresProtection(document.getText()),
         currentSource: () => ({ ...origin, changedSinceExecution: document.isClosed ? null : document.version !== version }),
         value: { name: basename(document.fileName), connectionName: '未选择', databaseType: null,
           parameters: {}, source: origin, action: explain ? 'explain' : directExport ? 'export' : 'query',
@@ -1520,6 +1596,7 @@ async function runQuery(
           record.value.status = isQueryCancelled(error) ? 'cancelled' : 'failed';
           record.value.error = formatDatabaseError(error);
         }
+        if (record.protectRaw && getDataMode() === 'encrypted') throw new Error(protectedMessage(error, record.protection, true), { cause: error });
         throw error;
       } finally {
         record.value.durationMs = Date.now() - record.startedAt;
@@ -1573,6 +1650,7 @@ async function runBatch(
     };
     const feedback: FeedbackRecord = {
       sourceUri: document.uri, startedAt: Date.now(),
+      protectRaw: declaresProtection(text),
       currentSource: () => ({ ...origin, changedSinceExecution: document.isClosed ? null : document.version !== version }),
       value: {
         name: basename(document.fileName), connectionName: '未选择', databaseType: null,
@@ -1587,6 +1665,18 @@ async function runBatch(
       if (vscode.workspace.isTrusted === false) throw new Error('参数脚本需要在受信任的工作区运行，请先核对并信任当前工作区。');
       if (!configuredSqlParameters()) throw new Error('分批执行需要启用 dorisSqlLite.sqlParameters，以明确解析每批参数。');
       const definition = readBatchDefinition(text);
+      const protections = new Map<string, ProtectionProjection>();
+      feedback.batchProtections = protections;
+      const batchMode = getDataMode();
+      const hasProtection = [...definition.init, ...definition.steps].some((step) => step.encryption && Object.keys(step.encryption).length);
+      if (hasProtection && !dataKeys) throw new Error('字段加密密钥存储尚未就绪，请重新加载窗口。');
+      const batchKey = hasProtection ? await dataKeys!.active() : undefined;
+      for (const step of [...definition.init, ...definition.steps]) {
+        if (batchKey && step.encryption && Object.keys(step.encryption).length) {
+          protections.set(step.name!, createProtection(step.encryption, step.requiredEncryption ?? [], batchKey,
+            (id) => dataKeys!.lookup(id), batchMode));
+        }
+      }
       definition.script = resolve(dirname(document.uri.fsPath), definition.script);
       const profiles = manager.getProfiles();
       // Resolve explicit connections before running the script. One optional
@@ -1601,7 +1691,10 @@ async function runBatch(
       await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification, title: `分批执行 ${details.name}`, cancellable: true,
       }, async (progress, token) => {
-        const batchProgress = new BatchProgress((message) => progress.report({ message }));
+        const batchProgress = new BatchProgress((message) => progress.report({ message }), {
+          parameters: (record) => protections.get(record.name)?.withMode(getDataMode()).parameters(record.parameters) ?? record.parameters,
+        });
+        const modeSubscription = onDataModeChange(() => batchProgress.refresh());
         const cancelProgress = source.token.onCancellationRequested(() => batchProgress.setPhase('cancelling'));
         const subscription = token.onCancellationRequested(() => source.cancel());
         if (token.isCancellationRequested) source.cancel();
@@ -1609,15 +1702,32 @@ async function runBatch(
         try {
           const output = await runBatchScript(definition.script, dirname(document.uri.fsPath), signal);
           if (signal.requested) throw new QueryCancelledError();
-          const task = prepareBatchTask(definition, parseBatchParameters(output), (context) => context.connection
-            ? findDirectiveConnection(profiles, context.connection) : fallback!);
+          const batches = parseBatchParameters(output);
+          for (const step of [...definition.init, ...definition.steps]) {
+            if (!step.encryption || !Object.keys(step.encryption).length) continue;
+            for (const parameter of parseSqlParameters(step.sql)) {
+              for (const candidate of parameter.candidates) await loadParameterKeys({ [parameter.name]: candidate }, step.encryption, dataKeys!);
+            }
+            await loadParameterKeys(step.parameters ?? {}, step.encryption, dataKeys!);
+            if (definition.steps.includes(step)) {
+              for (const batch of batches) await loadParameterKeys(batch, step.encryption, dataKeys!);
+            }
+          }
+          const task = prepareBatchTask(definition, batches, (context) => context.connection
+            ? findDirectiveConnection(profiles, context.connection) : fallback!,
+          (step, name, value) => step.encryption ? decodeParameter(name, value, step.encryption, dataKeys!) : value);
           const batch = createBatchFeedback(task);
+          // Verify every record can be projected before any initialization or write.
+          for (const record of batch.records) protections.get(record.name)?.withMode('encrypted').parameters(record.parameters);
           details.batch = batch;
           const allSteps = [...task.init, ...task.steps];
           details.connectionName = [...new Set(allSteps.map((step) => step.profile.name))].join('、');
           const types = [...new Set(allSteps.map((step) => step.profile.type))];
           details.databaseType = types.length === 1 ? types[0] : null;
-          const parameterText = (value: unknown): string => {
+          const parameterText = (index: number): string => {
+            const value = batch.records.filter((record) => record.batchIndex === index).map((record) => ({
+              name: record.name, parameters: protections.get(record.name)?.withMode(getDataMode()).parameters(record.parameters) ?? record.parameters,
+            }));
             const json = JSON.stringify(value);
             return json.length > 1500 ? json.slice(0, 1500) + '…（参数较长，已截断显示）' : json;
           };
@@ -1629,7 +1739,7 @@ async function runBatch(
             { modal: true, detail: [
               `SQL：${origin.path}`, `参数脚本：${task.script}`,
               `初始化（仅一次）：\n${describe(task.init)}`, `每批步骤（按顺序）：\n${describe(task.steps)}`,
-              `首批参数：${parameterText(task.batches[0])}`, `末批参数：${parameterText(task.batches.at(-1))}`,
+              `首批参数：${parameterText(1)}`, `末批参数：${parameterText(task.batches.length)}`,
               '失败或取消后停止后续步骤；已完成写入不会自动回滚、补偿或重试。执行期间请保持 VS Code 打开。',
             ].join('\n\n') }, '开始执行',
           ), source.token);
@@ -1676,6 +1786,7 @@ async function runBatch(
           details.error = batch.records.find((record) => record.status === 'failed' || record.status === 'cancelled')?.error ?? batch.error;
         } finally {
           batchProgress.dispose();
+          modeSubscription.dispose();
           cancelProgress.dispose();
           subscription.dispose();
         }
@@ -1695,7 +1806,8 @@ async function runBatch(
       notifyWithFeedback(
         `${details.name}：${details.status === 'success' ? '分批执行成功' : details.status === 'cancelled' ? '分批执行已取消' : '分批执行失败'}，${completion}${position}，耗时 ${formatDuration(details.durationMs)}。`
           + (details.needsReview ? ' 已提交步骤的写入结果需核对。' : '')
-          + (details.error && (details.status === 'failed' || details.error.includes('进程树终止失败')) ? ` ${details.error}` : ''),
+          + (details.error && (details.status === 'failed' || details.error.includes('进程树终止失败'))
+            ? ` ${protectedMessage(details.error, undefined, feedback.protectRaw)}` : ''),
         feedback, details.status === 'failed' ? 'error' : 'info',
       );
     }
@@ -1763,6 +1875,8 @@ async function executeQuery(
     editor.document.offsetAt(editor.selection.end),
   );
   const sql = context?.sql;
+  const protection = context ? await statementProtection(context) : undefined;
+  if (feedback) { feedback.protection = protection; feedback.protectRaw = protection !== undefined; }
   const details = feedback?.value;
   if (details && context) {
     details.name = context.name ?? sourceLabel;
@@ -1792,12 +1906,15 @@ async function executeQuery(
     sourceLabel,
     context?.parameters,
     cancelSource.token,
+    protection,
   );
   if (!prepared || operation.cancelled) {
     return;
   }
   const statement = prepared.sql;
   if (details) details.parameters = prepared.used;
+  // Verify the parameter output before submitting any SQL.
+  protection?.withMode('encrypted').parameters(prepared.used);
   const outputMode = !explain && (directExport || context?.output !== undefined);
   if (outputMode) assertDirectExportSql(statement);
 
@@ -1940,18 +2057,20 @@ async function executeQuery(
             progress.report({ message: '正在执行并读取完整结果…' });
             const session = connectionSession.sessions.startStatement(operation, entry);
             if (details) { details.submitted = true; details.rowsRead = 0; details.totalRows = null; details.readComplete = false; }
-            await session.execute(statement, signal, {
+            const protectedRows = protectSink({
               onColumns: (columns) => writer.onColumns(columns),
               onRow: (row) => { if (details) details.rowsRead = (details.rowsRead ?? 0) + 1; return writer.write(row); },
               onAffectedRows: () => { noResultSet = true; },
-            });
+            }, protection, prepared.used);
+            await session.execute(statement, signal, protectedRows.sink);
+            protectedRows.check();
             throwIfCancelled(cancelSource.token);
             if (details) { details.readComplete = true; details.totalRows = details.rowsRead ?? 0; }
             if (noResultSet) throw new Error('语句没有返回可导出的结果集，未生成 TSV 文件。');
             const written = await writer.finish();
             if (details) { details.status = 'success'; details.resultFile = targetPath; details.warning = writer.cleanupWarning; }
             void vscode.window.showInformationMessage(
-              `已导出 ${written} 行到 ${targetPath}，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒。`,
+              `已导出 ${written} 行到 ${targetPath}，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒。${modeLabel(protection)}`,
               '复制 AI 反馈', '保存 AI 反馈…',
             ).then(async (answer) => {
               try {
@@ -1959,7 +2078,7 @@ async function executeQuery(
                 if (answer === '保存 AI 反馈…') await saveFeedback(feedback);
               } catch (error) { showError('反馈操作失败', error); }
             });
-            if (writer.cleanupWarning) void vscode.window.showWarningMessage(writer.cleanupWarning);
+            if (writer.cleanupWarning) void vscode.window.showWarningMessage(protectedMessage(writer.cleanupWarning, protection));
             return;
           }
           const maxRows = vscode.workspace
@@ -1992,7 +2111,7 @@ async function executeQuery(
             maxRows,
             readLimit === undefined ? {} : { onLimitReached: () => stop('limit') },
           );
-          const sink: RowSink = {
+          const protectedRows = protectSink({
             onColumns: (columns) => { collector.onColumns(columns); if (details) details.hasResultSet = true; },
             onAffectedRows: (count) => { collector.onAffectedRows(count); if (details) details.hasResultSet = false; },
             onRow: (row) => {
@@ -2004,12 +2123,13 @@ async function executeQuery(
                 progress.report({ message: `已读取 ${total} 行…` });
               }
             },
-          };
+          }, protection, prepared.used, false);
 
           progress.report({ message: '正在执行…' });
           const session = connectionSession.sessions.startStatement(operation, entry);
           if (details) details.submitted = true;
-          const summary = await session.execute(executedSql, signal, sink);
+          const summary = await session.execute(executedSql, signal, protectedRows.sink);
+          protectedRows.check();
           if (details) details.hasResultSet = summary.hasResultSet;
           // Only a user cancel abandons the result here. A limit stop returns
           // the rows on purpose: they are exactly what was asked for.
@@ -2053,6 +2173,9 @@ async function executeQuery(
             );
             return;
           }
+          // Check supported types before publishing a result. Keep only the
+          // bounded raw preview in the extension host for subsequent toggles.
+          for (const row of view.rows) protection?.withMode('encrypted').row(row);
           ResultPanel.open(view, {
             connectionName: profile.name,
             statementName: context?.name,
@@ -2061,6 +2184,7 @@ async function executeQuery(
             maxRows,
             parameters: prepared.used,
             feedback,
+            protection,
             // False when the answer was cut short, so the panel can say "已读取
             // N 行" instead of claiming an exact total it does not have.
             readComplete,
@@ -2068,7 +2192,8 @@ async function executeQuery(
             // injected one: an export that has to run the query again wants every
             // row, so it must not inherit this run's cap.
             origin: { state: connectionSession, documentKey, onStateChanged },
-            rerun: { state: connectionSession, documentKey, onStateChanged, snapshot: connectionSession.sessions.snapshot(entry), sql: statement },
+            rerun: { state: connectionSession, documentKey, onStateChanged, snapshot: connectionSession.sessions.snapshot(entry), sql: statement,
+              protection, parameters: prepared.used },
           });
         } catch (error) {
           if (fileWriter) {
@@ -2078,7 +2203,7 @@ async function executeQuery(
               const reason = error instanceof Error ? error.message : String(error);
               const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
               if (details) { details.status = 'failed'; details.error = formatDatabaseError(error); details.warning = cleanupReason; details.temporaryFile = fileWriter.temporaryPath; }
-              showError('执行并导出未完成', new Error(`${reason}；${cleanupReason}`));
+              showError('执行并导出未完成', new Error(protectedMessage(`${reason}；${cleanupReason}`, protection)));
               return;
             }
           }
@@ -2093,9 +2218,9 @@ async function executeQuery(
               details.status = 'failed'; details.error = formatDatabaseError(error);
               details.needsReview = !outputMode && details.submitted && (entry?.session?.broken === true || classifyDatabaseError(error).kind === 'network');
             }
-            if (outputMode) showError(`执行并导出失败（${profile.name}）`, error);
+            if (outputMode) showError(`执行并导出失败（${profile.name}）`, new Error(protectedMessage(error, protection)));
             else notifyWithFeedback(
-              `「${context?.name ?? profile.name}」执行失败，耗时 ${formatDuration(Date.now() - startedAt)}。 ${formatDatabaseError(error)}`
+              `「${context?.name ?? profile.name}」执行失败，耗时 ${formatDuration(Date.now() - startedAt)}。 ${protectedMessage(error, protection)}`
                 + (details?.needsReview ? ' 已提交操作的写入结果需核对。' : ''), feedback, 'error',
             );
           }

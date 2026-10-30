@@ -4,6 +4,7 @@ import { findSqlStatementRanges } from './queryResults';
 import { isQueryCancelled, type CancelSignal, type QuerySummary } from './querySession';
 import { readBatchDirectives, resolveStatementContext, type StatementContext } from './sqlDirectives';
 import { isParameterName, resolveSqlParameters } from './sqlParameters';
+import type { ProtectionInfo } from './dataProtection';
 
 export type BatchParameters = Readonly<Record<string, string>>;
 export interface BatchDefinition {
@@ -21,6 +22,10 @@ export interface BatchTask {
   steps: BatchStatement[];
   batches: BatchParameters[];
 }
+export type BatchParameterTransform = (step: BatchStatement, name: string, value: string) => string;
+export interface PreparedBatchTask extends BatchTask {
+  readonly transform?: BatchParameterTransform;
+}
 export interface BatchStepFeedback {
   phase: 'init' | 'batch';
   batchIndex?: number;
@@ -37,6 +42,7 @@ export interface BatchStepFeedback {
   sessionState?: 'retained' | 'lost' | 'not-opened';
   needsReview?: boolean;
   error?: string;
+  protection?: ProtectionInfo;
 }
 export interface BatchFeedback {
   script: string;
@@ -90,8 +96,9 @@ export function readBatchDefinition(document: string): BatchDefinition {
   return { script: directives.script, init: directives.init.map(select), steps: directives.steps.map(select) };
 }
 
-function prepareStep(step: BatchStatement, batch: BatchParameters) {
-  const resolved = resolveSqlParameters(step.sql, { ...step.parameters, ...batch });
+function prepareStep(step: BatchStatement, batch: BatchParameters, transform?: BatchParameterTransform) {
+  const resolved = resolveSqlParameters(step.sql, { ...step.parameters, ...batch },
+    transform ? (name, value) => transform(step, name, value) : undefined);
   if (resolved.missing.length) {
     throw new Error(`步骤「${step.name}」缺少参数：${resolved.missing.join('、')}。`);
   }
@@ -104,34 +111,37 @@ function prepareStep(step: BatchStatement, batch: BatchParameters) {
 export function prepareBatchTask(
   definition: BatchDefinition, batches: BatchParameters[],
   connection: (context: StatementContext) => ConnectionProfile,
-): BatchTask {
+  transform?: BatchParameterTransform,
+): PreparedBatchTask {
   if (!batches.length || definition.init.length + definition.steps.length * batches.length > MAX_STEP_EXECUTIONS) {
     throw new Error(`单次任务需要非空批次，且初始化与每批步骤合计不能超过 ${MAX_STEP_EXECUTIONS} 次；请缩小脚本范围。`);
   }
   const statement = (context: StatementContext): BatchStatement => ({
     ...context, name: context.name!, parameters: { ...context.parameters }, profile: { ...connection(context) },
   });
-  const task: BatchTask = {
+  const task: PreparedBatchTask = {
     script: definition.script, init: definition.init.map(statement), steps: definition.steps.map(statement),
     batches: batches.map((batch) => ({ ...batch })),
   };
+  // Keep the callback on the live task, outside serialized task/report data.
+  if (transform) Object.defineProperty(task, 'transform', { value: transform });
   // Validate every batch before the first initialization or write. A missing
   // parameter near the end must not leave earlier days partially changed.
-  for (const step of task.init) prepareStep(step, {});
+  for (const step of task.init) prepareStep(step, {}, task.transform);
   for (const [index, batch] of task.batches.entries()) {
     for (const step of task.steps) {
-      try { prepareStep(step, batch); }
+      try { prepareStep(step, batch, task.transform); }
       catch (error) { throw new Error(`第 ${index + 1} 批：${(error as Error).message}`, { cause: error }); }
     }
   }
   return task;
 }
 
-export function createBatchFeedback(task: BatchTask): BatchFeedback {
+export function createBatchFeedback(task: PreparedBatchTask): BatchFeedback {
   const record = (step: BatchStatement, batch: BatchParameters, batchIndex?: number): BatchStepFeedback => ({
     phase: batchIndex === undefined ? 'init' : 'batch', batchIndex,
     name: step.name, connectionName: step.profile.name, databaseType: step.profile.type,
-    parameters: prepareStep(step, batch).used, startLine: step.line, endLine: step.endLine,
+    parameters: prepareStep(step, batch, task.transform).used, startLine: step.line, endLine: step.endLine,
     status: 'not-run', submitted: false, durationMs: 0, sessionState: 'not-opened',
   });
   return {
@@ -145,7 +155,7 @@ export function createBatchFeedback(task: BatchTask): BatchFeedback {
 }
 
 export async function runBatchTask(
-  task: BatchTask, feedback: BatchFeedback, signal: CancelSignal,
+  task: PreparedBatchTask, feedback: BatchFeedback, signal: CancelSignal,
   execute: (step: BatchStatement, sql: string, record: BatchStepFeedback) => Promise<QuerySummary>,
   onProgress: (record: BatchStepFeedback) => void = () => undefined,
 ): Promise<'success' | 'failed' | 'cancelled'> {
@@ -157,7 +167,7 @@ export async function runBatchTask(
     const started = Date.now();
     onProgress(record);
     try {
-      const result = await execute(step, prepareStep(step, parameters).sql, record);
+      const result = await execute(step, prepareStep(step, parameters, task.transform).sql, record);
       if (result.hasResultSet) throw new Error('分批步骤返回了结果集；本入口只执行无结果集的写入和初始化，请用普通查询查看结果。');
       record.affectedRows = result.affectedRows;
       record.status = 'success';

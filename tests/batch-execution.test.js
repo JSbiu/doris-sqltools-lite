@@ -19,6 +19,30 @@ const params = [{ day: '2024-02-29' }, { day: '2024-03-01' }];
 const prepare = (document = sql, values = params) => prepareBatchTask(readBatchDefinition(document), values, () => connection);
 const signal = () => ({ requested: false, reason: undefined, onRequest: () => ({ dispose() {} }) });
 
+test('ciphertext conversion validates initialization and last batch before any execution, and survives feedback to execution', async () => {
+  const document = sql.replace('SET test.option=true', 'SET test.option=${init=yes}');
+  const definition = readBatchDefinition(document);
+  assert.throws(() => prepareBatchTask(definition, params, () => connection, (step, name, value) => {
+    if (name === 'init') throw new Error('bad init token'); return value;
+  }), /bad init token/);
+  assert.throws(() => prepareBatchTask(definition, params, () => connection, (_step, name, value) => {
+    if (name === 'day' && value === params[1].day) throw new Error('bad last token'); return value;
+  }), /第 2 批.*bad last token/);
+  const { createDataKey, encryptValue } = require('../out/fieldEncryption');
+  const { decodeParameter } = require('../out/dataProtection');
+  const key = createDataKey();
+  const task = prepareBatchTask(readBatchDefinition(sql), [{ day: encryptValue('', 'day', key) }], () => connection,
+    (_step, name, value) => decodeParameter(name, value, { day: 'day' }, { lookup: () => key }));
+  assert.equal(Object.keys(task).includes('transform'), false);
+  const records = createBatchFeedback(task); const sent = [];
+  const status = await runBatchTask(task, records, signal(), async (_step, statement, record) => {
+    record.submitted = true; sent.push(statement); return { hasResultSet: false, affectedRows: 0, rowsRead: 0 };
+  });
+  assert.equal(status, 'success');
+  assert.deepEqual(sent, ['SET test.option=true;', "DELETE FROM target WHERE dt='';", "INSERT INTO target SELECT '';"]);
+  assert.equal(records.records[1].parameters.day, '');
+});
+
 test('parameter arrays preserve leap days, month boundaries, hourly windows and scalar values', () => {
   assert.deepEqual(parseBatchParameters('\uFEFF' + JSON.stringify([
     { day: '2024-02-29', start: '2024-02-29 23:00:00', end: '2024-03-01 00:00:00', n: 0, flag: false },

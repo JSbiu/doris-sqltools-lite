@@ -636,3 +636,17 @@ test('has no sortable table for DML and tolerates an empty SELECT', () => {
   assert.deepEqual(view.rowNumbers(), []);
   assert.equal(view.visibleCount(), '0');
 });
+
+test('encrypted result HTML, sort attributes and clipboard contain no protected originals and plain mode restores the bounded preview', async () => {
+  const { createDataKey } = require('../out/fieldEncryption');
+  const { createProtection, setDataMode } = require('../out/dataProtection');
+  const key = createDataKey(); const protection = createProtection({ v: 'user', id: 'user' }, [], key, () => key, 'encrypted');
+  setDataMode('encrypted');
+  const { panel, html } = renderPanel(resultOf(['private-id-001']), { protection, parameters: { id: 'private-id-param' } });
+  assert.ok(!html.includes('private-id-')); assert.match(html, /data-sort-value="enc:v1:/);
+  await panel.copyToClipboard(); assert.ok(!clipboard.text.includes('private-id-'));
+  setDataMode('plain'); panel.render();
+  assert.equal(panel.rows[0].v, 'private-id-001');
+  await panel.copyToClipboard(); assert.ok(clipboard.text.includes('private-id-001'));
+  setDataMode('encrypted');
+});

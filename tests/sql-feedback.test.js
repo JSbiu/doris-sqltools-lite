@@ -26,6 +26,15 @@ function contents(markdown) {
   return JSON.parse(block[1]);
 }
 
+test('protection metadata is explicitly whitelisted and cannot carry key material', () => {
+  const input = feedback({ dataMode: 'encrypted', protection: {
+    mode: 'encrypted', keyId: 'public-id', fields: { id: 'user' }, material: 'secret-key-material',
+  } });
+  const text = buildSqlFeedback(input);
+  assert.deepEqual(contents(text).protection, { mode: 'encrypted', keyId: 'public-id', fields: { id: 'user' } });
+  assert.ok(!text.includes('secret-key-material'));
+});
+
 test('whitelists feedback and source fields without serializing SQL, plans, rows or connection credentials', () => {
   const expected = feedback();
   const input = Object.freeze({

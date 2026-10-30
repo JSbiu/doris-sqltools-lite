@@ -41,12 +41,14 @@ function harness(sql, options = {}) {
   const vscode = {
     TreeItem: class {}, CancellationTokenSource,
     ProgressLocation: { Notification: 15 },
+    env: { clipboard: { writeText: async (text) => { calls.clipboard = text; } } },
     window: {
       activeTextEditor: editor,
       showInformationMessage: async (text) => { calls.notices.push(text); },
       showErrorMessage: async (text) => { calls.notices.push(text); },
       showWarningMessage: async (text, ...buttons) => {
         calls.notices.push(text);
+        if (buttons[0]?.detail) (calls.confirmations ??= []).push(buttons[0].detail);
         if (buttons.includes('开始执行')) return options.confirmBatch ? options.confirmBatch(text, ...buttons) : options.startBatch ? '开始执行' : undefined;
         return buttons.includes('继续导出') ? '继续导出' : undefined;
       },
@@ -73,6 +75,7 @@ function harness(sql, options = {}) {
         sameConnectionTarget: (a, b) => a.type === b.type && a.host === b.host && a.database === b.database,
       };
       if (id === './connectionForm') return {};
+      if (id === './dataCommands') return {};
       if (id === './feedbackActions') return {
         rememberFeedback: (record) => { calls.feedback = record; },
         copyFeedback: async () => true, saveFeedback: async () => true,
@@ -89,15 +92,16 @@ function harness(sql, options = {}) {
       if (id === './batchProgress' && options.progressOptions) {
         const { BatchProgress } = realRequire(id);
         return { BatchProgress: class extends BatchProgress {
-          constructor(report) { super(report, options.progressOptions); }
+          constructor(report, extra) { super(report, { ...extra, ...options.progressOptions }); }
         } };
       }
       if (id === './planPanel') return { openPlanPanel: (snapshot) => calls.plans.push(snapshot) };
       return realRequire(id);
     },
   };
-  vm.runInNewContext(fs.readFileSync(filename, 'utf8') + '\nmodule.exports.hooks = { runQuery, runBatch, prepareStatementSql, ResultPanel, setParameterState: (state) => { parameterState = state; } };', sandbox);
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8') + '\nmodule.exports.hooks = { runQuery, runBatch, prepareStatementSql, ResultPanel, setDataKeys: (keys) => { dataKeys = keys; }, setParameterState: (state) => { parameterState = state; } };', sandbox);
   const hooks = module.exports.hooks;
+  if (options.keys) hooks.setDataKeys(options.keys);
   hooks.ResultPanel.open = (result, metadata) => calls.results.push({ result, metadata });
   const makeSession = (id) => ({
     broken: false, close: async () => { calls.closed.push(id); },
@@ -928,4 +932,90 @@ test('a preview ending exactly at its injected LIMIT remains incomplete and full
   assert.equal(h.calls.executed[1], 'SELECT 1;');
   assert.equal(h.calls.feedback.value.totalRows, 7);
   assert.equal(h.calls.writes[0].text.split('\r\n').length, 9);
+});
+
+async function encryptionKeys() {
+  const { DataKeys } = require('../out/dataKeys'); const storage = new Map();
+  const keys = new DataKeys({ get: async (id) => storage.get(id), store: async (id, value) => { storage.set(id, value); } });
+  await keys.active(); return keys;
+}
+
+function protectedRows(h, rows, columns = ['id']) {
+  h.session.execute = async (sql, _signal, sink) => {
+    h.calls.executed.push(sql); sink.onColumns(columns);
+    for (const row of rows) await sink.onRow(row);
+    return { hasResultSet: true, rowsRead: rows.length, affectedRows: null };
+  };
+}
+
+test('protected parameters reach each driver as plaintext while preview copies and rerun exports use one fixed encryption snapshot', async () => {
+  const { encryptValue } = require('../out/fieldEncryption'); const { setDataMode } = require('../out/dataProtection');
+  for (const type of ['MySQL', 'Doris', 'Spark']) {
+    setDataMode('encrypted'); const keys = await encryptionKeys(); const key = await keys.active();
+    const token = encryptValue('private-id-001', 'user', key);
+    const h = harness(`-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @param: id = ${token}\nSELECT * FROM t WHERE id='${'${id}'}';`, { keys, target: memoryTarget });
+    h.profiles[0].type = type;
+    const rows = [{ id: 'private-id-001' }, { id: 'private-id-002' }, { id: 'private-id-003' }];
+    protectedRows(h, rows); await h.run();
+    assert.ok(h.calls.executed[0].includes("id='private-id-001'")); assert.ok(!h.calls.executed[0].includes('enc:'));
+    const panel = h.panelFor(); await panel.copyToClipboard();
+    assert.ok(h.calls.clipboard.includes(token)); assert.ok(!h.calls.clipboard.includes('private-id-'));
+    h.editor.document.getText = () => '-- @encrypt: {"id":"later-rule"}\nSELECT 1;';
+    // Changing mode while an export is awaiting its location cannot change its content.
+    h.options.saveDialog = () => { setDataMode('plain'); return memoryTarget; };
+    await panel.export('tsv');
+    const encrypted = h.calls.writes.at(-1).text;
+    assert.ok(encrypted.includes(token)); assert.ok(!encrypted.includes('private-id-'));
+    assert.equal(h.calls.executed.length, 2);
+    await panel.copyToClipboard(); assert.ok(h.calls.clipboard.includes('private-id-001'));
+    setDataMode('encrypted');
+  }
+});
+
+test('direct encrypted exports project each streamed row even when global mode changes midway', async (t) => {
+  const { encryptValue } = require('../out/fieldEncryption'); const { setDataMode } = require('../out/dataProtection');
+  const directory = exportDirectory(t); const keys = await encryptionKeys(); const key = await keys.active();
+  setDataMode('encrypted'); t.after(() => setDataMode('encrypted'));
+  const h = harness('-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @output: protected.tsv\nSELECT id FROM t;',
+    { keys, sourceFile: path.join(directory, 'source.sql') });
+  h.session.execute = async (sql, _signal, sink) => {
+    h.calls.executed.push(sql); sink.onColumns(['id']);
+    await sink.onRow({ id: 'private-a' }); setDataMode('plain'); await sink.onRow({ id: 'private-b' });
+    return { hasResultSet: true, rowsRead: 2, affectedRows: null };
+  };
+  await h.run(); const text = fs.readFileSync(path.join(directory, 'protected.tsv'), 'utf8');
+  assert.ok(text.includes(encryptValue('private-a', 'user', key))); assert.ok(text.includes(encryptValue('private-b', 'user', key)));
+  assert.ok(!text.includes('private-')); assert.equal(h.calls.executed.length, 1);
+});
+
+test('bad encrypted parameters stop before connection or SQL, and explicit field mismatch is deferred safely for empty results', async () => {
+  const { setDataMode } = require('../out/dataProtection'); setDataMode('encrypted');
+  const keys = await encryptionKeys();
+  const bad = harness('-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @param: id = enc:v1:bad\nSELECT ${id};', { keys });
+  await assert.rejects(bad.run(), (error) => !error.message.includes('enc:v1:bad'));
+  assert.equal(bad.calls.opened.length, 0); assert.equal(bad.calls.executed.length, 0);
+  const malformed = harness('-- @encrypt secret-value-in-invalid-comment\nSELECT 1;', { keys });
+  await assert.rejects(malformed.run(), (error) => !error.message.includes('secret-value-in-invalid-comment'));
+  const empty = harness('-- @connection: Spark数仓\n-- @encrypt: {"missing":"user"}\nSELECT count(*) AS n FROM t;', { keys });
+  protectedRows(empty, [], ['n']); await empty.run();
+  assert.equal(empty.calls.feedback.value.status, 'failed'); assert.equal(empty.calls.results.length, 0);
+  const write = harness('-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\nDELETE FROM t;', { keys, batchMode: true });
+  await write.run(); assert.equal(write.calls.feedback.value.status, 'success'); assert.equal(write.calls.results.length, 0);
+});
+
+test('batch confirmation and live progress show only protected actual parameters, and late invalid ciphertext prevents all writes', async () => {
+  const { encryptValue } = require('../out/fieldEncryption'); const { setDataMode } = require('../out/dataProtection');
+  setDataMode('encrypted'); const keys = await encryptionKeys(); const key = await keys.active();
+  const source = '-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @batch-script: params.ps1\n-- @batch-steps: ["write"]\n-- @name: write\nDELETE FROM t WHERE id=\'${id}\';';
+  const h = harness(source, { keys, batchMode: true, startBatch: true,
+    batchOutput: JSON.stringify([{ id: encryptValue('private-001', 'user', key), unused: 'private-unused' }]) });
+  await h.runBatch();
+  assert.ok(h.calls.executed[0].includes('private-001'));
+  assert.ok(!h.calls.confirmations.join('').includes('private-'));
+  assert.ok(!h.calls.progress.join('').includes('private-'));
+  assert.match(h.calls.progress.join(''), /enc:v1:/);
+  const bad = harness(source, { keys, batchMode: true, startBatch: true,
+    batchOutput: JSON.stringify([{ id: 'good' }, { id: 'enc:bad-last' }]) });
+  await bad.runBatch(); assert.equal(bad.calls.executed.length, 0); assert.equal(bad.calls.opened.length, 0);
+  assert.ok(!bad.calls.notices.join('').includes('enc:bad-last'));
 });

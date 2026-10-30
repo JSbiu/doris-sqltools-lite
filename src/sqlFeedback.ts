@@ -1,5 +1,6 @@
 import { redactErrorMessage, type DatabaseType } from './connectionSecurity';
 import type { BatchFeedback } from './batchExecution';
+import type { DataMode, ProtectionInfo } from './dataProtection';
 
 export interface FeedbackSource {
   path: string;
@@ -38,6 +39,12 @@ export interface SqlFeedback {
   error?: string;
   warning?: string;
   sessionState?: 'retained' | 'lost' | 'not-opened';
+  dataMode?: DataMode;
+  protection?: ProtectionInfo;
+}
+
+function protectionInfo(info: ProtectionInfo | undefined): ProtectionInfo | undefined {
+  return info ? { mode: info.mode, keyId: info.keyId, fields: Object.fromEntries(Object.entries(info.fields)) } : undefined;
 }
 
 function feedbackMessage(message: string | undefined): string | undefined {
@@ -77,6 +84,8 @@ function feedbackData(feedback: SqlFeedback): SqlFeedback {
     hasResultSet: feedback.hasResultSet,
     affectedRows: feedback.affectedRows,
     needsReview: feedback.needsReview,
+    dataMode: feedback.dataMode,
+    protection: protectionInfo(feedback.protection),
     batch: feedback.batch ? {
       script: feedback.batch.script, batchCount: feedback.batch.batchCount,
       completedBatches: feedback.batch.completedBatches,
@@ -90,6 +99,7 @@ function feedbackData(feedback: SqlFeedback): SqlFeedback {
         status: record.status, submitted: record.submitted, durationMs: record.durationMs,
         affectedRows: record.affectedRows, sessionState: record.sessionState,
         needsReview: record.needsReview, error: feedbackMessage(record.error),
+        protection: protectionInfo(record.protection),
       })),
     } : undefined,
     resultFile: feedback.resultFile,
@@ -120,6 +130,7 @@ function summarizeBatch(batch: BatchFeedback, status: SqlFeedback['status']) {
     if (!definitions.has(key)) definitions.set(key, {
       phase: record.phase, name: record.name, connectionName: record.connectionName,
       databaseType: record.databaseType, startLine: record.startLine, endLine: record.endLine,
+      protection: record.protection,
     });
   }
   const sample = (index: number) => ({

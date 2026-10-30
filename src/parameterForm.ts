@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
+import type { ProtectionProjection } from './dataProtection';
 import {
   resolveSqlParameters,
-  unescapeDollarPlaceholders,
   type SqlParameter,
 } from './sqlParameters';
 
@@ -24,6 +24,7 @@ export interface ParameterFormInputs {
   initialValues: Readonly<Record<string, string>>;
   // Values declared in SQL comments stay authoritative in the missing-value form.
   fixedValues?: Readonly<Record<string, string>>;
+  protection?: ProtectionProjection;
   cancellationToken?: vscode.CancellationToken;
 }
 
@@ -47,6 +48,7 @@ export function openParameterForm(
     currentPanel.reveal(currentPanel.viewColumn ?? vscode.ViewColumn.Active, false);
     return Promise.resolve(undefined);
   }
+  const formInputs = { ...inputs, protection: inputs.protection?.withMode(inputs.protection.mode) };
 
   const panel = vscode.window.createWebviewPanel(
     'dorisSqlLiteParameterForm',
@@ -79,7 +81,7 @@ export function openParameterForm(
       }
     });
 
-    panel.webview.html = renderParameterForm(inputs);
+    panel.webview.html = renderParameterForm(formInputs);
 
     panel.webview.onDidReceiveMessage((message: { type?: string; values?: unknown }) => {
       if (message.type === 'cancel') {
@@ -87,7 +89,7 @@ export function openParameterForm(
         return;
       }
       if (message.type === 'run') {
-        finish({ action: 'execute', values: pickValues(inputs, message.values) });
+        finish({ action: 'execute', values: pickValues(formInputs, message.values) });
         return;
       }
       if (message.type === 'raw') {
@@ -100,7 +102,7 @@ export function openParameterForm(
         // could drift from the real one.
         void panel.webview.postMessage({
           type: 'preview',
-          ...previewFor(inputs.sql, pickValues(inputs, message.values)),
+          ...previewFor(formInputs, pickValues(formInputs, message.values)),
         });
       }
     });
@@ -122,18 +124,29 @@ function pickValues(
     const fixed = inputs.fixedValues && Object.hasOwn(inputs.fixedValues, parameter.name)
       ? inputs.fixedValues[parameter.name] : undefined;
     Object.defineProperty(values, parameter.name, {
-      value: fixed ?? (typeof value === 'string' ? value : ''), enumerable: true,
+      value: fixed !== undefined ? projectValue(inputs, parameter.name, fixed)
+        : typeof value === 'string' ? value : '', enumerable: true,
     });
   }
   return values;
 }
 
-function previewFor(sql: string, values: Readonly<Record<string, string>>): {
+const PROTECTED_SQL_NOTICE = '加密模式下不展示 SQL 原文或预览，请切换到明文模式后重新打开参数表单查看。';
+
+function encryptedForm(inputs: ParameterFormInputs): boolean {
+  return inputs.protection?.mode === 'encrypted' && Object.keys(inputs.protection.rules).length > 0;
+}
+
+function projectValue(inputs: ParameterFormInputs, name: string, value: string): string {
+  return inputs.protection ? inputs.protection.parameters({ [name]: value }, true)[name] : value;
+}
+
+function previewFor(inputs: ParameterFormInputs, values: Readonly<Record<string, string>>): {
   sql: string;
   missing: string[];
 } {
-  const resolution = resolveSqlParameters(unescapeDollarPlaceholders(sql), values);
-  return { sql: resolution.sql, missing: [...resolution.missing] };
+  const resolution = resolveSqlParameters(inputs.sql, values);
+  return { sql: encryptedForm(inputs) ? PROTECTED_SQL_NOTICE : resolution.sql, missing: [...resolution.missing] };
 }
 
 // ------------------------------------------------------------------ rendering
@@ -152,7 +165,7 @@ function displayParameters(inputs: ParameterFormInputs): DisplayParameter[] {
     const inlineDefault = parameter.candidates.length === 1 ? parameter.candidates[0] : undefined;
     const fixed = inputs.fixedValues && Object.hasOwn(inputs.fixedValues, parameter.name)
       ? inputs.fixedValues[parameter.name] : undefined;
-    const value = fixed ?? remembered ?? inlineDefault ?? '';
+    const value = fixed ?? remembered ?? inlineDefault;
     const source: DisplayParameter['source'] =
       fixed !== undefined ? 'comment' : remembered !== undefined
         ? 'used'
@@ -163,9 +176,9 @@ function displayParameters(inputs: ParameterFormInputs): DisplayParameter[] {
             : 'needed';
     return {
       name: parameter.name,
-      value,
-      candidates: parameter.candidates,
-      labels: parameter.labels,
+      value: value === undefined ? '' : projectValue(inputs, parameter.name, value),
+      candidates: parameter.candidates.map((candidate) => projectValue(inputs, parameter.name, candidate)),
+      labels: encryptedForm(inputs) ? [] : parameter.labels,
       source,
     };
   });
@@ -250,7 +263,7 @@ function renderParameterForm(inputs: ParameterFormInputs): string {
 
   <section class="card">
     <p class="sub" style="margin:0 0 8px;">实际发送的 SQL</p>
-    <pre id="preview"></pre>
+    <pre id="preview">${encryptedForm(inputs) ? PROTECTED_SQL_NOTICE : ''}</pre>
   </section>
 
   <p id="status"></p>

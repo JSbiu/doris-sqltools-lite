@@ -275,3 +275,51 @@ test('Markdown write failure retains a successful report for a later save or cop
   assert.equal(h.calls.dialogs.length, 1);
   assert.equal(contents(h.calls.clipboard[0]).batchReportFile, h.record.value.batchReportFile);
 });
+
+function protect(record, mode = 'encrypted') {
+  const { createDataKey } = require('../out/fieldEncryption');
+  const { createProtection, setDataMode } = require('../out/dataProtection');
+  const key = createDataKey();
+  const protection = createProtection({ day: 'day', id: 'user' }, [], key, () => key, mode);
+  record.protectRaw = true; record.protection = protection;
+  record.batchProtections = new Map([['清理', protection], ['回填', protection]]);
+  setDataMode(mode); return protection;
+}
+
+test('batch reports and summaries capture one mode across dialogs and cache paths independently after toggling', async (t) => {
+  const { setDataMode } = require('../out/dataProtection');
+  const h = fixture(t); protect(h.record); t.after(() => setDataMode('encrypted'));
+  for (const step of h.record.value.batch.records) if (Object.hasOwn(step.parameters, 'day')) step.parameters.day = 'sensitive-day-value';
+  h.record.value.error = 'raw-diagnostic-001'; h.record.value.batch.records[1].error = 'raw-diagnostic-001';
+  h.options.dialog = () => { setDataMode('plain'); return h.report; };
+  await h.actions.copyFeedback();
+  const encryptedSummary = contents(h.calls.clipboard[0]);
+  assert.equal(encryptedSummary.dataMode, 'encrypted');
+  const encryptedReport = fs.readFileSync(h.report.fsPath, 'utf8');
+  assert.ok(!encryptedReport.includes('sensitive-day-value')); assert.ok(!encryptedReport.includes('raw-diagnostic-001'));
+  assert.match(encryptedReport, /enc:v1:/);
+  assert.equal(h.record.value.batch.records[1].parameters.day, 'sensitive-day-value');
+  const plainReport = { ...h.report, fsPath: path.join(h.folder, 'plain.json'), path: '/plain.json' };
+  h.options.dialog = () => plainReport;
+  await h.actions.copyFeedback();
+  const plain = contents(h.calls.clipboard[1]); assert.equal(plain.dataMode, 'plain');
+  assert.equal(plain.batchReportFile, plainReport.fsPath);
+  assert.ok(fs.readFileSync(plainReport.fsPath, 'utf8').includes('raw-diagnostic-001'));
+  setDataMode('encrypted'); await h.actions.copyFeedback();
+  assert.equal(contents(h.calls.clipboard[2]).batchReportFile, h.report.fsPath);
+  assert.equal(h.calls.dialogs.length, 2);
+});
+
+test('encrypted plan feedback omits plaintext artifacts and never writes raw plan, parameters or diagnostics', async (t) => {
+  const h = fixture(t); protect(h.record);
+  Object.assign(h.record.value, { action: 'explain', batch: undefined, parameters: { id: 'sensitive-id-001' },
+    planFile: 'plain.plan.txt', resultFile: 'plain.tsv', error: 'server echoed sensitive-id-001' });
+  h.record.protection = h.record.protection.withMode('plain');
+  h.record.planText = 'PLAN sensitive-id-001';
+  await h.actions.copyFeedback();
+  const text = h.calls.clipboard[0]; const value = contents(text);
+  assert.equal(h.calls.dialogs.length, 0); assert.equal(h.calls.providerWrites.length, 0);
+  assert.equal(value.planFile, undefined); assert.equal(value.resultFile, undefined);
+  assert.ok(!text.includes('sensitive-id-001')); assert.ok(!text.includes('PLAN '));
+  assert.match(value.parameters.id, /^enc:v1:/);
+});

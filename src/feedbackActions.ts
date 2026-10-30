@@ -4,7 +4,8 @@ import { lstat, open, stat, unlink } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { buildExportFileName } from './exportPath';
 import { buildBatchReport, buildSqlFeedback, hasBatchDetails, type FeedbackSource, type SqlFeedback } from './sqlFeedback';
-import { formatDatabaseError } from './connectionDiagnostics';
+import { classifyDatabaseError, formatDatabaseError } from './connectionDiagnostics';
+import { getDataMode, PROTECTED_MATERIAL_NOTICE, type DataMode, type ProtectionProjection } from './dataProtection';
 
 export interface FeedbackRecord {
   value: SqlFeedback;
@@ -12,10 +13,52 @@ export interface FeedbackRecord {
   currentSource: () => FeedbackSource;
   startedAt: number;
   planText?: string;
+  protection?: ProtectionProjection;
+  batchProtections?: ReadonlyMap<string, ProtectionProjection>;
+  protectRaw?: boolean;
 }
 
 let latest: FeedbackRecord | undefined;
 const busy = new WeakSet<FeedbackRecord>();
+type ArtifactPaths = Pick<SqlFeedback, 'planFile' | 'batchReportFile'>;
+const artifacts = new WeakMap<FeedbackRecord, Map<string, ArtifactPaths>>();
+
+function isProtected(record: FeedbackRecord): boolean {
+  return !!record.protection || !!record.batchProtections?.size || record.protectRaw === true;
+}
+
+function artifactKey(record: FeedbackRecord, mode: DataMode): string {
+  return JSON.stringify([mode, record.protection?.info,
+    [...record.batchProtections ?? []].map(([name, protection]) => [name, protection.info])]);
+}
+
+function captureFeedback(record: FeedbackRecord, mode: DataMode): FeedbackRecord {
+  if (!isProtected(record)) return record;
+  const protection = record.protection?.withMode(mode);
+  const encrypted = mode === 'encrypted';
+  const diagnostic = (text?: string): string | undefined => text === undefined ? undefined
+    : encrypted ? `${classifyDatabaseError(text).kind}：${PROTECTED_MATERIAL_NOTICE}` : text;
+  const paths = artifacts.get(record)?.get(artifactKey(record, mode));
+  return {
+    ...record, protection, planText: encrypted ? undefined : record.planText,
+    value: {
+      ...record.value, dataMode: mode, protection: protection?.info,
+      parameters: protection?.parameters(record.value.parameters) ?? { ...record.value.parameters },
+      error: diagnostic(record.value.error), warning: diagnostic(record.value.warning),
+      planFile: encrypted ? undefined : paths?.planFile,
+      batchReportFile: paths?.batchReportFile,
+      resultFile: record.protection && record.protection.mode !== mode ? undefined : record.value.resultFile,
+      batch: record.value.batch ? { ...record.value.batch,
+        error: diagnostic(record.value.batch.error),
+        records: record.value.batch.records.map((step) => {
+          const stepProtection = record.batchProtections?.get(step.name)?.withMode(mode);
+          return { ...step, parameters: stepProtection?.parameters(step.parameters) ?? { ...step.parameters },
+            protection: stepProtection?.info, error: diagnostic(step.error) };
+        }),
+      } : undefined,
+    },
+  };
+}
 
 export function rememberFeedback(record: FeedbackRecord): void {
   latest = record;
@@ -26,6 +69,10 @@ export function latestFeedback(): FeedbackRecord | undefined {
 }
 
 export function feedbackText(record: FeedbackRecord): string {
+  return renderFeedback(captureFeedback(record, getDataMode()));
+}
+
+function renderFeedback(record: FeedbackRecord): string {
   return buildSqlFeedback({ ...record.value, source: record.currentSource() });
 }
 
@@ -75,8 +122,24 @@ async function feedbackAction(
     return false;
   }
   busy.add(record);
-  try { return await action(record); }
-  finally { busy.delete(record); }
+  const mode = getDataMode();
+  let snapshot: FeedbackRecord | undefined;
+  try {
+    snapshot = captureFeedback(record, mode);
+    return await action(snapshot);
+  } catch (error) {
+    if (isProtected(record) && (mode === 'encrypted' || getDataMode() === 'encrypted')) {
+      throw new Error('反馈操作未完成。若已选择保存位置，请核对是否存在未完成文件；详细错误请在明文模式查看。', { cause: error });
+    }
+    throw error;
+  } finally {
+    if (snapshot && isProtected(record)) {
+      let paths = artifacts.get(record);
+      if (!paths) { paths = new Map(); artifacts.set(record, paths); }
+      paths.set(artifactKey(record, mode), { planFile: snapshot.value.planFile, batchReportFile: snapshot.value.batchReportFile });
+    }
+    busy.delete(record);
+  }
 }
 
 // Exclusively create feedback artifacts: a failed write removes only the file
@@ -133,7 +196,7 @@ export async function copyFeedback(record: FeedbackRecord | undefined = latest):
       if (!target) return false;
       await writePlan(record, target);
     }
-    await vscode.env.clipboard.writeText(feedbackText(record));
+    await vscode.env.clipboard.writeText(renderFeedback(record));
     return true;
   });
 }
@@ -156,7 +219,7 @@ export async function saveFeedback(record: FeedbackRecord | undefined = latest):
       const name = basename(target.path ?? target.fsPath, '.md');
       const companion = vscode.Uri.joinPath(target, '..', `${name}-${randomUUID().slice(0, 8)}.batch-report.json`);
       if (!await ensureBatchReport(record, companion)) return false;
-      await writeNewLocalFile(target, feedbackText(record));
+      await writeNewLocalFile(target, renderFeedback(record));
       return true;
     }
     if (record.planText !== undefined && !record.value.planFile) {
@@ -165,7 +228,7 @@ export async function saveFeedback(record: FeedbackRecord | undefined = latest):
       const name = basename(target.path ?? target.fsPath, '.md');
       await writePlan(record, vscode.Uri.joinPath(target, '..', `${name}-${randomUUID().slice(0, 8)}.plan.txt`));
     }
-    await vscode.workspace.fs.writeFile(target, Buffer.from(feedbackText(record), 'utf8'));
+    await vscode.workspace.fs.writeFile(target, Buffer.from(renderFeedback(record), 'utf8'));
     return true;
   });
 }
