@@ -1,4 +1,4 @@
 interface:
   display_name: "Doris SQLTools Lite 使用"
-  short_description: "编写 SQL 注释与补数步骤，按摘要、完整批次报告和进度核对计划与执行结果"
-  default_prompt: "使用 $doris-sqltools-lite 整理 SQL 的连接、参数、名称与输出；需要补数时生成顺序批次参数，并按摘要引用的完整报告核对逐步结果。"
+  short_description: "编写连接、参数与加密字段注释，按计划、摘要和完整批次报告核对执行结果"
+  default_prompt: "使用 $doris-sqltools-lite 整理 SQL 的连接、参数、名称、加密字段与输出，按当前模式核对计划和反馈；需要补数时生成顺序批次参数并检查完整报告。"
