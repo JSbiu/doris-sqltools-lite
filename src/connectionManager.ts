@@ -170,7 +170,7 @@ export class ConnectionManager {
     token?: vscode.CancellationToken,
   ): Promise<QuerySession> {
     const password = await vscode.window.showInputBox({
-      title: `Password for ${profile.name}`,
+      title: `输入“${profile.name}”的密码`,
       prompt: passwordPromptFor(profile),
       password: true,
       ignoreFocusOut: true,

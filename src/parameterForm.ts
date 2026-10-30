@@ -5,6 +5,7 @@ import {
   resolveSqlParameters,
   type SqlParameter,
 } from './sqlParameters';
+import { WEBVIEW_BASE_CSS, escapeHtml } from './webviewTheme';
 
 // The parameter panel shown before a statement that contains ${...} runs.
 //
@@ -131,7 +132,7 @@ function pickValues(
   return values;
 }
 
-const PROTECTED_SQL_NOTICE = '加密模式下不展示 SQL 原文或预览，请切换到明文模式后重新打开参数表单查看。';
+const PROTECTED_SQL_NOTICE = '当前显示字段密文。切换到字段原文模式后重新打开参数表单，即可查看 SQL 原文和替换预览。';
 
 function encryptedForm(inputs: ParameterFormInputs): boolean {
   return inputs.protection?.mode === 'encrypted' && Object.keys(inputs.protection.rules).length > 0;
@@ -192,9 +193,10 @@ const SOURCE_LABEL: Record<DisplayParameter['source'], string> = {
   needed: '需要填写',
 };
 
-function renderParameterForm(inputs: ParameterFormInputs): string {
+export function renderParameterForm(inputs: ParameterFormInputs): string {
   const nonce = randomUUID().replace(/-/g, '');
   const parameters = displayParameters(inputs);
+  const hasProtection = inputs.protection !== undefined && Object.keys(inputs.protection.rules).length > 0;
 
   const rows = parameters
     .map((parameter) => {
@@ -210,10 +212,10 @@ function renderParameterForm(inputs: ParameterFormInputs): string {
         .join('、');
 
       return `
-    <div class="param">
-      <div class="head">
-        <span class="name">${escapeHtml(parameter.name)}</span>
-        <span class="tag tag-${parameter.source}">${SOURCE_LABEL[parameter.source]}</span>
+    <div class="param-card">
+      <div class="param-head">
+        <span class="param-name">${escapeHtml(parameter.name)}</span>
+        <span class="badge ${parameter.source === 'needed' ? 'warning' : parameter.source === 'comment' ? 'accent' : ''}">${SOURCE_LABEL[parameter.source]}</span>
       </div>
       <input type="text" spellcheck="false" autocomplete="off" data-value="${escapeHtml(parameter.name)}"${listAttribute} value="${escapeHtml(parameter.value)}"${parameter.source === 'comment' ? ' readonly' : ''} />
       ${list}
@@ -228,51 +230,55 @@ function renderParameterForm(inputs: ParameterFormInputs): string {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; padding: 18px 20px 96px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); font-size: 13px; line-height: 1.6; }
-    h1 { margin: 0 0 4px; font-size: 15px; font-weight: 500; }
-    .sub { margin: 0 0 16px; color: var(--vscode-descriptionForeground); }
-    .card { padding: 14px 16px; margin-bottom: 12px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; }
-    .param + .param { margin-top: 12px; }
-    .head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
-    .name { font-family: var(--vscode-editor-font-family, monospace); }
-    .tag { font-size: 12px; color: var(--vscode-descriptionForeground); }
-    .tag-needed { color: var(--vscode-editorWarning-foreground); }
-    input[type="text"] { width: 100%; min-height: 28px; padding: 5px 8px; font-family: var(--vscode-editor-font-family, monospace); font-size: 13px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; outline: none; }
-    input:focus { border-color: var(--vscode-focusBorder); }
-    .hint { margin: 4px 0 0; color: var(--vscode-descriptionForeground); font-size: 12px; }
-    #preview { margin: 0; padding: 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background)); border-radius: 4px; }
-    #status { margin: 0; color: var(--vscode-descriptionForeground); min-height: 0; }
-    #status.bad { color: var(--vscode-errorForeground, var(--vscode-editorError-foreground)); }
-    .bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px; padding: 12px 0 0; background: var(--vscode-editor-background); }
-    .spacer { flex: 1 1 auto; }
-    button { min-height: 28px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 1px solid transparent; border-radius: 2px; padding: 5px 14px; cursor: pointer; font-family: inherit; font-size: 13px; }
-    button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
-    button:hover { background: var(--vscode-button-hoverBackground); }
-    button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
-    button:disabled { cursor: default; opacity: .65; }
+    ${WEBVIEW_BASE_CSS}
+    .parameter-stack { display: grid; gap: 10px; }
+    .param-card { padding: 11px 12px; background: var(--ui-surface-strong); border: 1px solid var(--ui-line-soft); border-radius: var(--ui-radius-sm); }
+    .param-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+    .param-card .param-name { color: var(--vscode-foreground); font-family: var(--vscode-editor-font-family); font-size: 12.5px; font-weight: 650; }
+    .param-card input { font-family: var(--vscode-editor-font-family); }
+    #preview { max-height: 260px; white-space: pre-wrap; word-break: break-word; }
+    #status { margin-top: 12px; }
+    .action-bar button { min-width: 82px; }
   </style>
 </head>
 <body>
-  <h1>查询参数</h1>
-  <p class="sub">替换在本地完成，值只保存在本机（不进 settings.json、不参与 Settings Sync）。</p>
+  <div class="page-shell">
+  <header class="page-header">
+    <div class="page-heading">
+      <div class="eyebrow">Doris SQL Lite · ${escapeHtml(inputs.documentLabel)}</div>
+      <h1>确认本次 SQL 参数</h1>
+      <p class="sub">参数替换在本机完成。核对实际发送的 SQL 后，再提交给数据库。</p>
+    </div>
+    <div class="badge-row">
+      <span class="badge">${parameters.length} 个参数</span>
+      <span class="badge ${hasProtection ? 'accent' : ''}">${hasProtection ? (encryptedForm(inputs) ? '字段密文' : '字段原文') : '普通输出'}</span>
+    </div>
+  </header>
 
-  <section class="card">${rows}
+  <section class="section">
+    <div class="section-header">
+      <span class="section-title">参数值</span>
+      <span class="section-note">注释值只读，其余值可在本次执行前调整</span>
+    </div>
+    <div class="parameter-stack">${rows}</div>
   </section>
 
-  <section class="card">
-    <p class="sub" style="margin:0 0 8px;">实际发送的 SQL</p>
-    <pre id="preview">${encryptedForm(inputs) ? PROTECTED_SQL_NOTICE : ''}</pre>
+  <section class="section">
+    <div class="section-header">
+      <span class="section-title">实际发送的 SQL</span>
+      <span class="section-note">引用、引号和替换结果以这里为准</span>
+    </div>
+    <pre id="preview" class="code-surface">${encryptedForm(inputs) ? PROTECTED_SQL_NOTICE : ''}</pre>
   </section>
 
-  <p id="status"></p>
+  <p id="status" class="status-banner" role="status" aria-live="polite"></p>
 
-  <div class="bar">
+  <div class="action-bar">
     <button class="secondary" id="b-raw">原样发送</button>
     <span class="spacer"></span>
     <button class="secondary" id="b-cancel">取消</button>
     <button id="b-run">执行</button>
+  </div>
   </div>
 
   <script nonce="${nonce}">
@@ -299,7 +305,7 @@ function renderParameterForm(inputs: ParameterFormInputs): string {
       previewEl.textContent = message.sql;
       const missing = message.missing || [];
       runButton.disabled = missing.length > 0;
-      statusEl.className = missing.length > 0 ? 'bad' : '';
+      statusEl.className = 'status-banner' + (missing.length > 0 ? ' bad' : '');
       statusEl.textContent = missing.length > 0
         ? '还有 ' + missing.length + ' 个参数没有值：' + missing.join('、') + '。填写后再执行，或点「原样发送」。'
         : '';
@@ -332,13 +338,4 @@ function renderParameterForm(inputs: ParameterFormInputs): string {
   </script>
 </body>
 </html>`;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }

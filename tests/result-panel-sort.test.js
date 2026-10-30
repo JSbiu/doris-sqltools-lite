@@ -318,12 +318,13 @@ function inlineScript(html) {
 
 function renderPanel(result, metadata = {}) {
   const webview = { html: '', postMessage: async () => {}, onDidReceiveMessage: () => {} };
-  const panel = new ResultPanel({
+  const webviewPanel = {
     webview,
     title: '',
     reveal() {},
     onDidDispose() {},
-  });
+  };
+  const panel = new ResultPanel(webviewPanel);
   panel.update(result, {
     connectionName: 'demo',
     durationMs: 5,
@@ -331,7 +332,7 @@ function renderPanel(result, metadata = {}) {
     readComplete: true,
     ...metadata,
   });
-  return { panel, html: webview.html };
+  return { panel, webviewPanel, html: webview.html };
 }
 
 function openPanel(html) {
@@ -526,9 +527,13 @@ test('sorting and filtering coexist without clearing either state', () => {
 });
 
 test('shows the loaded-row scope and resets sort and filter on a re-render', () => {
-  const { panel, html } = renderPanel(resultOf(['b1', 'a2', 'b3', 'a4']));
-  assert.match(html, /排序与筛选仅作用于已加载的 4 行/);
-  assert.match(html, /不改变复制和导出内容\/顺序/);
+  const { panel, webviewPanel, html } = renderPanel(resultOf(['b1', 'a2', 'b3', 'a4']));
+  assert.equal(webviewPanel.title, '结果 · demo');
+  assert.match(html, /--ui-radius:/);
+  assert.match(html, /id="action-status" class="status-banner action-status" role="status" aria-live="polite"/);
+  assert.match(html, /table \{ width: max-content; min-width: 100%;/);
+  assert.match(html, /排序与筛选作用于已加载的 4 行/);
+  assert.match(html, /复制与导出保持查询返回顺序/);
 
   const view = openPanel(html);
   view.filter().value = 'b';
@@ -596,11 +601,13 @@ test('feedback actions block overlapping toolbar actions and release them after 
   view.receive({ type: 'actionCancelled', action: 'feedback' });
   assert.equal(copy.disabled, false);
   assert.equal(save.disabled, false);
+  assert.equal(view.document.getElementById('action-status').textContent, '已取消。');
   save.dispatch('click');
   assert.equal(view.messages[1].type, 'save-feedback');
   view.receive({ type: 'actionFailed', action: 'feedback' });
   assert.equal(copy.disabled, false);
   assert.equal(save.disabled, false);
+  assert.equal(view.document.getElementById('action-status').textContent, '操作未完成，详情请查看通知。');
   assert.equal(save.textContent, save.dataset.defaultLabel);
 });
 

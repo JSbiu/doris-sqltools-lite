@@ -1,8 +1,8 @@
 {
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
-  "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.9.7",
+  "description": "在 VS Code 中执行 MySQL、Apache Doris 与 Spark Thrift SQL，查看执行计划，流式导出完整 TSV，并生成可核对的 AI 反馈与字段密文。",
+  "version": "0.9.8",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -33,107 +33,107 @@
     "commands": [
       {
         "command": "dorisSqlLite.addConnection",
-        "title": "Doris SQL Lite: Add Connection",
+        "title": "Doris SQL Lite: 添加连接",
         "icon": "$(add)"
       },
       {
         "command": "dorisSqlLite.newQuery",
-        "title": "Doris SQL Lite: New Query",
+        "title": "Doris SQL Lite: 新建 SQL 查询",
         "icon": "$(new-file)"
       },
       {
         "command": "dorisSqlLite.setConnection",
-        "title": "Doris SQL Lite: Set Connection",
+        "title": "Doris SQL Lite: 为当前文件选择连接",
         "icon": "$(database)"
       },
       {
         "command": "dorisSqlLite.resetFileSessions",
-        "title": "Doris SQL Lite: Reset This File's Sessions",
+        "title": "Doris SQL Lite: 重置当前文件的会话",
         "icon": "$(debug-restart)"
       },
       {
         "command": "dorisSqlLite.editConnection",
-        "title": "Doris SQL Lite: Edit Connection",
+        "title": "Doris SQL Lite: 编辑连接",
         "icon": "$(edit)"
       },
       {
         "command": "dorisSqlLite.runQuery",
-        "title": "Doris SQL Lite: Run Query at Cursor",
+        "title": "Doris SQL Lite: 执行光标处 SQL",
         "icon": "$(play)"
       },
       {
         "command": "dorisSqlLite.runQueryToTsv",
-        "title": "Doris SQL Lite: Run Query to TSV at Cursor",
+        "title": "Doris SQL Lite: 执行并导出完整 TSV",
         "icon": "$(save-as)"
       },
       {
         "command": "dorisSqlLite.runBatch",
-        "title": "Doris SQL Lite: Run SQL Batches",
+        "title": "Doris SQL Lite: 顺序分批执行 SQL",
         "icon": "$(run-all)"
       },
       {
         "command": "dorisSqlLite.copyLastFeedback",
-        "title": "Doris SQL Lite: Copy Last SQL Feedback"
+        "title": "Doris SQL Lite: 复制最近一次执行反馈"
       },
       {
         "command": "dorisSqlLite.saveLastFeedback",
-        "title": "Doris SQL Lite: Save Last SQL Feedback"
+        "title": "Doris SQL Lite: 保存最近一次执行反馈"
       },
       {
         "command": "dorisSqlLite.toggleDataMode",
-        "title": "Doris SQL Lite: Toggle Plain / Encrypted Mode",
+        "title": "Doris SQL Lite: 切换字段密文 / 字段原文",
         "icon": "$(lock)"
       },
       {
         "command": "dorisSqlLite.exportDataKeys",
-        "title": "Doris SQL Lite: Export Data Encryption Keys"
+        "title": "Doris SQL Lite: 导出字段加密密钥"
       },
       {
         "command": "dorisSqlLite.importDataKeys",
-        "title": "Doris SQL Lite: Import Data Encryption Keys"
+        "title": "Doris SQL Lite: 导入字段加密密钥"
       },
       {
         "command": "dorisSqlLite.decryptSelectedValue",
-        "title": "Doris SQL Lite: Decrypt Selected Value"
+        "title": "Doris SQL Lite: 解密选中字段值"
       },
       {
         "command": "dorisSqlLite.cancelQuery",
-        "title": "Doris SQL Lite: Cancel Query",
+        "title": "Doris SQL Lite: 取消当前查询",
         "icon": "$(stop-circle)"
       },
       {
         "command": "dorisSqlLite.explainQuery",
-        "title": "Doris SQL Lite: Explain Query at Cursor",
+        "title": "Doris SQL Lite: 查看光标处执行计划",
         "icon": "$(inspect)"
       },
       {
         "command": "dorisSqlLite.testConnection",
-        "title": "Doris SQL Lite: Test Connection",
+        "title": "Doris SQL Lite: 测试连接",
         "icon": "$(debug-disconnect)"
       },
       {
         "command": "dorisSqlLite.removeConnection",
-        "title": "Doris SQL Lite: Remove Connection",
+        "title": "Doris SQL Lite: 删除连接",
         "icon": "$(trash)"
       },
       {
         "command": "dorisSqlLite.forgetPassword",
-        "title": "Doris SQL Lite: Forget Saved Password",
+        "title": "Doris SQL Lite: 清除已保存密码",
         "icon": "$(key)"
       },
       {
         "command": "dorisSqlLite.setExportDirectory",
-        "title": "Doris SQL Lite: Set Default Export Directory",
+        "title": "Doris SQL Lite: 设置默认导出目录",
         "icon": "$(folder)"
       },
       {
         "command": "dorisSqlLite.clearExportDirectory",
-        "title": "Doris SQL Lite: Clear Default Export Directory",
+        "title": "Doris SQL Lite: 清除默认导出目录",
         "icon": "$(close)"
       },
       {
         "command": "dorisSqlLite.forgetSqlParameters",
-        "title": "Doris SQL Lite: Forget This File's Query Parameters",
+        "title": "Doris SQL Lite: 清除当前文件的查询参数",
         "icon": "$(close)"
       }
     ],
@@ -162,7 +162,7 @@
       "dorisSqlLite": [
         {
           "id": "dorisSqlLiteExplorer",
-          "name": "Connections"
+          "name": "连接"
         }
       ]
     },
@@ -254,7 +254,7 @@
     "viewsWelcome": [
       {
         "view": "dorisSqlLiteExplorer",
-        "contents": "还没有数据库连接。\n[添加 Doris / MySQL 连接](command:dorisSqlLite.addConnection)"
+        "contents": "还没有数据库连接。\n[添加 MySQL / Doris / Spark Thrift 连接](command:dorisSqlLite.addConnection)"
       }
     ],
     "configuration": {
@@ -263,7 +263,7 @@
         "dorisSqlLite.connections": {
           "type": "array",
           "scope": "machine",
-          "description": "Non-sensitive MySQL, Doris and Spark Thrift connection metadata. Kept in user settings so host names and account names never land in a project's .vscode/settings.json. Passwords are stored in VS Code SecretStorage.",
+          "description": "MySQL、Doris 与 Spark Thrift 的非敏感连接元数据。保存在用户设置中，避免主机名和账号写入项目的 .vscode/settings.json；密码保存在 VS Code SecretStorage。",
           "items": {
             "type": "object",
             "required": [
@@ -305,17 +305,17 @@
               "ssl": {
                 "type": "boolean",
                 "default": false,
-                "description": "Use TLS for MySQL and Doris connections. Spark Thrift uses its configured SASL/NOSASL transport."
+                "description": "MySQL / Doris 连接启用 TLS。Spark Thrift 使用所选 SASL/NOSASL 传输。"
               },
               "sslVerify": {
                 "type": "boolean",
                 "default": true,
-                "description": "Validate the MySQL/Doris TLS certificate chain and, for DNS hosts, the certificate host name. Set false only for a trusted endpoint that presents a private or temporary certificate."
+                "description": "校验证书链；主机为 DNS 名称时同时校验证书主机名。仅对可信的私有证书目标关闭。"
               },
               "sslCaFile": {
                 "type": "string",
                 "default": "",
-                "description": "Optional local PEM certificate authority file for MySQL/Doris TLS. An empty value uses the system trust store."
+                "description": "可选的本机 PEM CA 证书文件。留空时使用系统信任库。"
               },
               "hiveAuth": {
                 "type": "string",
@@ -323,7 +323,7 @@
                   "plain",
                   "nosasl"
                 ],
-                "description": "Spark Thrift authentication: plain (SASL/PLAIN, also covers LDAP) or nosasl (no authentication). Only used when type is Spark."
+                "description": "Spark Thrift 认证方式：plain 对应 SASL/PLAIN（也覆盖 LDAP），nosasl 对应无认证。仅用于 Spark 类型。"
               }
             }
           }
@@ -333,41 +333,41 @@
           "default": 1000,
           "minimum": 1,
           "maximum": 100000,
-          "description": "Maximum number of rows rendered in the result panel and used by the clipboard copy. Exporting always writes the full result set."
+          "description": "结果面板保留并用于复制 TSV 的最大行数。完整导出始终写出全部结果。"
         },
         "dorisSqlLite.exportDirectory": {
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Directory that TSV exports are written to without prompting. Leave empty to be asked for a location on every export."
+          "description": "TSV 默认写入目录。留空时每次导出都由你选择位置。"
         },
         "dorisSqlLite.exportChunkRows": {
           "type": "number",
           "default": 5000,
           "minimum": 100,
           "maximum": 100000,
-          "description": "Rows per write block during a TSV export. Smaller blocks keep each intermediate string shorter and let the progress bar update more often; larger blocks mean fewer round trips. Exporting always writes the full result set."
+          "description": "TSV 导出时每批写入的行数。较小批次让进度更新更频繁，较大批次减少 I/O 次数。"
         },
         "dorisSqlLite.escapeSpreadsheetFormulas": {
           "type": "boolean",
           "default": true,
-          "description": "Prefix a cell with an apostrophe when its text starts with = or @, or with + or - followed by something that is not a plain number, so Excel, LibreOffice and Google Sheets do not evaluate exported data as a formula. Turn this off if a downstream tool needs the exact stored value."
+          "description": "对可能被 Excel、LibreOffice 或 Google Sheets 当作公式的单元格添加文本前缀。下游工具需要原值时关闭。"
         },
         "dorisSqlLite.sqlParameters": {
           "type": "boolean",
           "default": true,
-          "description": "Substitute ${name} placeholders in a statement before it is sent, asking for any value the template does not answer itself (${name=default}). Works for MySQL, Doris and Spark alike. Write $${name} to keep a placeholder for the server, for example a Spark conf reference. Values are stored locally, never in settings.json."
+          "description": "发送前替换 SQL 中的 ${name} 参数；缺少值时打开参数面板。${name=default} 提供默认值，$${name} 将占位符原样交给服务端。参数值保存在本机扩展状态中。"
         },
         "dorisSqlLite.readRowLimit": {
           "type": "number",
           "default": 0,
-          "description": "How many rows to read before stopping and ignoring the rest of the answer. 0 follows maxResultRows: once one row past the display cap arrives, reading stops and the statement is interrupted, so the panel reports \u201c已读取 N 行\u201d instead of an exact total. A positive number sets an explicit limit (never below maxResultRows). -1 reads the whole answer so the total is exact, which is much slower on large results."
+          "description": "读取多少行后停止。0 跟随 maxResultRows：达到显示上限后停止读取并中断语句，面板显示“已读取 N 行”。正数设置显式读取上限，-1 读取完整结果以得到精确总数。"
         },
         "dorisSqlLite.queryIdleTimeoutMs": {
           "type": "number",
           "default": 300000,
           "minimum": 0,
-          "description": "How long a live connection may go without answering before it is treated as gone (milliseconds). It applies in two places, both of which would otherwise wait forever on a peer that disappeared without closing the connection (a dropped VPN, a firewall that forgot the flow, a killed server process). While the statement is still running on the server, each status request is raced against this limit -- those are small round trips whose cost barely depends on how long the statement itself runs, so the limit measures one request rather than the total runtime, and a Spark job may still legitimately run for hours. Keep it well above the server's worst status latency, since a server saturated with work can take seconds to answer a status request; the default is deliberately generous for that reason. While the answer is arriving, the clock restarts on every row and only starts after the first one, so a statement that has produced nothing yet is never cut off. 0 disables the check."
+          "description": "连接无响应多久后视为中断，单位毫秒。它衡量单个状态请求或相邻数据行之间的等待，不限制 Spark 任务的总运行时长。0 关闭检查。"
         }
       }
     }
@@ -376,6 +376,7 @@
     "build": "node scripts/build.js",
     "check:webview": "node scripts/check-webview.js",
     "check:bundle": "node scripts/check-bundle.js",
+    "preview:webviews": "node scripts/preview-webviews.js",
     "compile": "tsc -p ./",
     "lint": "eslint src",
     "test": "tsc -p ./ && node scripts/check-webview.js && node scripts/build.js && node scripts/check-bundle.js && node --test \"tests/**/*.test.js\"",

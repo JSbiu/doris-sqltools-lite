@@ -15,11 +15,11 @@ function decryptedText(value: unknown): string {
 
 export function registerDataCommands(context: vscode.ExtensionContext, keys: DataKeys): void {
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-  status.name = 'Doris SQL Lite Data Mode';
+  status.name = '字段输出模式';
   status.command = 'dorisSqlLite.toggleDataMode';
   const refresh = (): void => {
-    status.text = getDataMode() === 'encrypted' ? '$(lock) SQL 加密模式' : '$(unlock) SQL 明文模式';
-    status.tooltip = '切换当前窗口结果、参数、复制和导出的模式。只有 SQL 注释声明的字段参与加密。';
+    status.text = getDataMode() === 'encrypted' ? '$(lock) 字段密文' : '$(unlock) 字段原文';
+    status.tooltip = '切换当前窗口结果、参数、复制和导出的字段保护输出。只有 SQL 注释声明的字段参与转换。';
     status.show();
   };
   refresh();

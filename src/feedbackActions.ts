@@ -129,7 +129,7 @@ async function feedbackAction(
     return await action(snapshot);
   } catch (error) {
     if (isProtected(record) && (mode === 'encrypted' || getDataMode() === 'encrypted')) {
-      throw new Error('反馈操作未完成。若已选择保存位置，请核对是否存在未完成文件；详细错误请在明文模式查看。', { cause: error });
+      throw new Error('反馈操作未完成。若已选择保存位置，请核对是否存在未完成文件。切换到字段原文模式后，可查看详细错误。', { cause: error });
     }
     throw error;
   } finally {

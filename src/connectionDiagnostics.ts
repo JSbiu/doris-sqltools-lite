@@ -65,7 +65,7 @@ const RULES: readonly DiagnosticRule[] = [
       /peer indicated failure/i,
     ],
     summary: '用户名或密码错误。',
-    hint: '执行 Doris SQL Lite: Forget Saved Password 清除已保存的密码后重新输入。',
+    hint: '执行 Doris SQL Lite: 清除已保存密码，然后重新输入。',
   },
   {
     kind: 'server',

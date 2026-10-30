@@ -52,6 +52,7 @@ import { resolveStatementContext, findDirectiveConnection } from './sqlDirective
 import { buildExplainSql, planText } from './executionPlan';
 import { openPlanPanel } from './planPanel';
 import { setFeedbackExtensionVersion } from './sqlFeedback';
+import { WEBVIEW_BASE_CSS, escapeHtml } from './webviewTheme';
 import { DocumentSessions, SessionExpiredError, type DocumentOperation, type SessionEntry, type SessionSnapshot } from './documentSessions';
 import {
   QueryCancelledError,
@@ -159,12 +160,17 @@ function protectedMessage(error: unknown, protection?: ProtectionProjection, pro
 }
 
 function modeLabel(protection?: ProtectionProjection): string {
-  return protection ? `（${protection.mode === 'encrypted' ? '加密' : '明文'}模式）` : '';
+  return protection ? `（${protection.mode === 'encrypted' ? '字段密文' : '字段原文'}）` : '';
 }
 
-function tlsLabel(profile: ConnectionProfile): string {
-  if (!profile.ssl) return '未启用 TLS';
-  return profile.sslVerify === false ? 'TLS · 接受服务器证书' : 'TLS · 校验证书';
+function tlsDescription(profile: ConnectionProfile): string {
+  if (!profile.ssl) return '';
+  return profile.sslVerify === false ? 'TLS · 接受证书' : 'TLS · 校验';
+}
+
+function tlsTooltip(profile: ConnectionProfile): string {
+  if (!profile.ssl) return '传输：未启用 TLS';
+  return profile.sslVerify === false ? '传输：TLS，接受服务器证书' : '传输：TLS，校验证书';
 }
 
 function declaresProtection(sql: string): boolean {
@@ -181,6 +187,7 @@ async function statementProtection(context: { encryption?: Readonly<Record<strin
 
 interface ResultPanelMetadata {
   connectionName: string;
+  databaseType?: ConnectionProfile['type'];
   statementName?: string;
   database?: string;
   durationMs: number;
@@ -283,14 +290,14 @@ class ConnectionItem extends vscode.TreeItem {
 
   public constructor(public readonly profile: ConnectionProfile) {
     super(profile.name, vscode.TreeItemCollapsibleState.None);
-    this.description = `${profile.type} · ${profile.host}:${profile.port} · ${tlsLabel(profile)}`;
+    this.description = `${profile.type} · ${profile.host}:${profile.port}${profile.ssl ? ` · ${tlsDescription(profile)}` : ''}`;
     this.tooltip = `${profile.name}\n${profile.username}@${profile.host}:${profile.port}${
       profile.database ? `/${profile.database}` : ''
-    }\n${tlsLabel(profile)}`;
+    }\n${tlsTooltip(profile)}`;
     this.iconPath = new vscode.ThemeIcon('database');
     this.command = {
       command: 'dorisSqlLite.newQuery',
-      title: 'New SQL Query',
+      title: '新建 SQL 查询',
       arguments: [profile.id],
     };
   }
@@ -343,7 +350,7 @@ class ResultPanel {
 
     const panel = vscode.window.createWebviewPanel(
       'dorisSqlLiteResults',
-      `Results · ${metadata.statementName ?? metadata.connectionName}`,
+      `结果 · ${metadata.statementName ?? metadata.connectionName}`,
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true },
     );
@@ -401,7 +408,7 @@ class ResultPanel {
   private update(result: QueryResultView, metadata: ResultPanelMetadata): void {
     this.result = result;
     this.metadata = metadata;
-    this.panel.title = `Results · ${metadata.statementName ?? metadata.connectionName}`;
+    this.panel.title = `结果 · ${metadata.statementName ?? metadata.connectionName}`;
     this.render();
   }
 
@@ -448,7 +455,7 @@ class ResultPanel {
       }),
     );
     const header = [
-      '<th class="row-number" aria-label="Row number">#</th>',
+      '<th class="row-number" aria-label="行号">#</th>',
       ...this.columns.map((column, index) => `<th scope="col" aria-sort="none" data-sort-header="${index}"><button type="button" class="sort-button" data-sort-column="${index}" data-sort-label="${escapeHtml(column)}" title="排序：${escapeHtml(column)}" aria-label="按 ${escapeHtml(column)} 排序：当前为原始顺序">${escapeHtml(column)}<span class="sort-indicator" aria-hidden="true">↕</span></button></th>`),
     ].join('');
     const body = shownRows
@@ -457,33 +464,34 @@ class ResultPanel {
     const hasTable = this.columns.length > 0;
     const exportDirectory = configuredExportDirectory();
     const exportHint = exportDirectory ? `导出到默认目录：${exportDirectory}` : '选择导出位置';
-    const databaseLabel = this.metadata.database
-      ? `<span class="meta">${escapeHtml(this.metadata.database)}</span>`
-      : '';
     const truncatedNotice = !this.result.truncated
       ? ''
       : this.metadata.readComplete
-        ? `<div class="notice">共 ${this.result.totalRows} 行，显示前 ${this.metadata.maxRows} 行。导出为全部 ${this.result.totalRows} 行；复制为当前显示的 ${this.rows.length} 行。</div>`
+        ? `<div class="status-banner warning">本次结果共 ${this.result.totalRows} 行，面板保留前 ${this.metadata.maxRows} 行。导出会写出全部 ${this.result.totalRows} 行，复制使用当前显示的 ${this.rows.length} 行。</div>`
         // Reading stopped at the limit, so there is no total to report -- saying
         // "共 N 行" here would be a lie the user cannot see through.
-        : `<div class="notice">已读取 ${this.result.totalRows} 行后停止（达到读取上限，结果不止这些）。显示前 ${this.metadata.maxRows} 行，复制同样只取这些行；导出不受影响，会重新执行该查询并写出全部结果。</div>`;
+        : `<div class="status-banner warning">已读取 ${this.result.totalRows} 行并达到上限。面板与复制使用已加载的 ${this.rows.length} 行；导出会重新执行查询并写出完整结果。</div>`;
     // What was actually substituted, not what the file says: with ${...} in the
     // statement the editor no longer shows the values that ran.
     const projection = this.metadata.protection?.withMode(getDataMode());
     const parameterEntries = Object.entries(projection?.parameters(this.metadata.parameters ?? {}) ?? this.metadata.parameters ?? {});
     const parameterNotice = parameterEntries.length === 0
       ? ''
-      : `<div class="params"><span class="params-label">本次参数</span>${parameterEntries
-          .map(([name, value]) => `<span class="param"><span class="param-name">${escapeHtml(name)}</span>=<span class="param-value">${escapeHtml(value)}</span></span>`)
-          .join('')}</div>`;
+      : `<section class="section compact parameter-panel"><div class="section-header"><span class="section-title">本次参数</span><span class="section-note">${parameterEntries.length} 项</span></div><div class="parameter-list">${parameterEntries
+          .map(([name, value]) => `<span class="parameter-chip"><span class="parameter-key">${escapeHtml(name)}</span><span class="parameter-value">${escapeHtml(value)}</span></span>`)
+          .join('')}</div></section>`;
     const resultContent = hasTable
       ? `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，未返回数据</td></tr>`}</tbody></table></div>`
-      : `<section class="success-state"><span class="success-icon">✓</span><div><strong>执行成功</strong><p>${this.result.affectedRows === null ? '影响行数未知' : `${this.result.affectedRows} 行受到影响`} · ${formatDuration(this.metadata.durationMs)}</p></div></section>`;
+      : `<section class="success-state"><span class="success-icon">✓</span><div><h2>语句执行成功</h2><p>${this.result.affectedRows === null ? '影响行数未知' : `影响 ${this.result.affectedRows} 行`} · ${formatDuration(this.metadata.durationMs)}</p></div></section>`;
     // Sorting and filtering only ever reorder what is already in the panel, so
     // say that next to the table instead of implying a server-side ORDER BY.
     const sortScopeNotice = !hasTable
       ? ''
-      : `<div class="sort-scope"><span id="sort-status" class="sort-status" role="status" aria-live="polite">原始顺序</span><span>排序与筛选仅作用于已加载的 ${this.rows.length} 行；不改变复制和导出内容/顺序。</span></div>`;
+      : `<div class="table-meta"><span id="sort-status" class="sort-status" role="status" aria-live="polite">原始顺序</span><span>排序与筛选作用于已加载的 ${this.rows.length} 行；复制与导出保持查询返回顺序。</span></div>`;
+    const title = this.metadata.statementName ?? '查询结果';
+    const modeControl = projection
+      ? `<button class="badge accent mode-button" id="data-mode" title="切换当前窗口的字段保护输出方式"><span>${projection.mode === 'encrypted' ? '字段密文' : '字段原文'}</span><span class="mode-hint">点击切换</span></button>`
+      : '<span class="badge">普通输出</span>';
 
     this.panel.webview.html = `<!doctype html>
 <html lang="zh-CN">
@@ -491,74 +499,110 @@ class ResultPanel {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}';" />
   <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; padding: 16px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); }
-    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
-    .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-right: auto; }
-    .summary strong { font-size: 14px; }
-    .meta { color: var(--vscode-descriptionForeground); font-size: 12px; }
-    .connection { padding: 2px 7px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; }
-    .filter { min-width: 180px; width: min(260px, 35vw); color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 6px 8px; outline: none; }
-    .filter:focus { border-color: var(--vscode-focusBorder); }
-    button { min-height: 28px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 1px solid transparent; border-radius: 2px; padding: 5px 11px; cursor: pointer; }
-    button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
-    button:hover { background: var(--vscode-button-hoverBackground); }
-    button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
-    button.ghost { color: var(--vscode-textLink-foreground); background: transparent; border-color: var(--vscode-panel-border); }
-    button.ghost:hover { background: var(--vscode-list-hoverBackground); }
-    button:disabled { cursor: default; opacity: .65; }
-    .notice { margin-bottom: 10px; padding: 8px 10px; color: var(--vscode-editorWarning-foreground); background: var(--vscode-inputValidation-warningBackground); border-left: 3px solid var(--vscode-editorWarning-foreground); }
-    .params { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 10px; padding: 8px 10px; border-left: 3px solid var(--vscode-panel-border); background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background)); font-family: var(--vscode-editor-font-family); font-size: 12px; }
-    .params-label { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); }
-    .sort-scope { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 10px; color: var(--vscode-descriptionForeground); font-size: 12px; }
+    ${WEBVIEW_BASE_CSS}
+    .result-page { padding-bottom: 18px; }
+    .result-commandbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px 12px;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      background: var(--ui-surface);
+      border: 1px solid var(--ui-line-soft);
+      border-radius: var(--ui-radius);
+    }
+    .filter-wrap { position: relative; flex: 1 1 240px; max-width: 420px; }
+    .filter-wrap input { padding-left: 30px; }
+    .filter-icon { position: absolute; left: 9px; top: 50%; color: var(--vscode-descriptionForeground); transform: translateY(-50%); pointer-events: none; }
+    .action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .action-group.secondary { margin-left: auto; }
+    .mode-button { gap: 7px; padding: 2px 9px; color: var(--vscode-foreground); background: transparent; font-weight: 600; }
+    .mode-button:hover { background: var(--vscode-list-hoverBackground); }
+    .mode-hint { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 500; }
+    .result-notices { display: grid; gap: 8px; margin-bottom: 12px; }
+    .parameter-panel { margin-bottom: 12px; }
+    .parameter-list { display: flex; flex-wrap: wrap; gap: 7px; }
+    .parameter-chip {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
+      max-width: min(100%, 420px);
+      padding: 4px 8px;
+      background: var(--ui-code);
+      border: 1px solid var(--ui-line-soft);
+      border-radius: var(--ui-radius-sm);
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11.5px;
+    }
+    .parameter-key { color: var(--vscode-descriptionForeground); }
+    .parameter-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .table-section { border: 1px solid var(--ui-line-soft); border-radius: var(--ui-radius); overflow: hidden; background: var(--ui-surface-strong); }
+    .table-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 5px 12px;
+      padding: 9px 12px;
+      color: var(--vscode-descriptionForeground);
+      border-bottom: 1px solid var(--ui-line-soft);
+      font-size: 11.5px;
+    }
     .sort-status { color: var(--vscode-foreground); font-weight: 600; }
-    .sort-button { display: inline-flex; align-items: center; gap: 6px; min-height: 0; padding: 0; color: inherit; background: transparent; border: 0; font: inherit; font-weight: 600; cursor: pointer; }
-    .sort-button:hover { color: var(--vscode-textLink-foreground); background: transparent; }
-    .sort-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
-    .sort-indicator { color: var(--vscode-descriptionForeground); font-weight: 400; }
-    .param-name { color: var(--vscode-descriptionForeground); }
-    .table-wrap { overflow: auto; max-height: calc(100vh - 92px); border: 1px solid var(--vscode-panel-border); }
-    table { border-collapse: separate; border-spacing: 0; min-width: 100%; white-space: nowrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
-    th, td { border-bottom: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); padding: 6px 9px; text-align: left; vertical-align: top; }
-    th { position: sticky; top: 0; z-index: 2; color: var(--vscode-foreground); background: var(--vscode-editorGroupHeader-tabsBackground); font-family: var(--vscode-font-family); font-weight: 600; }
-    tbody tr:nth-child(even) { background: var(--vscode-list-hoverBackground); }
+    .table-wrap { overflow: auto; max-height: calc(100vh - 290px); }
+    table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; white-space: nowrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    th, td { border-bottom: 1px solid var(--ui-line-soft); border-right: 1px solid var(--ui-line-soft); padding: 7px 10px; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 2; color: var(--vscode-foreground); background: var(--vscode-editorGroupHeader-tabsBackground); font-family: var(--vscode-font-family); font-weight: 650; }
+    tbody tr:nth-child(even) { background: color-mix(in srgb, var(--vscode-list-hoverBackground) 55%, transparent); }
     tbody tr:hover { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
     td { max-width: 560px; overflow: hidden; text-overflow: ellipsis; }
-    .row-number { position: sticky; left: 0; z-index: 1; width: 1%; color: var(--vscode-descriptionForeground); background: var(--vscode-editorGroupHeader-tabsBackground); text-align: right; user-select: none; }
+    .row-number { position: sticky; left: 0; z-index: 1; width: 1%; min-width: 44px; color: var(--vscode-descriptionForeground); background: var(--vscode-editorGroupHeader-tabsBackground); text-align: right; user-select: none; }
     th.row-number { z-index: 3; }
+    .sort-button { display: inline-flex; align-items: center; gap: 6px; min-height: 0; padding: 0; color: inherit; background: transparent; border: 0; font: inherit; font-weight: 650; cursor: pointer; }
+    .sort-button:hover { color: var(--vscode-textLink-foreground); background: transparent; }
+    .sort-indicator { color: var(--vscode-descriptionForeground); font-weight: 400; }
     .null-value { color: var(--vscode-descriptionForeground); font-style: italic; }
-    .empty-row td { padding: 28px; color: var(--vscode-descriptionForeground); text-align: center; }
-    .success-state { display: flex; align-items: center; gap: 12px; padding: 24px; border: 1px solid var(--vscode-panel-border); }
-    .success-state p { margin: 4px 0 0; color: var(--vscode-descriptionForeground); }
-    .success-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-testing-iconPassed); font-weight: 700; }
-    .data-mode { font-weight: 600; border: 1px solid var(--vscode-focusBorder); }
+    .empty-row td { padding: 38px 20px; color: var(--vscode-descriptionForeground); text-align: center; }
+    .success-state { display: flex; align-items: flex-start; gap: 14px; padding: 22px; background: var(--ui-surface-strong); border: 1px solid var(--ui-line-soft); border-radius: var(--ui-radius); }
+    .success-state h2 { margin-bottom: 4px; font-size: 16px; }
+    .success-state p { margin: 0; color: var(--vscode-descriptionForeground); }
+    .success-icon { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-testing-iconPassed); font-weight: 700; }
   </style>
 </head>
 <body>
-  <div class="toolbar">
-    <span class="summary">
-      <strong><span id="visible-count">${this.rows.length}</span> 行</strong>
-      <span class="meta">${this.columns.length} 列</span>
-      <span class="meta connection">${escapeHtml(this.metadata.connectionName)}</span>
-      ${this.metadata.statementName ? `<span class="meta">${escapeHtml(this.metadata.statementName)}</span>` : ''}
-      ${databaseLabel}
-      <span class="meta">${formatDuration(this.metadata.durationMs)}</span>
-    </span>
+  <div class="page-shell wide result-page">
+  <header class="page-header">
+    <div class="page-heading">
+      <div class="eyebrow">查询结果 · ${escapeHtml(this.metadata.connectionName)}</div>
+      <h1>${escapeHtml(title)}</h1>
+      <p class="sub">${this.metadata.database ? `数据库 ${escapeHtml(this.metadata.database)} · ` : ''}${formatDuration(this.metadata.durationMs)} · 查询返回的原始顺序</p>
+    </div>
+    <div class="badge-row">
+      ${this.metadata.databaseType ? `<span class="badge accent">${escapeHtml(this.metadata.databaseType)}</span>` : ''}
+      <span class="badge" role="status" aria-live="polite"><span id="visible-count">${this.rows.length}</span> 行</span>
+      <span class="badge">${this.columns.length} 列</span>
+      ${modeControl}
+    </div>
+  </header>
+  <div class="result-commandbar">
+    ${hasTable ? `<div class="filter-wrap"><span class="filter-icon" aria-hidden="true">⌕</span><input id="result-filter" type="search" placeholder="筛选当前结果…" aria-label="筛选当前结果" title="筛选只改变当前显示" /></div>` : ''}
     ${hasTable ? `
-      <input id="result-filter" class="filter" type="search" placeholder="筛选当前结果…" aria-label="筛选当前结果" title="仅筛选显示，不改变复制和导出内容" />
-      <button class="secondary" data-export="default" data-format="tsv" data-default-label="导出 TSV" title="${escapeHtml(exportHint)}">导出 TSV</button>
-      <button class="ghost" data-export="custom" data-format="tsv" data-default-label="其他位置…" title="这次导出时弹出位置选择">其他位置…</button>
-      <button data-action="copy" data-default-label="复制 TSV">复制 TSV</button>
+      <div class="action-group">
+        <button data-export="default" data-format="tsv" data-default-label="导出 TSV" title="${escapeHtml(exportHint)}">导出 TSV</button>
+        <button class="secondary" data-action="copy" data-default-label="复制 TSV">复制 TSV</button>
+        <button class="ghost" data-export="custom" data-format="tsv" data-default-label="其他位置…" title="这次导出时选择位置">其他位置…</button>
+      </div>
     ` : ''}
-    <button class="ghost" data-action="copy-feedback" data-default-label="复制 AI 反馈">复制 AI 反馈</button>
-    <button class="ghost" data-action="save-feedback" data-default-label="保存 AI 反馈…">保存 AI 反馈…</button>
-    <button class="ghost data-mode" id="data-mode" title="统一切换当前窗口的输出模式，仅保护注释声明字段">${projection ? (projection.mode === 'encrypted' ? '加密模式' : '明文模式') : '未配置加密字段'}</button>
+    <div class="action-group secondary">
+      <button class="ghost" data-action="copy-feedback" data-default-label="复制 AI 反馈">复制 AI 反馈</button>
+      <button class="ghost" data-action="save-feedback" data-default-label="保存 AI 反馈…">保存 AI 反馈…</button>
+    </div>
   </div>
-  ${truncatedNotice}
+  <p id="action-status" class="status-banner action-status" role="status" aria-live="polite"></p>
+  <div class="result-notices">${truncatedNotice}</div>
   ${parameterNotice}
-  ${sortScopeNotice}
-  ${resultContent}
+  ${hasTable ? `<section class="table-section">${sortScopeNotice}<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，返回 0 行</td></tr>`}</tbody></table></div></section>` : resultContent}
+  </div>
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
     document.getElementById('data-mode')?.addEventListener('click', () => api.postMessage({ type: 'toggle-mode' }));
@@ -567,6 +611,7 @@ class ResultPanel {
     const exportElsewhereButton = document.querySelector('button[data-export="custom"]');
     const copyFeedbackButton = document.querySelector('button[data-action="copy-feedback"]');
     const saveFeedbackButton = document.querySelector('button[data-action="save-feedback"]');
+    const actionStatus = document.getElementById('action-status');
     const actionButtons = [copyButton, exportButton, exportElsewhereButton, copyFeedbackButton, saveFeedbackButton];
     let pendingButton;
     const setPending = (button, label) => {
@@ -697,7 +742,12 @@ class ResultPanel {
       pendingButton = undefined;
       if (!button) return;
       const completed = data.type === 'actionComplete';
+      const failed = data.type === 'actionFailed';
       button.textContent = completed ? (data.action === 'copy' ? '已复制' : data.action === 'feedback' ? '已完成' : '已导出') : button.dataset.defaultLabel;
+      actionStatus.textContent = completed
+        ? data.action === 'copy' ? '已复制当前结果。' : data.action === 'feedback' ? '反馈操作已完成。' : '导出已完成。'
+        : failed ? '操作未完成，详情请查看通知。' : '已取消。';
+      actionStatus.className = 'status-banner action-status' + (failed ? ' bad' : completed ? ' ok' : '');
       window.setTimeout(() => {
         actionButtons.forEach((action) => { if (action) action.disabled = false; });
         button.textContent = button.dataset.defaultLabel;
@@ -1124,7 +1174,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   activeConnectionSession = connectionSession;
   const connectionStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  connectionStatus.name = 'Doris SQL Lite Connection';
+  connectionStatus.name = 'Doris SQL Lite 连接';
   connectionStatus.command = 'dorisSqlLite.setConnection';
   const refreshConnectionStatus = (): void => updateConnectionStatus(connectionStatus, manager, connectionSession);
 
@@ -1134,7 +1184,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // discoverable by name. This item is shown only while something is running,
   // so it never becomes one more thing to ignore.
   const runningStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
-  runningStatus.name = 'Doris SQL Lite Running Query';
+  runningStatus.name = 'Doris SQL Lite 查询状态';
   runningStatus.text = '$(stop-circle) 正在执行…';
   runningStatus.tooltip = '当前有 SQL 正在执行。点击取消。';
   runningStatus.command = 'dorisSqlLite.cancelQuery';
@@ -2183,6 +2233,7 @@ async function executeQuery(
           for (const row of view.rows) protection?.withMode('encrypted').row(row);
           ResultPanel.open(view, {
             connectionName: profile.name,
+            databaseType: profile.type,
             statementName: context?.name,
             database: profile.database,
             durationMs: Date.now() - startedAt,
@@ -2289,14 +2340,14 @@ async function chooseProfile(
     }
   }
   if (profiles.length === 0) {
-    vscode.window.showInformationMessage('还没有连接，请先执行 Doris SQL Lite: Add Connection。');
+    vscode.window.showInformationMessage('还没有连接，请先执行 Doris SQL Lite: 添加连接。');
     return undefined;
   }
   const selected = await vscode.window.showQuickPick(
     profiles.map((profile) => ({
       label: profile.name,
       description: `${profile.type} · ${profile.host}:${profile.port}`,
-      detail: `${profile.username}${profile.database ? ` · ${profile.database}` : ' · 未指定 database'} · ${tlsLabel(profile)}`,
+      detail: `${profile.username}${profile.database ? ` · ${profile.database}` : ' · 未指定数据库'} · ${tlsTooltip(profile)}`,
       profile,
     })),
     { title: '选择数据库连接' }, token,
@@ -2337,15 +2388,6 @@ function formatDuration(durationMs: number): string {
     return `${Math.max(0, durationMs)} ms`;
   }
   return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 2 : 1)} s`;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 function nonce(): string {

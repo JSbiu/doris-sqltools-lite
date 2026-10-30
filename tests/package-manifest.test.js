@@ -17,6 +17,6 @@ test('declares TLS settings only for the MySQL-protocol connections', () => {
   assert.equal(fields.sslVerify.type, 'boolean');
   assert.equal(fields.sslVerify.default, true);
   assert.equal(fields.sslCaFile.type, 'string');
-  assert.match(fields.ssl.description, /MySQL and Doris/);
+  assert.match(fields.ssl.description, /MySQL \/ Doris/);
   assert.match(fields.ssl.description, /Spark Thrift/);
 });

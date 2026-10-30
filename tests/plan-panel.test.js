@@ -25,7 +25,7 @@ function projection(mode = 'encrypted', rules = { customer_id: 'customer' }) {
 }
 
 function openPanel(options = {}) {
-  const calls = { messages: [], writes: [], shown: [], commands: [], feedback: [], clipboardWrites: [], disposedSubscriptions: 0 };
+  const calls = { messages: [], writes: [], shown: [], commands: [], feedback: [], clipboardWrites: [], disposedSubscriptions: 0, title: '' };
   const state = options.state ?? modeState(options.mode);
   const dataProtection = { getDataMode: () => state.mode,
     onDataModeChange(listener) { state.listeners.add(listener); return { dispose: () => state.listeners.delete(listener) }; } };
@@ -57,7 +57,10 @@ function openPanel(options = {}) {
       openTextDocument: async (target) => target,
     },
     window: {
-      createWebviewPanel: () => panel,
+      createWebviewPanel: (_viewType, title) => {
+        calls.title = title;
+        return panel;
+      },
       showSaveDialog: async () => calls.saveTarget,
       showTextDocument: async (document) => calls.shown.push(document),
     },
@@ -97,6 +100,9 @@ function openPanel(options = {}) {
 
 test('plan HTML escapes SQL and plan content while retaining text whitespace', () => {
   const h = openPanel();
+  assert.equal(h.calls.title, '执行计划 · <订单>');
+  assert.match(h.panel.webview.html, /--ui-radius:/);
+  assert.match(h.panel.webview.html, /id="action-status" class="status-banner" role="status" aria-live="polite"/);
   assert.ok(h.panel.webview.html.includes('  +- Scan\n&lt;/pre&gt;&lt;script&gt;bad()&lt;/script&gt;'));
   assert.ok(h.panel.webview.html.includes('&lt;订单&gt;'));
   assert.doesNotMatch(h.panel.webview.html, /<script>bad/);
@@ -222,7 +228,7 @@ function assertEncrypted(html) {
     assert.ok(!html.includes(value), `leaked ${value}`);
   }
   assert.ok(html.includes('cipher-customer'));
-  assert.match(html, /加密模式下不展示计划和 SQL 原文/);
+  assert.match(html, /当前显示字段密文/);
 }
 
 test('protected plan uses the current global mode and contains only projected parameters and a static plan notice', () => {
@@ -231,11 +237,11 @@ test('protected plan uses the current global mode and contains only projected pa
   assert.equal(h.record.protection.mode, 'plain');
   assertEncrypted(h.panel.webview.html);
   assert.ok(h.panel.webview.html.includes('2026-10-30'));
-  assert.match(h.panel.webview.html, /显示模式：加密 · 切换明文/);
+  assert.match(h.panel.webview.html, /字段密文 · 切换原文/);
   h.state.setMode('plain');
   assert.ok(h.panel.webview.html.includes(h.snapshot.plan));
   assert.ok(h.panel.webview.html.includes('sensitive-customer-951'));
-  assert.match(h.panel.webview.html, /显示模式：明文 · 切换加密/);
+  assert.match(h.panel.webview.html, /字段原文 · 切换密文/);
   h.state.setMode('encrypted');
   assertEncrypted(h.panel.webview.html);
   assert.equal(JSON.stringify(h.snapshot), before);
@@ -248,7 +254,7 @@ test('encrypted full-copy refuses without touching the clipboard, and plain mode
   const h = protectedPanel();
   await h.send('copy-full');
   assert.equal(h.calls.clipboardWrites.length, 0);
-  assert.match(h.calls.messages.at(-1).status, /不能复制完整材料.*明文模式/);
+  assert.match(h.calls.messages.at(-1).status, /切换到字段原文模式/);
   h.state.setMode('plain');
   await h.send('copy-full');
   assert.equal(h.calls.clipboard, buildPlanReview(h.snapshot));
@@ -267,8 +273,8 @@ test('protected summary copy and save delegate the original record to feedbackAc
   for (const call of h.calls.feedback) assert.equal(call.record, h.record);
   assert.equal(h.calls.clipboardWrites.length, 0);
   assert.equal(h.calls.writes.length, 0);
-  assert.match(h.calls.messages[0].status, /加密模式/);
-  assert.match(h.calls.messages[1].status, /已保存加密反馈/);
+  assert.match(h.calls.messages[0].status, /字段密文/);
+  assert.match(h.calls.messages[1].status, /已保存字段密文反馈/);
 });
 
 test('mode buttons call only the shared command, redraw all subscribed pages and release subscriptions on dispose', async () => {

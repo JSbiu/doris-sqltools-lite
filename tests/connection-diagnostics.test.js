@@ -137,10 +137,10 @@ test('我们自己抛出的中文错误原样返回', () => {
   assert.equal(formatDatabaseError(new Error('已取消密码输入。')), '已取消密码输入。');
 });
 
-test('认证失败的建议里指向 Forget Saved Password', () => {
+test('认证失败的建议里指向清除已保存密码', () => {
   const advice = classifyDatabaseError(errorWithCode('ER_ACCESS_DENIED_ERROR', 'Access denied'));
 
-  assert.match(advice.hint, /Forget Saved Password/);
+  assert.match(advice.hint, /清除已保存密码/);
 });
 
 test('reads the message off a throwable that is not an Error', () => {

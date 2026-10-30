@@ -126,4 +126,4 @@ export function protectSink(
     },
   };
 }
-export const PROTECTED_MATERIAL_NOTICE = '加密模式仅提供结构化反馈；SQL、计划和错误原文请切换到明文模式查看。';
+export const PROTECTED_MATERIAL_NOTICE = '字段密文模式提供结构化反馈。切换到字段原文模式后，可查看 SQL、计划和错误详情。';

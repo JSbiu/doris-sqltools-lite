@@ -48,7 +48,8 @@ function fixture(t) {
 test('registering and toggling mode do not create data keys', async (t) => {
   setDataMode('encrypted'); const h = fixture(t);
   assert.equal(h.state.size, 0);
-  await h.command('toggleDataMode'); assert.equal(getDataMode(), 'plain'); assert.match(h.status.text, /明文/);
+  await h.command('toggleDataMode'); assert.equal(getDataMode(), 'plain'); assert.match(h.status.text, /字段原文/);
+  await h.command('toggleDataMode'); assert.equal(getDataMode(), 'encrypted'); assert.match(h.status.text, /字段密文/);
   await h.command('toggleDataMode'); assert.equal(h.state.size, 0);
 });
 

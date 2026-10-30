@@ -85,7 +85,7 @@ test('encrypted form projects remembered, fixed, inline and candidate values bef
   const protection = projection();
   const h = openForm(inputs(protection));
   assertProtected(h.panel.webview.html);
-  assert.match(h.panel.webview.html, /加密模式下不展示 SQL/);
+  assert.match(h.panel.webview.html, /当前显示字段密文/);
   assert.match(h.panel.webview.html, /<option value="cipher-\d+">/);
   const page = pageScript(h.panel);
   const values = page.posted[0].values;
@@ -102,7 +102,7 @@ test('encrypted form projects remembered, fixed, inline and candidate values bef
   assert.deepEqual([...preview.missing], ['choice', 'needed']);
   page.receive(preview);
   assert.equal(page.elements.get('b-run').disabled, true);
-  assert.match(page.elements.get('preview').textContent, /明文模式/);
+  assert.match(page.elements.get('preview').textContent, /字段原文模式/);
   h.send('cancel');
   assert.equal(await h.decision, undefined);
 });

@@ -4,6 +4,7 @@ import { formatDatabaseError } from './connectionDiagnostics';
 import { type ConnectionProfile } from './connectionSecurity';
 import { ConnectionManager, showError } from './connectionManager';
 import { testQuerySession } from './sessionFactory';
+import { WEBVIEW_BASE_CSS, escapeHtml } from './webviewTheme';
 
 import {
   DEFAULT_PORTS,
@@ -63,7 +64,7 @@ export function openConnectionForm(options: ConnectionFormOptions): void {
   const post = (message: FormOutbound): Thenable<boolean> => panel.webview.postMessage(message);
   let busy = false;
 
-  panel.webview.html = renderForm(draft, mode);
+  panel.webview.html = renderConnectionForm(draft, mode);
 
   panel.webview.onDidReceiveMessage(async (message: FormInbound) => {
     if (message.type === 'cancel') {
@@ -203,7 +204,7 @@ async function testDraft(
 
 // ------------------------------------------------------------------ rendering
 
-function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
+export function renderConnectionForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
   const nonce = randomUUID().replace(/-/g, '');
   const isEdit = mode === 'edit';
   const heading = isEdit ? '编辑连接' : '添加连接';
@@ -216,12 +217,13 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
 
   const clearPasswordBlock = isEdit
     ? `
-    <section class="card">
-    <label class="check">
-      <input type="checkbox" id="f-clear-pwd" />
-      保存时清除已保存的密码
-    </label>
-    <p class="hint">勾选后下次连接会重新询问密码。若同时填写了新密码，则以新密码为准。</p>
+    <section class="section compact">
+      <div class="section-header"><span class="section-title">密码策略</span><span class="section-note">仅修改密码状态</span></div>
+      <label class="check">
+        <input type="checkbox" id="f-clear-pwd" />
+        保存时清除已保存的密码
+      </label>
+      <p class="hint">勾选后下次连接会重新询问密码。若同时填写了新密码，则以新密码为准。</p>
     </section>`
     : '';
 
@@ -231,59 +233,47 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; padding: 18px 20px 96px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); font-size: 13px; line-height: 1.6; }
-    h1 { margin: 0 0 4px; font-size: 15px; font-weight: 500; }
-    .sub { margin: 0 0 16px; color: var(--vscode-descriptionForeground); }
-    .card { padding: 14px 16px; margin-bottom: 12px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; }
-    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
-    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-    .field.wide { grid-column: 1 / -1; }
-    /* .field sets display:flex, which outranks the UA rule for [hidden]. */
-    .field[hidden] { display: none; }
-    label { display: block; }
-    .hint { color: var(--vscode-descriptionForeground); font-size: 12px; margin: 0; }
-    label > .hint { display: inline; margin-left: 6px; }
-    input[type="text"], input[type="password"], select {
-      width: 100%; min-height: 28px; padding: 5px 8px; font-family: inherit; font-size: 13px;
-      color: var(--vscode-input-foreground); background: var(--vscode-input-background);
-      border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; outline: none;
-    }
-    input:focus, select:focus { border-color: var(--vscode-focusBorder); }
-    .err { color: var(--vscode-errorForeground, var(--vscode-editorError-foreground)); font-size: 12px; min-height: 0; }
-    .check { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-    .check input { width: auto; }
-    .inline { display: flex; gap: 8px; align-items: stretch; }
-    .inline input { flex: 1 1 auto; }
-    #warnings:not(:empty) { margin-bottom: 10px; padding: 8px 10px; color: var(--vscode-editorWarning-foreground); background: var(--vscode-inputValidation-warningBackground); border-left: 3px solid var(--vscode-editorWarning-foreground); }
-    #status:not(:empty) { margin: 0 0 10px; padding: 8px 10px; border-left: 3px solid var(--vscode-panel-border); background: var(--vscode-editorWidget-background); }
-    #status.ok { color: var(--vscode-testing-iconPassed); }
-    #status.bad { color: var(--vscode-errorForeground, var(--vscode-editorError-foreground)); }
-    .bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px; padding: 12px 0 0; background: var(--vscode-editor-background); }
-    .spacer { flex: 1 1 auto; }
-    button { min-height: 28px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 1px solid transparent; border-radius: 2px; padding: 5px 14px; cursor: pointer; font-family: inherit; font-size: 13px; }
-    button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
-    button:hover { background: var(--vscode-button-hoverBackground); }
-    button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
-    button:disabled { cursor: default; opacity: .65; }
+    ${WEBVIEW_BASE_CSS}
+    .connection-page { max-width: 940px; }
+    .transport-options { display: grid; gap: 10px; margin-top: 10px; }
+    #tls-options[hidden] { display: none; }
+    #warnings { margin: 14px 0 10px; }
+    #status { margin: 0 0 4px; }
+    .action-bar button { min-width: 82px; }
   </style>
 </head>
 <body>
-  <h1>${escapeHtml(heading)}</h1>
-  <p class="sub">${escapeHtml(subtitle)}</p>
+  <div class="page-shell connection-page">
+  <header class="page-header">
+    <div class="page-heading">
+      <div class="eyebrow">Doris SQL Lite · 数据库连接</div>
+      <h1>${escapeHtml(heading)}</h1>
+      <p class="sub">${escapeHtml(subtitle)}</p>
+    </div>
+    <div class="badge-row">
+      <span class="badge accent" id="connection-kind-badge">${escapeHtml(draft.type)}</span>
+      <span class="badge">SecretStorage</span>
+    </div>
+  </header>
 
-  <section class="card">
-    <label for="f-input">从连接串或 mysql 命令导入<span class="hint">可选</span></label>
+  <section class="section compact">
+    <div class="section-header">
+      <span class="section-title">快速导入</span>
+      <span class="section-note">连接串、JDBC URL 或 mysql 命令</span>
+    </div>
     <div class="inline">
       <input id="f-input" type="text" spellcheck="false" autocomplete="off" placeholder="mysql -h 127.0.0.1 -P 9030 -uroot -p密码 -D db" />
       <button class="secondary" id="b-parse">解析并填充</button>
     </div>
-    <p class="hint">支持 mysql://、jdbc:mysql://、jdbc:hive2://（Spark Thrift）、host:port，或 mysql -h HOST -P 3306 -uUSER -pPASS -D DB 命令行；密码只留在 SecretStorage。</p>
+    <p class="hint">支持 mysql://、jdbc:mysql://、jdbc:hive2://（Spark Thrift）、host:port 和 mysql 命令行。</p>
   </section>
 
-  <section class="card">
-    <div class="grid">
+  <section class="section">
+    <div class="section-header">
+      <span class="section-title">连接目标</span>
+      <span class="section-note">类型决定默认端口与认证方式</span>
+    </div>
+    <div class="field-grid">
       <div class="field">
         <label for="f-type">类型</label>
         <select id="f-type">
@@ -333,12 +323,13 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
     </div>
   </section>
 
-  <section class="card" id="tls-card"${draft.type === 'Spark' ? ' hidden' : ''}>
-    <label class="check">
-      <input type="checkbox" id="f-ssl"${draft.ssl ? ' checked' : ''} />
-      使用 TLS
-    </label>
-    <div id="tls-options"${draft.ssl ? '' : ' hidden'}>
+  <section class="section" id="tls-card"${draft.type === 'Spark' ? ' hidden' : ''}>
+    <div class="section-header">
+      <span class="section-title">传输安全</span>
+      <span class="section-note">仅 MySQL / Doris</span>
+    </div>
+    <label class="check"><input type="checkbox" id="f-ssl"${draft.ssl ? ' checked' : ''} />使用 TLS 加密连接</label>
+    <div id="tls-options" class="transport-options"${draft.ssl ? '' : ' hidden'}>
       <label class="check">
         <input type="checkbox" id="f-ssl-verify"${draft.sslVerify ? ' checked' : ''} />
         验证服务器证书和 DNS 主机名
@@ -351,19 +342,20 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
         </div>
       </div>
       <p class="hint">验证模式会校验证书链；主机为 DNS 名称时同时校验证书主机名。私有 CA 可填写 PEM 文件路径，留空则使用系统信任库。</p>
-      <p class="hint" id="tls-warning"${draft.sslVerify ? ' hidden' : ''}>当前模式接受服务器提供的任何证书，请确认目标主机可信。</p>
+      <p class="status-banner warning" id="tls-warning"${draft.sslVerify ? ' hidden' : ''}>当前模式接受服务器提供的任何证书，请确认目标主机可信。</p>
     </div>
   </section>
   ${clearPasswordBlock}
 
-  <div id="warnings"></div>
-  <p id="status"></p>
+  <div id="warnings" class="status-banner warning" role="status" aria-live="polite"></div>
+  <p id="status" class="status-banner" role="status" aria-live="polite"></p>
 
-  <div class="bar">
+  <div class="action-bar">
     <button class="secondary" id="b-test">测试连接</button>
     <span class="spacer"></span>
     <button class="secondary" id="b-cancel">取消</button>
     <button id="b-save">保存</button>
+  </div>
   </div>
 
   <script nonce="${nonce}">
@@ -427,7 +419,11 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
 
     const setStatus = (text, kind) => {
       statusEl.textContent = text || '';
-      statusEl.className = kind || '';
+      statusEl.className = 'status-banner' + (kind ? ' ' + kind : '');
+    };
+
+    const refreshKind = () => {
+      id('connection-kind-badge').textContent = id('f-type').value;
     };
 
     ['f-name', 'f-host', 'f-port', 'f-username', 'f-database', 'f-password'].forEach((fieldId) => {
@@ -442,6 +438,7 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
         portField.value = targetDefault;
       }
       id('f-hive-auth-field').hidden = event.target.value !== 'Spark';
+      refreshKind();
       refreshTls();
       paint(localErrors());
     });
@@ -537,17 +534,9 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
       }
     });
 
+    refreshKind();
     refreshTls();
   </script>
 </body>
 </html>`;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
