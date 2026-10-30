@@ -5,7 +5,11 @@ description: 为 Doris SQLTools Lite VS Code 扩展编写可执行 SQL，处理�
 
 # Doris SQLTools Lite 使用
 
-按 0.9.6 能力核对（2026-10-30）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，不默认改设置、安装扩展或连接数据库。
+按 0.9.7 能力核对（2026-10-30）。负责工具使用与 SQL 交付格式；业务口径、表结构、方言、文件归属和执行权限沿用当前任务及项目规则。版本行为不符时再核对目标版本说明，默认沿用现有设置、安装状态和连接配置。
+
+## 连接与传输
+
+MySQL / Doris 使用 `ssl=true` 启用 TLS；`sslVerify` 默认开启，负责校验证书链，并在主机为 DNS 名称时校验主机名。私有 CA 通过 `sslCaFile` 指向本地 PEM 文件；`sslVerify=false` 对应接受服务器证书的显式兼容模式，使用前确认目标主机可信。Spark Thrift 使用所选 SASL/PLAIN 或 NOSASL 传输，连接表单中的 TLS 选项仅属于 MySQL / Doris。
 
 ## 编写 SQL 文件
 
@@ -109,7 +113,7 @@ SELECT * FROM order_source WHERE dt = '${biz_date}';
 
 普通查询、直接执行并导出、面板导出、计划及分批任务使用同一简短格式，不附带 SQL 正文、结果行或计划全文。结果页、导出通知、无结果集操作及批次结束通知有复制/保存入口；也可用 `Doris SQL Lite: Copy Last SQL Feedback` / `Save Last SQL Feedback` 获取当前窗口最近完成的一次操作。Reload Window 后记录清空，不建立查询历史。
 
-- 先核对 `name`、`connectionName`、`databaseType`、`parameters`、`source.path` 及执行时行号，确认属于当前任务。普通操作 `databaseType=null` 表示未确定类型，不自行猜数据源。`action` 区分 `query` / `export` / `explain` / `batch`，`status` 区分 `success` / `failed` / `cancelled`。`hasResultSet` 按驱动实际返回判断，`affectedRows=null` 表示服务端未提供影响行数，不能说成 0 行。
+- 先核对 `schemaVersion=1`、`extensionVersion`、`name`、`connectionName`、`databaseType`、`parameters`、`source.path` 及执行时行号，确认属于当前任务。普通操作 `databaseType=null` 表示未确定类型，不自行猜数据源。`action` 区分 `query` / `export` / `explain` / `batch`，`status` 区分 `success` / `failed` / `cancelled`。`hasResultSet` 按驱动实际返回判断，`affectedRows=null` 表示服务端未提供影响行数，不能说成 0 行。
 - 分批任务的默认摘要用 `batch.steps` 将名称、连接类型和 SQL 行号各列一次，行号共用根 `source.path`。`firstBatch` / `lastBatch` 是首尾参数和状态样例，不代表中间连续或全部成功；仅一批时不重复末批。`batch.stopped` 标出停止位置、该批参数、`completedSteps` 和 `needsReviewSteps`，先据此定位成功清理和失败回填的边界。
 - 通过 `batchReportFile` 读取完整 JSON 报告的 `batch.records`，核对全部步骤和实际参数。`phase=init` 为初始化，`batchIndex` 从 1 开始；`not-run` 未执行，`submitted=false` 未提交该步，`completedBatches` 只计整批全部成功。混合引擎以各步骤类型为准。`needsReview=true` 需核对实际写入，不能按“失败/取消”推断未改数据；已成功但随后会话断开的步骤仍可为 `success`，结合任务错误判断停止原因。
 - 已提交 SQL 的任务首次复制先选择本地 `.json` 保存完整报告，默认文件名以 `.batch-report.json` 结尾；保存 `.md` 反馈会自动配套报告，只选一次位置。后续复用路径，报告被删则重新保存。报告和批次 Markdown 不覆盖已有文件；取消或保存失败不复制缺少报告位置的材料。尚未提交任何 SQL 时直接给简短反馈，不要求报告。保存失败只重试保存，不重复执行 SQL；清理失败给出的残留不能当作完整报告。

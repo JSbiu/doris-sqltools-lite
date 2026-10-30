@@ -23,7 +23,7 @@ F5 使用 `.vscode/launch.json`：先由项目现有构建脚本生成 `dist/ext
 
 ## 安全模型
 
-- 连接元数据（名称、类型、主机、端口、database、用户名、SSL）保存在**用户设置**里（`dorisSqlLite.connections` 的 `scope` 是 `machine`）：既不会被工作区设置覆盖，也不会随 VS Code Settings Sync 上传。
+- 连接元数据（名称、类型、主机、端口、database、用户名和 TLS 设置）保存在**用户设置**里（`dorisSqlLite.connections` 的 `scope` 是 `machine`）：既不会被工作区设置覆盖，也不会随 VS Code Settings Sync 上传。
 - 早期版本会把元数据写进当前工作区的 `.vscode/settings.json`，内网主机名和账号名可能跟着项目仓库走。扩展启动时会把这类条目找回并写进用户设置，连接列表不会丢；但**项目文件里那份旧副本不会被自动删除** —— VS Code 不允许对 `machine` 作用域的设置在更窄的作用域执行写入（包括删除）。需要手动到设置编辑器里删掉它，并确认项目的 `.vscode/settings.json` 已被 Git 忽略。
 - 密码只保存到 VS Code `ExtensionContext.secrets`（SecretStorage），不会写进任何 `settings.json`。
 - 添加连接时密码留空表示「先不保存」，首次连接时会提示输入一次；之后连接自动读取密码。
@@ -32,6 +32,7 @@ F5 使用 `.vscode/launch.json`：先由项目现有构建脚本生成 `dist/ext
 - 扩展启动时会把可识别的旧连接配置中的 `password` 迁移到 SecretStorage，并从连接元数据中清理。
 - `Doris` 使用 MySQL 协议连接 FE 的 `9030` 端口。
 - `Spark` 走的是 Spark Thrift Server 的 **HiveServer2 Thrift 协议**（默认 `10000` 端口），和 MySQL 协议无关，用的是独立驱动。认证支持 `SASL/PLAIN`（`hive.server2.authentication` 为 `none` 或 `ldap`）与 `NOSASL`；**不支持 Kerberos** —— 它依赖需要本机编译的原生模块，没法随 VSIX 分发。连接清单里不含密码，只有连接元数据；Spark 的认证方式字段同理。
+- MySQL / Doris 的 TLS 默认执行证书链校验；主机名是 DNS 名称时同时校验证书主机名。私有 CA 可通过 `sslCaFile` 指定 PEM 文件；关闭 `sslVerify` 会进入“接受服务器证书”的显式兼容模式。Spark Thrift 使用 SASL/NOSASL 传输，当前连接表单不提供 TLS 开关。
 - 扩展不记录密码、连接字符串或查询结果到日志。错误提示会脱敏已知密码，以及 `password=` / `pwd:` / `token=`、`mysql://user:pass@`、`IDENTIFIED BY …`、`SET PASSWORD …` 这类写法。
 - 结果不会外发。但要知道两点：结果面板会保留最近一次结果的前 `maxResultRows` 行（标签页隐藏时也是；其余行只在读取时计数，随即丢弃），`复制 TSV` 会把结果写进系统剪贴板并由其保留。共享机器上请注意剪贴板历史与其他窗口。
 - SQL 参数的值（`${...}`）保存在 VS Code 扩展状态里，按「文件 + 参数名」记录：**不写 `settings.json`，也不参与 Settings Sync**。它们是业务数据（时间区间、ID），不是密钥，所以不进 SecretStorage；未声明保护的参数以明文留在本机扩展状态；0.9.6 中已声明字段的后续参数记忆按密文保存，但不会主动改写旧记忆或原 SQL。
@@ -40,7 +41,7 @@ F5 使用 `.vscode/launch.json`：先由项目现有构建脚本生成 `dist/ext
 
 ## 使用
 
-0.9.6 新增字段可逆加密与统一明文/加密模式，详见下方同名章节。批次反馈继续提供摘要与完整报告位置，运行通知持续显示当前参数与耗时，详见“批次摘要、完整报告与进度”。分批入口仍为 `Doris SQL Lite: Run SQL Batches`，SQL 注释和脚本用法见“顺序分批执行与无结果集通知”。实际无结果集的操作只通知；零行 SELECT 仍显示空结果。
+当前版本提供字段可逆加密与统一明文/加密模式，详见下方同名章节。批次反馈继续提供摘要与完整报告位置，运行通知持续显示当前参数与耗时，详见“批次摘要、完整报告与进度”。分批入口仍为 `Doris SQL Lite: Run SQL Batches`，SQL 注释和脚本用法见“顺序分批执行与无结果集通知”。实际无结果集的操作只通知；零行 SELECT 仍显示空结果。
 
 ### 简短执行与计划反馈（0.9.3）
 
@@ -50,7 +51,7 @@ F5 使用 `.vscode/launch.json`：先由项目现有构建脚本生成 `dist/ext
 - 普通预览反馈记录读取/显示行数、是否读完和自动追加的预览 `LIMIT`。`totalRows=null` 表示总行数未知；刚好读到自动 LIMIT 也属于未读完，后续全量导出会重跑原查询。SQL 自带的 LIMIT 仍按原 SQL 解释。
 - 完整导出成功后才填 `resultFile`，指向实际完成的 TSV；取消/失败不会把未完成文件填成结果路径。面板截断结果重跑后，反馈使用本次完整导出的行数；内存结果直接保存时 `submitted=false`，表示此次导出没有再向数据库提交 SQL。
 - `source.path` 是本地 SQL 的绝对路径（远程或未命名文件使用 URI），`startLine` / `endLine` 为执行时的范围。`savedAtExecution=false` 表示执行时有未保存内容；`changedSinceExecution=true` 表示执行后编辑过该文件；文件关闭后为 `null`，表示当前状态未核对。行号对应执行时版本，不能把后来磁盘上的内容直接当成当时执行的 SQL。不强制保存文件，也不生成指纹。
-- `status` 为 `success` / `failed` / `cancelled`；`submitted=false` 也可能是连接或准备阶段已失败/取消，不能据此认为执行成功。`durationMs` 单位毫秒，反馈同时包含完成时间。`sessionState=lost` 表示会话已丢失，需重新初始化。错误和警告会脱敏，最长各 2000 字符，超出时明确标记截断，不复制堆栈。
+- 反馈 JSON 的 `schemaVersion` 固定为 `1`，同时记录产生材料的扩展 `extensionVersion`，便于 AI 和后续版本按契约读取。`status` 为 `success` / `failed` / `cancelled`；`submitted=false` 也可能是连接或准备阶段已失败/取消，不能据此认为执行成功。`durationMs` 单位毫秒，反馈同时包含完成时间。`sessionState=lost` 表示会话已丢失，需重新初始化。错误和警告会脱敏，最长各 2000 字符，超出时明确标记截断，不复制堆栈。
 
 **查看计划时也默认复制简短反馈：**
 
@@ -138,7 +139,7 @@ SELECT COUNT(*) FROM payments WHERE dt = '${biz_date}';
 
 1. 打开扩展开发主机或安装打包出的 `.vsix`。
 2. 在活动栏打开 `Doris SQL Lite`。
-3. 点击 `Add Connection`，在弹出的连接表单里一次填完类型、名称、主机、端口、database、用户名、密码和 SSL（类型选 `Spark Thrift` 时会多出一个「认证方式」下拉）。可以先点 `测试连接` 验证，再点 `保存`。
+3. 点击 `Add Connection`，在弹出的连接表单里一次填完类型、名称、主机、端口、database、用户名和密码。类型选 `Spark Thrift` 时配置「认证方式」；MySQL / Doris 可启用 TLS，并选择是否校验证书、是否指定私有 CA 文件。可以先点 `测试连接` 验证，再点 `保存`。
 4. 右键连接创建 SQL 查询。第一次执行当前文件时选择连接；同一文件后续访问该数据源时复用它的活动会话，切到其他数据源再回来也保留原状态。第一次选择的连接作为本次 VS Code 会话的默认连接；SQL 注释中的连接设置优先。
 5. 按 `Ctrl+Enter` 或右键 `Doris SQL Lite: Run Query at Cursor`：有选区时执行选中的单条 SQL；没有选区时自动执行光标所在或最近的一条 SQL。语句里含 `${...}` 参数时先使用注释值及行内默认值，缺值时弹出参数面板。
 6. 查询可以取消：进度通知上的取消按钮，或命令面板执行 `Doris SQL Lite: Cancel Query`。取消走 `KILL QUERY`，活动连接会保留，`USE`、临时表和会话变量继续生效；服务端不响应时会退化为断开该连接。同一 SQL 文件不会并发启动重复查询。
@@ -175,7 +176,7 @@ database 默认留空且不是必填项，连接和 `Test Connection` 仍可用�
 
 > 实测（本机 300,000 行）：Spark Thrift 读完 433 ms → 早停 83 ms（**5.2 倍**；冷缓存时 2866 ms → 160 ms，17.9 倍）；MySQL 188 ms → 141 ms（1.3 倍）。两者早停后**会话都仍然可用**（`SELECT 1` 正常）。MySQL 的收益小是因为它要在**另一条连接**上发 `KILL QUERY`，本机有约 100 ms 固定开销；收益随「传输 + 解码」占比上升，所以你那种跨网络、12 列的宽结果收益比这个基准大。
 
-## v0.8.3 卡住的查询：看得见，也退得出
+## v0.8.4 卡住的查询：看得见，也退得出
 
 一条查询卡住时有两个现象：**进度通知一直转，但界面上找不到任何能取消它的地方**。两件事分别修了。
 
