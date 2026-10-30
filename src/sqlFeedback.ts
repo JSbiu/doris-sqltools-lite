@@ -2,6 +2,13 @@ import { redactErrorMessage, type DatabaseType } from './connectionSecurity';
 import type { BatchFeedback } from './batchExecution';
 import type { DataMode, ProtectionInfo } from './dataProtection';
 
+export const FEEDBACK_SCHEMA_VERSION = 1 as const;
+let extensionVersion: string | undefined;
+
+export function setFeedbackExtensionVersion(version: string | undefined): void {
+  extensionVersion = version;
+}
+
 export interface FeedbackSource {
   path: string;
   startLine: number;
@@ -11,6 +18,8 @@ export interface FeedbackSource {
 }
 
 export interface SqlFeedback {
+  schemaVersion?: typeof FEEDBACK_SCHEMA_VERSION;
+  extensionVersion?: string;
   name: string;
   connectionName: string;
   databaseType: DatabaseType | null;
@@ -59,6 +68,8 @@ function feedbackData(feedback: SqlFeedback): SqlFeedback {
   // Explicitly select both levels: runtime snapshots can also carry SQL,
   // plans, result rows and connection credentials that do not belong here.
   return {
+    schemaVersion: feedback.schemaVersion ?? FEEDBACK_SCHEMA_VERSION,
+    ...(extensionVersion ? { extensionVersion } : {}),
     name: feedback.name,
     connectionName: feedback.connectionName,
     databaseType: feedback.databaseType,

@@ -1,10 +1,17 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { randomUUID } = require('node:crypto');
-const { buildSqlFeedback, buildBatchReport, hasBatchDetails } = require('../out/sqlFeedback.js');
+const {
+  FEEDBACK_SCHEMA_VERSION,
+  buildSqlFeedback,
+  buildBatchReport,
+  hasBatchDetails,
+  setFeedbackExtensionVersion,
+} = require('../out/sqlFeedback.js');
 
 function feedback(overrides = {}) {
   return {
+    schemaVersion: FEEDBACK_SCHEMA_VERSION,
     name: '订单明细',
     connectionName: '本地 Doris',
     databaseType: 'Doris',
@@ -33,6 +40,20 @@ test('protection metadata is explicitly whitelisted and cannot carry key materia
   const text = buildSqlFeedback(input);
   assert.deepEqual(contents(text).protection, { mode: 'encrypted', keyId: 'public-id', fields: { id: 'user' } });
   assert.ok(!text.includes('secret-key-material'));
+});
+
+test('stamps feedback with a stable schema version and the producing extension version', () => {
+  setFeedbackExtensionVersion('0.9.7');
+  try {
+    const parsed = contents(buildSqlFeedback(feedback()));
+    assert.equal(parsed.schemaVersion, 1);
+    assert.equal(parsed.extensionVersion, '0.9.7');
+    const report = JSON.parse(buildBatchReport(batchFeedback(1)));
+    assert.equal(report.schemaVersion, 1);
+    assert.equal(report.extensionVersion, '0.9.7');
+  } finally {
+    setFeedbackExtensionVersion(undefined);
+  }
 });
 
 test('whitelists feedback and source fields without serializing SQL, plans, rows or connection credentials', () => {
