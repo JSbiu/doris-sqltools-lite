@@ -20,3 +20,19 @@ test('declares TLS settings only for the MySQL-protocol connections', () => {
   assert.match(fields.ssl.description, /MySQL \/ Doris/);
   assert.match(fields.ssl.description, /Spark Thrift/);
 });
+
+test('pins both the VS Code engine and its type definitions to the tested minimum', () => {
+  assert.equal(manifest.engines.vscode, '^1.90.0');
+  assert.equal(manifest.devDependencies['@types/vscode'], '1.90.0');
+});
+
+test('uses the display name, Chinese command titles and namespaced command IDs consistently', () => {
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].title, manifest.displayName);
+  assert.equal(manifest.contributes.configuration.title, manifest.displayName);
+
+  for (const command of manifest.contributes.commands) {
+    assert.match(command.command, /^dorisSqlLite\.[A-Za-z0-9]+$/);
+    assert.ok(command.title.startsWith(`${manifest.displayName}: `));
+    assert.match(command.title, /: [\u3400-\u9fff]/);
+  }
+});

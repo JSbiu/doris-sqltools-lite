@@ -17,6 +17,7 @@
 // throwaway database: --seed truncates both tables.
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { once } = require('node:events');
 
@@ -266,8 +267,7 @@ async function checkCancelKeepsConnectionUsable(session) {
 // Mirrors what runForExport does: its own session, the statement run again,
 // rows streamed straight to disk without being collected first.
 async function checkExportRerun(profile, password) {
-  const target = path.join(__dirname, '..', '.local', 'live-export-check.tsv');
-  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const target = path.join(os.tmpdir(), `doris-sqltools-live-export-${process.pid}-${Date.now()}.tsv`);
   const session = await openMysqlSession(profile, password);
   const chunkRows = 5000;
   const out = fs.createWriteStream(target, { encoding: 'utf8' });

@@ -1174,7 +1174,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   activeConnectionSession = connectionSession;
   const connectionStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  connectionStatus.name = 'Doris SQL Lite 连接';
+  connectionStatus.name = 'Doris SQLTools Lite 连接';
   connectionStatus.command = 'dorisSqlLite.setConnection';
   const refreshConnectionStatus = (): void => updateConnectionStatus(connectionStatus, manager, connectionSession);
 
@@ -1184,7 +1184,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // discoverable by name. This item is shown only while something is running,
   // so it never becomes one more thing to ignore.
   const runningStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
-  runningStatus.name = 'Doris SQL Lite 查询状态';
+  runningStatus.name = 'Doris SQLTools Lite 查询状态';
   runningStatus.text = '$(stop-circle) 正在执行…';
   runningStatus.tooltip = '当前有 SQL 正在执行。点击取消。';
   runningStatus.command = 'dorisSqlLite.cancelQuery';
@@ -1275,7 +1275,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       connectionSession.defaultConnectionId = profile.id;
       const document = await vscode.workspace.openTextDocument({
         language: 'sql',
-        content: `-- Doris SQL Lite · ${profile.name.replace(/[\r\n]+/g, ' ')}\n\nSELECT 1;\n`,
+        content: `-- Doris SQLTools Lite · ${profile.name.replace(/[\r\n]+/g, ' ')}\n\nSELECT 1;\n`,
       });
       connectionSession.documentConnections.set(document.uri.toString(), profile.id);
       await vscode.window.showTextDocument(document, vscode.ViewColumn.Active);
@@ -2340,7 +2340,7 @@ async function chooseProfile(
     }
   }
   if (profiles.length === 0) {
-    vscode.window.showInformationMessage('还没有连接，请先执行 Doris SQL Lite: 添加连接。');
+    vscode.window.showInformationMessage('还没有连接，请先执行 Doris SQLTools Lite: 添加连接。');
     return undefined;
   }
   const selected = await vscode.window.showQuickPick(
@@ -2371,7 +2371,7 @@ function updateConnectionStatus(
   const profile = manager.getProfiles().find((candidate) => candidate.id === connectionId);
   if (!profile) {
     status.text = '$(database) 选择连接';
-    status.tooltip = 'Doris SQL Lite：点击为当前 SQL 文件选择连接';
+    status.tooltip = 'Doris SQLTools Lite：点击为当前 SQL 文件选择连接';
     status.show();
     return;
   }

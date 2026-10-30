@@ -1,536 +1,228 @@
 # Doris SQLTools Lite
 
-面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台：执行单条 SQL、查看执行计划、完整导出 TSV、顺序分批执行，并把连接、参数与可核对反馈留在本机。
-
-
-## 开发调试
-
-在 VS Code 中打开项目，使用当前开发环境的 Node.js 和 pnpm：
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run build
-```
-
-F5 使用 `.vscode/launch.json`：先由项目现有构建脚本生成 `dist/extension.js` 及 source map，再启动扩展开发窗口。该配置不自动连接数据库。
-`.vscode/tasks.json` 保存构建入口。扩展版本及业务行为按已有版本规则处理。
-
-## 协作入口
-
-项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`，开始项目工作时按 `AGENTS.md` 读取，不进入 Git。共享知识与具体需求记录以项目文档为准。
-
-供 AI 使用的配套 skill 见 [doris-sqltools-lite](skills/doris-sqltools-lite/SKILL.md)，覆盖 SQL 注释、参数、计划审核、顺序分批执行、导出和会话规则。将该文件夹安装到 Codex 个人 `skills/` 目录（默认 `~/.codex/skills/`）后，可通过 `$doris-sqltools-lite` 调用，也支持在任务已选用本工具时自动匹配。该 skill 独立于 VSIX，不随扩展包分发。
-
-## 安全模型
-
-- 连接元数据（名称、类型、主机、端口、database、用户名和 TLS 设置）保存在**用户设置**里（`dorisSqlLite.connections` 的 `scope` 是 `machine`）：既不会被工作区设置覆盖，也不会随 VS Code Settings Sync 上传。
-- 早期版本会把元数据写进当前工作区的 `.vscode/settings.json`，内网主机名和账号名可能跟着项目仓库走。扩展启动时会把这类条目找回并写进用户设置，连接列表不会丢；但**项目文件里那份旧副本不会被自动删除** —— VS Code 不允许对 `machine` 作用域的设置在更窄的作用域执行写入（包括删除）。需要手动到设置编辑器里删掉它，并确认项目的 `.vscode/settings.json` 已被 Git 忽略。
-- 密码只保存到 VS Code `ExtensionContext.secrets`（SecretStorage），不会写进任何 `settings.json`。
-- 添加连接时密码留空表示「先不保存」，首次连接时会提示输入一次；之后连接自动读取密码。
-- 手动输入的密码只在连接成功后才写入 SecretStorage，输错不会被记住。
-- 已保存的密码如果认证失败会被自动清除并重新询问一次，不会反复用错误密码重试。
-- 扩展启动时会把可识别的旧连接配置中的 `password` 迁移到 SecretStorage，并从连接元数据中清理。
-- `Doris` 使用 MySQL 协议连接 FE 的 `9030` 端口。
-- `Spark` 走的是 Spark Thrift Server 的 **HiveServer2 Thrift 协议**（默认 `10000` 端口），和 MySQL 协议无关，用的是独立驱动。认证支持 `SASL/PLAIN`（`hive.server2.authentication` 为 `none` 或 `ldap`）与 `NOSASL`；**不支持 Kerberos** —— 它依赖需要本机编译的原生模块，没法随 VSIX 分发。连接清单里不含密码，只有连接元数据；Spark 的认证方式字段同理。
-- MySQL / Doris 的 TLS 默认执行证书链校验；主机名是 DNS 名称时同时校验证书主机名。私有 CA 可通过 `sslCaFile` 指定 PEM 文件；关闭 `sslVerify` 会进入“接受服务器证书”的显式兼容模式。Spark Thrift 使用 SASL/NOSASL 传输，当前连接表单不提供 TLS 开关。
-- 扩展不记录密码、连接字符串或查询结果到日志。错误提示会脱敏已知密码，以及 `password=` / `pwd:` / `token=`、`mysql://user:pass@`、`IDENTIFIED BY …`、`SET PASSWORD …` 这类写法。
-- 结果不会外发。但要知道两点：结果面板会保留最近一次结果的前 `maxResultRows` 行（标签页隐藏时也是；其余行只在读取时计数，随即丢弃），`复制 TSV` 会把结果写进系统剪贴板并由其保留。共享机器上请注意剪贴板历史与其他窗口。
-- SQL 参数的值（`${...}`）保存在 VS Code 扩展状态里，按「文件 + 参数名」记录：**不写 `settings.json`，也不参与 Settings Sync**。它们是业务数据（时间区间、ID），不是密钥，所以不进 SecretStorage；未声明保护的参数以明文留在本机扩展状态；0.9.6 中已声明字段的后续参数记忆按密文保存，但不会主动改写旧记忆或原 SQL。
-
-这提供的是“安全存储 + 自动使用”，不是防御同一 Windows 用户下的恶意进程或恶意 VS Code 扩展。任何能控制当前用户的代码，最终都可能在连接时读取到解密后的密码。
-
-## 使用
-
-当前版本提供字段可逆加密，并支持字段密文与字段原文输出切换，详见下方同名章节。批次反馈继续提供摘要与完整报告位置，运行通知持续显示当前参数与耗时，详见“批次摘要、完整报告与进度”。分批入口仍为 `Doris SQL Lite: 顺序分批执行 SQL`，SQL 注释和脚本用法见“顺序分批执行与无结果集通知”。实际无结果集的操作只通知；零行 SELECT 仍显示空结果。
-
-### 界面与产品语言（0.9.8）
-
-连接、参数、执行计划和结果页共用一套视觉层级：页头说明当前任务，徽章显示连接类型与输出模式，正文按任务分区，底部固定操作栏。窄侧栏会改为单列布局，表格在自身区域内横向滚动，页面不横向漂移。
-
-- 连接表单按“快速导入、连接目标、传输安全、密码策略”组织；测试、取消和保存始终位于同一操作区。
-- 参数表单突出参数来源、注释值锁定状态和实际发送的 SQL，便于提交前逐项核对。
-- 计划页把完整计划作为主体，SQL 来源和实际参数收在可展开区域。
-- 结果页把连接类型、返回行数、列数和输出模式放在页头；筛选、导出、复制和 AI 反馈集中在同一命令区，排序与筛选的范围紧邻表格说明。
-- 命令标题、设置说明、状态栏、面板标题和主要错误提示统一使用中文。字段保护统一称为“字段密文 / 字段原文”；没有声明保护字段时显示“普通输出”。
-- `pnpm run preview:webviews` 可把四个真实 Webview 模板生成到临时目录，用于桌面和窄侧栏的视觉检查。
-
-### 简短执行与计划反馈（0.9.3）
-
-结果页的“复制 AI 反馈 / 保存 AI 反馈…”只包含 SQL 名称、连接名称与类型、实际参数、原 SQL 文件路径及行号范围，以及本次操作的状态、耗时、行数和产物路径。默认不复制 SQL 正文、计划正文或结果行，长 SQL 不会被反复放入材料。
-
-- 查询、直接执行并导出、结果面板导出、查看计划及分批任务共用这一格式。导出和无结果集操作的完成通知也有反馈按钮。失败或取消后，可在命令面板执行 `Doris SQL Lite: 复制最近一次执行反馈` / `保存最近一次执行反馈`；保存的是当前扩展窗口最近完成的一次操作，Reload Window 后清空，不建立查询历史。
-- 普通预览反馈记录读取/显示行数、是否读完和自动追加的预览 `LIMIT`。`totalRows=null` 表示总行数未知；刚好读到自动 LIMIT 也属于未读完，后续全量导出会重跑原查询。SQL 自带的 LIMIT 仍按原 SQL 解释。
-- 完整导出成功后才填 `resultFile`，指向实际完成的 TSV；取消/失败不会把未完成文件填成结果路径。面板截断结果重跑后，反馈使用本次完整导出的行数；内存结果直接保存时 `submitted=false`，表示此次导出没有再向数据库提交 SQL。
-- `source.path` 是本地 SQL 的绝对路径（远程或未命名文件使用 URI），`startLine` / `endLine` 为执行时的范围。`savedAtExecution=false` 表示执行时有未保存内容；`changedSinceExecution=true` 表示执行后编辑过该文件；文件关闭后为 `null`，表示当前状态未核对。行号对应执行时版本，不能把后来磁盘上的内容直接当成当时执行的 SQL。不强制保存文件，也不生成指纹。
-- 反馈 JSON 的 `schemaVersion` 固定为 `1`，同时记录产生材料的扩展 `extensionVersion`，便于 AI 和后续版本按契约读取。`status` 为 `success` / `failed` / `cancelled`；`submitted=false` 也可能是连接或准备阶段已失败/取消，不能据此认为执行成功。`durationMs` 单位毫秒，反馈同时包含完成时间。`sessionState=lost` 表示会话已丢失，需重新初始化。错误和警告会脱敏，最长各 2000 字符，超出时明确标记截断，不复制堆栈。
-
-**查看计划时也默认复制简短反馈：**
-
-- 无保护字段或处于字段原文模式时，首次点“复制 AI 反馈”会先选择完整计划的 `.txt` 保存位置，成功后复制带 `planFile` 路径的反馈；取消或保存失败时不改剪贴板。
-- “保存 AI 反馈…”只需选一个 `.md` 路径，同时在旁边生成完整计划的 `.plan.txt`。该次计划已经保存后，再次复制/保存反馈复用其路径；计划正文保留完整缩进和全部行。
-- 无保护字段或处于字段原文模式时，计划页显示完整计划。需要原先含 SQL、计划请求和全文的快照时，显式点“复制完整材料”。默认材料中的参数是实际取值，AI 应结合来源文件与完整计划文件审核；来源未保存或后来改动时，先核对执行版本。
-
-### 执行一次并导出完整结果（0.9.2）
-
-已知需要完整结果时，在 SQL 前写 `@output`，按 `Ctrl+Enter` 直接执行并保存 TSV：
-
-```sql
--- @default-connection: Spark数仓
--- @default-param: biz_date = 2026-10-27
-
--- @name: 订单明细
--- @output: results/orders_2026-10-27.tsv
-SELECT order_id, dt, amount
-FROM orders
-WHERE dt = '${biz_date}';
-```
-
-- `@output: 路径.tsv` 只作用于紧接的这一条语句；只选 SQL 正文也继承它。不写该注释时，普通 `Ctrl+Enter` 继续显示预览。也可右键或在命令面板执行 `Doris SQL Lite: 执行并导出完整 TSV`，无注释路径时使用默认导出目录和带时间戳的文件名；未设置默认目录则先选择保存位置。
-- 路径是字面文件路径，不加外围引号、不替换 `${...}`。相对路径以已保存的本地 SQL 文件目录为准，输出目录自动创建；未保存文件使用绝对路径或通过导出命令选择位置。注释路径优先于默认导出目录。
-- 查询只提交一次，使用同一文件对应数据源的原会话和实际参数。不注入预览 `LIMIT`，不受 `maxResultRows` / `readRowLimit` 限制；SQL 自带的 `LIMIT` 保留。结果逐行读取、分块写出，不在内存里保存整份结果，也不打开结果预览。成功时显示路径、实际写出行数和耗时。
-- 输出格式沿用 UTF-8、无 BOM 的 TSV，保留列头；零行结果也生成列头。表格公式转义沿用现有设置。缓冲同时受行数与约 1 MiB 文本字节数限制，超大单行单独写入；单行和驱动单批数据仍需要内存。
-- 此入口接受单条结果查询（`SELECT`、`WITH…SELECT`、`SHOW`、`DESCRIBE`、`EXPLAIN`），参数替换后也不能包含多条 SQL。不接受 `INSERT` / `UPDATE` / DDL / `CALL` 或服务端 `INTO OUTFILE` 等写入形式；它是文件导出入口，数据库访问与业务执行权限仍由当前任务决定。
-- `Ctrl+Alt+Enter` 始终只获取计划，忽略 `@output`，不会建输出目录或结果文件。因本次执行会推进会话状态，同会话旧预览的重跑导出资格也会过期。
-
-**失败、取消和文件保护：**
-
-- 本地 TSV（包括结果面板导出）先写同目录的唯一 `.partial` 临时文件，全部写入并关闭后才排他生成正式文件。已有目标文件、目录或软链接均不覆盖；同名文件会在执行前报错，请换文件名。写完时若其他操作抢先创建了目标，也会拒绝覆盖，不自动重跑查询。
-- 取消、数据库错误、断线、磁盘满或写入失败时清理临时文件；清理失败明确给出残留路径，不宣称已删除。强制退出、进程崩溃或断电可能留下 `.partial`，它不是完成的结果文件；确认操作已结束后可手动删除。
-- 目标须为支持流式写入和同目录硬链接的文件系统位置（常规 NTFS 可用）；不支持时明确失败，不降级为覆盖写入。仅代表应用已完成写入，不承诺断电后的物理落盘。新执行并导出入口不接受虚拟文件提供器，避免为它在内存中攒全量结果。
-- 同一文件的查询、计划、选择保存位置与导出互斥；取消通知、状态栏取消、关闭文件和重置会话都覆盖此操作。慢盘背压不会被计入网络空闲超时；写盘失败导致 MySQL 流中途退出时会释放该会话，后续需重新初始化，不复用未读完的协议流。
-- 重复列名会使对象形式的结果无法准确区分，使用唯一 `AS` 别名后再导出；多个结果集也不合并成一个 TSV。直接导出是明确请求完整结果，行数未知时仍开始执行，需按计划核对扫描范围，可随时取消，不另加行数截断。
-
-### 会话一致性（0.9.1）
-
-每个 SQL 文件按连接 ID 分别保留会话，第一次实际执行时才连接。文件从 Spark 切到 Doris 再回 Spark，会复用原 Spark 会话，`USE`、`SET` 和服务端支持的临时对象继续有效；不同文件即使用同一连接配置，也保持独立会话。
-
-- 查询、查看计划、参数/连接选择及导出共用当前文件的执行保护，一次只允许一个操作；其他文件仍可独立执行。状态栏和取消命令也能取消该文件的导出。
-- 截断结果的全量导出使用产生结果的原会话重跑，不另开连接，也不自动重放初始化 SQL。原会话关闭、断开、被重置，或在同一会话中又执行过任何其他语句（包括查看计划、执行失败的语句）后，旧结果不能再重跑导出，需要重新查询。其他数据源上的操作不使这条会话的结果过期。
-- 成功导出后可继续导出同一结果；已经开始重跑但取消/失败的导出，需要重新查询后再导出。完整保存在面板中的小结果直接写文件，即使原文件已关闭，也不需要数据库连接。
-- 导出仍是重新执行，数据以重跑时为准，不代表原结果的数据快照。导出过程中当前文件不能继续执行其他 SQL。数据库报错或重跑开始后的写入失败不会自动换位置再次执行 SQL。
-- 关闭 SQL 文件会取消该文件当前操作，等待取消与读取收尾后释放其全部会话。修改连接目标或认证信息、删除连接、清除密码时，只使该连接在各文件中的会话失效；其他连接保持原会话。扩展停用或 Reload Window 会释放全部会话。
-- 命令面板或 SQL 编辑器右键执行 `Doris SQL Lite: 重置当前文件的会话`，可取消当前操作并重置当前文件的全部数据源会话。重置后需要重新执行初始化 SQL；连接选择和注释不变。
-
-连接数取决于实际使用过的“文件 × 数据源”组合：例如 5 个文件各用过 2 个数据源，会保留 10 条业务连接，取消 MySQL/Doris 查询还可能短暂建立控制连接。不自动回收空闲会话，避免静默丢失设置；服务端主动断线仍会导致状态丢失，扩展会提示重新初始化，不自动重试失败语句。
-
-### SQL 注释与执行计划（0.9.0）
-
-SQL 文件可以直接声明连接、参数和语句名称。文件顶部的默认值作用于整个文件；紧接每条 SQL 之前的设置只覆盖当前语句，不延续到下一条。
-
-```sql
--- @default-connection: Spark数仓
--- @default-param: biz_date = 2026-10-21
-
--- @name: 订单日汇总
-SELECT dt, COUNT(*) FROM orders WHERE dt = '${biz_date}' GROUP BY dt;
-
--- @name: 支付核对
--- @connection: MySQL业务库
--- @param: biz_date = 2026-10-20
-SELECT COUNT(*) FROM payments WHERE dt = '${biz_date}';
-```
-
-- `@default-connection: 连接名称或ID`、`@default-param: 参数名 = 值` 只能出现在文件第一条 SQL 之前；每个默认参数单独写一行。
-- `@connection: 连接名称或ID`、`@param: 参数名 = 值`、`@name: 语句名称` 写在对应 SQL 前的 `--` 注释中；0.9.2 增加 `@output: 路径.tsv`，见上方执行并导出说明。字段名采用上面的英文小写，冒号必须保留。普通注释可穿插，SQL 正文及块注释中的同名文字不作为配置。
-- 参数优先级是当前语句注释 > 文件默认注释 > SQL 中的 `${name=default}`。注释值按原文替换，不自动加引号或转义；文本仍在 SQL 中写成 `'${name}'`。注释参数值不能为空，值中的 `=`、逗号和分号按普通文字保留，不表示候选列表。
-- 参数齐全时直接执行；缺值才打开原有参数面板，注释指定的值在面板中只读，需要回编辑器修改。没有注释值的参数仍可使用原有记忆值；`sqlParameters=false` 与手动选择“原样发送”的行为保留。
-- 注释连接优先于手动选择和上次连接；名称须精确匹配，也可以使用连接 ID。找不到、名称不唯一、注释拼错、同一范围重复声明或默认设置位置错误时会报错，不自动改用其他连接。
-- 选中 SQL 正文执行时，仍继承它前面的注释。一次只执行一条，选区跨多条语句会拒绝。`@name` 显示在执行进度、结果页与计划材料中。
-
-**查看计划 → 保存给 AI 审核 → 执行原 SQL：**
-
-1. 光标放在 SQL 上，按 `Ctrl+Alt+Enter`，或右键选择 `Doris SQL Lite: 查看光标处执行计划`。复用当前语句的连接、参数及活动会话，不修改原文件。
-2. Spark 使用 `EXPLAIN FORMATTED`，Doris 使用 `EXPLAIN VERBOSE`，MySQL 使用普通 `EXPLAIN`。不自动使用会真正运行语句的 `EXPLAIN ANALYZE`；已有 `EXPLAIN` 前缀时提示回到原 SQL。
-3. 计划独立显示为保留缩进的文本，完整读取，不受普通结果行数限制。0.9.3 起默认“复制 AI 反馈 / 保存 AI 反馈…”输出简短信息，引用原 SQL 路径和另存的完整计划；需要全文时使用“复制完整材料”，详见上方说明。
-4. 将反馈交给 AI，按其中路径读取 SQL 与计划进行审核，通过后回原 SQL 按 `Ctrl+Enter` 执行。扩展不自动发送材料给 AI，也不自动执行审核后的 SQL。
-
-计划针对原 SQL，**不追加预览 LIMIT**。普通查询预览可能追加 LIMIT，计划可能与原 SQL 不同。审核材料是生成时的快照；SQL、参数、连接或会话设置变化后需要重新生成，表数据与统计信息变化也可能改变计划。保存的材料会包含 SQL 和业务参数，应按对应业务文件管理。
-
-### 常规操作
-
-1. 打开扩展开发主机或安装打包出的 `.vsix`。
-2. 在活动栏打开 `Doris SQL Lite`。
-3. 点击 `添加连接`，在弹出的连接表单里一次填完类型、名称、主机、端口、database、用户名和密码。类型选 `Spark Thrift` 时配置「认证方式」；MySQL / Doris 可启用 TLS，并选择是否校验证书、是否指定私有 CA 文件。可以先点 `测试连接` 验证，再点 `保存`。
-4. 右键连接创建 SQL 查询。第一次执行当前文件时选择连接；同一文件后续访问该数据源时复用它的活动会话，切到其他数据源再回来也保留原状态。第一次选择的连接作为本次 VS Code 会话的默认连接；SQL 注释中的连接设置优先。
-5. 按 `Ctrl+Enter` 或右键 `Doris SQL Lite: 执行光标处 SQL`：有选区时执行选中的单条 SQL；没有选区时自动执行光标所在或最近的一条 SQL。语句里含 `${...}` 参数时先使用注释值及行内默认值，缺值时弹出参数面板。
-6. 查询可以取消：进度通知上的取消按钮，或命令面板执行 `Doris SQL Lite: 取消当前查询`。取消走 `KILL QUERY`，活动连接会保留，`USE`、临时表和会话变量继续生效；服务端不响应时会退化为断开该连接。同一 SQL 文件不会并发启动重复查询。
-7. 结果复用同一个面板，可查看连接、database、耗时、行列数和截断提示，并支持行号、筛选、TSV 导出和复制。**面板最多保留 `maxResultRows` 行（默认 1000），并在读到上限后停止读取；导出写的是全部结果（结果被截断时会重新执行一次查询），复制只复制当前显示的那部分。**
-
-结果列头支持三态排序：点击数据列列头依次为升序、降序、恢复原始顺序，换列从升序开始；`#` 行号列不参与排序，当前列与方向显示在列头和表格上方。排序按驱动返回的实际 JavaScript 类型处理：有限 `number` 按数值比较；字符串（包括 `"10"`、`"2"` 这类数字字符串）按区分大小写的 UTF-16 文本比较，空字符串是最小文本；其他类型按面板展示文本归入文本组。`null` / `undefined` 视为 `NULL`，两个方向都排在最后。升序为 number → text → NULL，降序为 text → number → NULL；相同值始终按查询原始顺序排列。排序只重排面板中**已加载的行**（上方会写明确切行数），可与筛选同时使用；它不改变复制和导出的内容或顺序，也不会重新查询数据库。
-
-当前 SQL 文件使用的连接会显示在 VS Code 状态栏，点击即可切换。也可以在 SQL 编辑器中右键选择 `Doris SQL Lite: 为当前文件选择连接`。连接选择和活动会话只保存在当前扩展会话内，不会写入工作区配置；切换连接保留原会话，关闭文件、重置会话、修改目标/认证信息、删除连接或扩展停用时按上述范围释放。
-
-在连接列表中右键选择 `Doris SQL Lite: 编辑连接`，会打开同一个表单并带入当前值，只改需要改的字段即可：
-
-- 密码留空 = 保持已保存的密码；填写 = 覆盖；勾选「清除已保存的密码」= 删除本机保存的密码。
-- 保存前会校验名称、主机、端口、用户名，并提示重名和指向同一 `host:port` 的重复连接。
-- 连接目标（类型、主机、端口、用户名、database、SSL）或认证信息（密码、Spark 认证方式）变化时，释放这条连接的活动会话；仅修改名称不会释放会话。
-- 顶部支持粘贴连接串（`mysql://user:password@host:9030/db`、`jdbc:mysql://…` 或 `host:port`）自动拆分成字段；密码只进 SecretStorage。
-
-命令面板调用 `编辑连接` 时会先让你选择要编辑的连接。
-
-database 默认留空且不是必填项，连接和 `测试连接` 仍可用；但首次查询未限定库名的表时可能出现 `No database selected`。可以在当前文件先执行 `USE hue`，后续语句会复用同一条连接；也可以按需配置默认 database 或使用 `库名.表名`。
-
-如果数据库密码发生变化，可在连接右键菜单执行 `清除已保存密码`，下次连接时重新输入；密码输错时也会自动清除并重新询问一次。连接与查询失败的报错会转成中文说明并给出下一步建议（端口不通、主机不可解析、database 不存在、账号无权限等），原始报错与错误码保留在消息尾部，密码仍会脱敏。
-
-结果导出只包含查询结果，不包含连接信息或密码；TSV 会处理字段中的引号、换行和制表符。结果页中的 `NULL` 会明确显示，TSV 中仍按空字段导出。导出为 UTF-8 且不带 BOM，用 VS Code 或其他按 UTF-8 打开的工具都没问题。
-
-**导出会防表格公式注入**：以 `=`、`@` 开头，或以 `+`/`-` 开头且后面不是纯数字的单元格，会加上前导单引号 `'`。Excel / LibreOffice / Google Sheets 把 `'` 当作「这是文本」的标记并在单元格里隐去，所以显示的仍是原值，但不会被当公式执行 —— 否则一段用户可控的文本被粘贴进表格就是一个可执行的载荷。纯数字（含负数、科学计数法）不受影响。需要完全原值的下游工具可以关掉 `dorisSqlLite.escapeSpreadsheetFormulas`。
-
-结果面板的导出写的是**全部结果集**，与面板显示行数无关；分块写入文件（每块行数由 `dorisSqlLite.exportChunkRows` 控制，默认 5000，本地文件还有约 1 MiB 的缓冲字节上限），过程带可取消的进度条，文件完成与失败处理见 0.9.2 说明。复制只取当前面板保留的行。超过 10 万行或读取被提前停止时，面板导出会先弹确认；**新“执行并导出”入口不经过预览与这次确认**，直接按明确的导出请求执行。
-
-**结果超出面板保留上限时，导出会重新执行一次该查询**（默认读取上限下这是常态）。**导出路径不受读取上限影响**，会读取全部行。点导出时会提示，扩展使用产生结果的原会话重跑该语句、把行流式写进文件；会话失效或执行过其他语句时要求重新查询。导出内容以「重新执行时」为准：如果表在两次执行之间变了，导出结果可能与面板不一致；有副作用的语句（存储过程、`INSERT ... RETURNING` 之类）请先确认再导出。
-
-**内存不再随结果集大小增长，而且默认不再读完整个结果。** 驱动按行推给扩展，扩展只保留前 `maxResultRows` 行（默认 1000）。**达到上限就会停下来**：能安全改写的查询会把 `LIMIT` **直接下推到服务端**（v0.8.2 起，见下），改写不了的才退化为主动中断语句（MySQL/Doris 走 `KILL QUERY`，Spark 走 `CancelOperation`）—— 默认配置下不再为了数出行数而把整个结果搬过来。
-
-代价是精确总数：面板显示「已读取 1000 行后停止（结果不止这些）」，而不是「共 N 行」。想要精确总数就把 `dorisSqlLite.readRowLimit` 设为 `-1`（读完全部，大结果会明显变慢）。设成正数则是自定义读取上限，取值范围不会低于 `maxResultRows` —— 否则面板就填不满了。
-
-> 实测（本机 300,000 行）：Spark Thrift 读完 433 ms → 早停 83 ms（**5.2 倍**；冷缓存时 2866 ms → 160 ms，17.9 倍）；MySQL 188 ms → 141 ms（1.3 倍）。两者早停后**会话都仍然可用**（`SELECT 1` 正常）。MySQL 的收益小是因为它要在**另一条连接**上发 `KILL QUERY`，本机有约 100 ms 固定开销；收益随「传输 + 解码」占比上升，所以你那种跨网络、12 列的宽结果收益比这个基准大。
-
-## v0.8.4 卡住的查询：看得见，也退得出
-
-一条查询卡住时有两个现象：**进度通知一直转，但界面上找不到任何能取消它的地方**。两件事分别修了。
-
-### 为什么找不到：取消命令没有任何入口
-
-取消执行的是 `Doris SQL Lite: 取消当前查询`，而它此前**不在任何菜单或快捷键里**，只能从命令面板调，且前缀是 `Doris SQL Lite`（搜 `sqltools` 搜不到）。而进度通知一旦被关掉，这条查询就再没有出口了 —— 通知是当时唯一的可视取消入口。
-
-现在有四个：
-
-- **状态栏**：查询执行期间出现「正在执行…」，**点击即取消**，结束自动消失。
-- **编辑器右键菜单** 和 **编辑器标题栏**：`取消当前查询`，只在真的有查询在跑时出现（由 `dorisSqlLite.queryRunning` 上下文键门控）。
-- **提示消息**：重复执行时提示「当前 SQL 文件已有查询正在执行」，并直接带一个**「取消该查询」按钮**。
-- 命令面板（原样保留）。
-
-多个文件同时执行时，取消优先作用于**当前文件**；当前文件没在跑但全局只有一个在跑，就取消那一个；有多个则弹出选择。
-
-### 为什么进度通知会一直转：读取没有任何超时
-
-连接**没有收到关闭通知**就消失时（VPN 断开、防火墙清掉会话、服务端进程被结束），本地这条 socket 上既没有数据也没有错误，`for await` 会永远等下去。`finally` 里的清理代码永远跑不到，「正在执行」标志一直挂着。
-
-新增设置 `dorisSqlLite.queryIdleTimeoutMs`（默认 `300000`，即 5 分钟；`0` 关闭）：**结果开始返回之后**，连续这么久没有任何数据，就判定连接已断开、销毁 socket 并报「连接已中断」。
-
-**计时刻意不从语句开始算。** 一个还没产出任何行的查询和一条已经死掉的连接**无法区分** —— 全表扫描跑几分钟才回第一行是正常的，按总时长设超时一定会误杀它。所以守卫在**第一行到达之前不武装**；那段窗口内的卡住由上面四个入口解决。
-
-### 一个实测推翻的假设：销毁 socket 并不能解除阻塞
-
-最初的实现只在守卫触发时调 `connection.destroy()`，以为驱动会因此报错。**实测不是这样**：`socket.destroy()` 不带错误，mysql2 既不产生数据也不产生 error，那个迭代器**照样停在那里**。
-
-用 TCP 代理在客户端与 MySQL 之间制造真实的半开连接（转发若干行后停止下发、但保持 socket 打开）后看到：
-
-```
->>> 第 2000 行到达，已冻结代理
-t=  501ms  rows=6226  (+6226)  转发=524384B
-t= 3038ms  rows=6226  (+   0)  转发=524384B   ← idle 已到，守卫触发，但读没醒
-t=20372ms  rows=6226  (+   0)  转发=524384B   ← 又过了 17 秒，仍在原地
-```
-
-所以现在把**读取本身与守卫做成竞速**：守卫触发时不再依赖驱动醒过来，直接放弃那次 await 并抛错。修后同一场景：**t=3037ms 抛出 `QueryIdleTimeoutError`**（配置 3 秒）。
-
-顺带修掉一个同源问题：`close()` 之前会**无限等待**服务端确认关闭，而半开连接永远不确认 —— 取消之后收尾那一句仍然会挂住。现在关闭有 2 秒上限，超时直接销毁 socket。
-
-### 实测
-
-四场景共 13 项（`_idle-guard-live.js`，用代理制造真实半开连接）：
-
-| 场景 | 期望 | 结果 |
-|---|---|---|
-| 首行到达前静默 6 秒（超时设 3 秒） | 不触发 | ✅ 仍在等，收到 0 行 |
-| 收到 6226 行后静默（超时 3 秒） | 约 3 秒后报错 | ✅ `QueryIdleTimeoutError`，会话标记为不可用 |
-| 同场景、超时改 8 秒 | 耗时跟着配置走 | ✅ 8020ms |
-| 对照：数据持续返回，超时只设 0.7 秒 | 不打断 | ✅ 正常完成，未误杀 |
-
-正常路径不受影响的对照（`_idle-smoke.js`，超时同样只设 0.7 秒）：
-
-- **Doris 2.0.9**：7/7 通过，多行结果 376 行；关闭会话 1ms 返回。
-- **Spark 3.2.0**：小结果与 20 万行 `explode` 均正常完成。
-- **MySQL 8.4.9**：见上表第 4 行。
-
-## v0.8.2 上限下推
-
-达到读取上限时，如果语句能安全改写，扩展会把 `LIMIT` **直接拼进 SQL** 交给服务端，而不是等结果传回来再中断。这样服务端在**生成执行计划时**就知道边界：Spark 的全量 shuffle 排序变成 `TakeOrderedAndProject`，Doris / MySQL 各走自己的 TopN 路径 —— 省下的是**服务端算力**，不只是传输。
-
-**实测收益**（200 万行、上限 1000，同一条查询加不加 `LIMIT` 的对比）：
-
-| 引擎 | 顺序扫描 | `ORDER BY`（无索引列） | `GROUP BY` |
-|---|---|---|---|
-| Spark 3.2.0 | 804 → 64 ms（**12.6 倍**） | 1784 → 358 ms（**5.0 倍**） | 1426 → 746 ms（1.9 倍） |
-| Doris 2.0.9 | 98 → 15 ms（**6.5 倍**） | 244 → 33 ms（**7.4 倍**） | 184 → 53 ms（**3.5 倍**） |
-| MySQL 8.4.9 | 2 → 1 ms（本就接近 0 成本） | 1218 → 436 ms（**2.8 倍**） | 4623 → 4350 ms（1.06 倍） |
-
-Spark 和 Doris 收益大的原因在**计划**而不是传输：对 Spark 而言中断几乎不省算力（结果在发第一行之前就已物化完，实测只快 2~3 ms），只有下推才真正少算。`GROUP BY` 普遍收益有限，别指望它是万能加速。
-
-**只在能安全改写时才下推**，任一条不满足就退回中断路径：
-
-- 切分后是**单条语句**；
-- 语句**以 `SELECT` 开头** —— 靠这一条把 `CREATE TABLE ... AS SELECT`、`INSERT INTO ... SELECT` 天然排除在外（Doris 的 `SET SESSION sql_select_limit` 会把这两类**静默截断**，所以这道闸门是必需的）；
-- **没有顶层 `LIMIT`**（不改写你自己写的 LIMIT；子查询里的 `LIMIT` 不算）；
-- `dorisSqlLite.readRowLimit` 不是 `-1`（那个模式要精确总数，不能被 `LIMIT` 掩盖）。
-
-`WITH ... SELECT` 出于保守**不下推**，走原来的中断路径（MySQL 8 允许 `WITH ... DELETE`，安全区分需要真正的 SQL 解析）。
-
-**导出路径不受影响**：它始终跑未改写的原句（本来就要写出全部行）。**面板也不会因此谎报总数** —— 下推后语句是自然结束的，扩展靠「读到的行数是否触达上限」判断截断，显示仍然是「已读取 N 行后停止（结果不止这些）」。
-
-**已对真实引擎逐项验证**（Doris 2.0.9 / MySQL 8.4.9 / Spark 3.2.0，共 36 项）：下推后的结果与「不加 `LIMIT` 取前 N 行」**逐行一致**（含 Spark 的 `TakeOrderedAndProject`）；`CREATE TABLE AS SELECT` 与 `INSERT ... SELECT` 落表均为**全量、未被静默截断**；用户自带 `LIMIT`、多语句、`SHOW` 均未被改写。
-
-## v0.8.1 读满即停
-
-- 新增设置 `dorisSqlLite.readRowLimit`（默认 `0`）：读到 `maxResultRows` 之后**停止读取并中断语句**（MySQL/Doris 走 `KILL QUERY`，Spark 走 `CancelOperation`），不再为了精确计数把整个结果搬过来。`-1` 表示读完全部（0.8.0 的行为，大结果会明显变慢），正数表示自定义读取上限（不会低于 `maxResultRows`）。
-- 面板不再谎报总数：显示「已读取 N 行后停止（结果不止这些）」。只有 `-1` 模式才仍然是「共 N 行」。
-- 导出**不受上限影响**（它必须写出全部行），但读取被提前停止时导出前一定会确认一次，因为这时行数未知。
-- 顺带修掉一个连带的副作用：`totalRows` 变小之后，原来「超过 10 万行才确认导出」那道保险会失效，现在改成「未读完就确认」。
-- 早停复用了取消那条已经验证过的路径，所以没有新增协议代码；新增单测覆盖「批内停止」和「限流回调只触发一次」。
-
-## SQL 参数（Hue 风格，0.8.0）
-
-在 SQL 里写 `${name}`，缺值时弹出参数面板，替换在本地完成后才发给服务端。**对 MySQL、Doris、Spark 三者行为一致** —— 替换发生在扩展这一侧，与协议无关。
-
-```sql
-SELECT source_group_id, created_ms
-FROM   week_bounds
-WHERE  create_time >= '${family_created_from}'
-  AND  create_time <  '${family_created_to}'
-  AND  week_end_ms  <= ${as_of=2026-09-01}
-```
-
-- **引号由模板负责**：文本值写 `'${name}'`，数值写 `${n}`。扩展原样插入，不加引号也不做转义（与 Hue 相同）；面板底部的「实际发送的 SQL」就是这个约定的一道保险，引号写错一眼可见。
-- `${name=默认值}`：没有值时用默认值。`${name=A, B, C}` 表示候选值（面板给下拉，未选前不算有值）；`${name=CA(Canada)}` 可以给候选加显示名。同一个参数出现多次时，默认值只需写一处。
-- **值只存在本机**：按「文件 + 参数名」记在 VS Code 扩展状态里，再次执行时预填上次用的值，确认后才真的跑。改了 SQL 里的默认值会让记住的值失效，不会让旧值一直盖住新默认值。清除用命令 `Doris SQL Lite: 清除当前文件的查询参数`。
-- **`$${name}` 是转义**：把 `${name}` 原样交给服务端。这是给「想用 Spark 自己的 conf 替换」留的路 —— `SELECT '$${spark.sql.shuffle.partitions}'` 由 Spark 解析成 `2`。
-- 参数没填完时「执行」按钮不可用；只有「原样发送」才会把未替换的模板直接发出去。
-- 想要服务端行为可以关掉 `dorisSqlLite.sqlParameters`。参数名限定为 `[A-Za-z_][A-Za-z0-9_.-]*`，所以正则字面量里的 `${1}` 之类不会被误改。
-
-**为什么这不是"可选便利"**：Spark 会把 `${name}` 当成 Spark conf 的键来解析，而**未定义的键会静默变成空字符串，不报错**（Spark 3.2.0 实测）。于是 `WHERE t >= '${as_of}'` 在没赋值时变成 `WHERE t >= ''`，`CAST` 之后是 `NULL`，查询返回空结果且毫无提示。MySQL/Doris 相反：它们不做替换，`${}` 会原样进语法、直接报语法错。前者才是危险的，参数面板就是为了在语句离开本机之前把值摆明。
-
-## v0.7.5 流式查询
-
-- 驱动改成**按行推送**：MySQL 走 `Query.stream()`（`for await` 自带背压），Spark 走 `fetch()` 逐批 + 每批 `flush()`，不再用会把整份结果堆在内存里的 `fetchAll()`。
-- 面板只保留前 `maxResultRows` 行，其余行流过去即丢弃、只累加计数。内存占用由保留上限决定，不再随结果集大小增长。
-- 查询进度显示「已读取 N 行…」，长查询期间能看出在推进而不是卡住。
-- 当时结果被截断时，导出改为**重新执行该查询并流式写入文件**，未被截断时直接写内存里的行。`QueryResultView` 不再持有 `allRows`。0.9.1 起重跑改用原会话，并占用该文件的执行位置，见上方会话一致性说明。
-- 取消语义不变：MySQL 仍是 `KILL QUERY`，Spark 仍是 `CancelOperation`。
-- 新增 `tests/mysql-session.test.js`、`tests/hive-session.test.js`（用假流 / 假 operation 驱动，不需要真实数据库），结果层测试改为覆盖流式收集器。
-
-## v0.5 导出全量结果
-
-- 导出不再受 1000 行限制：`QueryResultView` 现在同时保留全量 `allRows` 与用于渲染的 `rows`，导出写全量，复制仍只复制面板显示的那些行。
-- 导出改为分块生成 + 分块写文件（`toTsvBlocks`，默认每块 5000 行），不再一次性拼一个巨型字符串。
-- 超过 10 万行的导出会先弹确认；面板截断提示改为「共 N 行，显示前 M 行。导出为全部 N 行；复制为当前显示的 M 行」。
-- 复制在结果被截断时明确提示复制了多少行，需要全量时指向导出。
-- `dorisSqlLite.maxResultRows` 语义明确为**面板渲染行数**（也决定复制范围），不再影响导出。
-- 导出的 TSV 不带 BOM，按 UTF-8 打开即可。
-
-## v0.4 连接诊断与查询取消
-
-- 密码不再被错误地记住：手动输入的密码只在握手成功后写入 SecretStorage；已保存的密码认证失败时自动清除并重新询问一次。
-- 错误信息中文化：按 `error.code` 与消息特征归类为认证、网络、database、权限、SSL、服务端、SQL 等，并附带「建议」。
-- 取消查询不再拆连接：额外开一条控制连接执行 `KILL QUERY <thread id>`，原连接保留，会话状态不丢；没有可用密码或服务端不响应时回退为断开连接（5 秒兜底）。
-- 新增 `Doris SQL Lite: 取消当前查询` 命令，除进度通知的取消按钮外多一个入口，可自行绑定快捷键。
-- 新增 `tests/connection-diagnostics.test.js`（15 例）。
-
-## v0.3 连接表单
-
-- 添加/编辑连接从 8 步串行弹窗改成单页 Webview 表单：字段可来回修改，切走标签页内容不丢（retainContextWhenHidden）。
-- 保存前可用 `测试连接` 直接验证，不必先存再右键测。
-- 内联校验：名称/主机/用户名必填、端口范围即时提示，重名阻断保存，重复 `host:port` 给出警告。
-- 切换类型自动带出默认端口（Doris 9030 / MySQL 3306），且不会覆盖你手动改过的端口。
-- 密码语义明确：新增留空 = 不保存（首次连接再问）；编辑留空 = 保持原密码。彻底区分「空密码」与「没保存密码」。
-- 支持从连接串导入，含 URL 编码的密码。
-- `Enter` 保存、`Esc` 取消；表单同时只开一个，重复点 `添加连接` 会复用。
-
-## v0.2 体验优化
-
-- 光标级 SQL 执行：多语句文件不再要求每次手动选中 SQL。
-- 当前连接可见：状态栏持续显示当前文件或会话默认连接。
-- 查询可控：支持取消和同文件重复执行保护，并展示端到端耗时。
-- 结果页聚合：复用单一结果标签，支持筛选、行号、空结果、DML 成功态和截断提醒。
-- 连接流程更稳：database 不再带项目特定默认值，输入会自动清理首尾空格，命令面板调用编辑/删除/清除密码时也会先选择连接。
-
-
-## Spark Thrift（HiveServer2）
-
-类型选 `Spark Thrift` 后，连接走 Spark Thrift Server 的 HiveServer2 Thrift 协议，其余体验（结果面板、筛选、导出、取消、状态栏）与 MySQL/Doris 完全一致。
-
-- **端口**：预填 `10000`（HiveServer2 默认端口）。服务端如果通过 `hive.server2.thrift.port` 改过端口，按实际值填。
-- **认证方式**（表单里按类型出现，对上服务端的启动参数即可，不确定就保持默认）：
-  - `SASL/PLAIN`（默认）—— 对应服务端 `--auth none`（HiveServer2 默认）或 `ldap`。
-    `none` 模式不校验密码，**密码留空即可**；只有 `ldap` 才需要填真实密码。
-  - `NOSASL` —— 对应服务端 `--auth nosasl`，裸 Thrift socket，密码可以留空。
-  - Kerberos 不支持：它依赖需要本机编译的原生 `kerberos` 模块，没法随 VSIX 分发。
-- **协议版本**：从 `HIVE_CLI_SERVICE_PROTOCOL_V10` 起逐级向下重试到 `V6`。Spark 各版本打包的 Hive 版本不同（Spark 2.x 是 Hive 1.2，Spark 3.x/4.x 是 Hive 2.3+），协议版本不匹配时握手会直接失败，所以这里自动降级，不需要手动配置。
-- **database**：HiveServer2 的 `OpenSession` 没有「默认库」参数，因此扩展在会话建立后用 `` USE `库名` `` 选中它，和 beeline 的做法一致。留空则不执行 `USE`，后续语句写 `库名.表名` 即可。
-- **取消查询**：走 HiveServer2 的 `CancelOperation`，会话保留。这与 MySQL 那条「另开一条连接执行 `KILL QUERY`」的路径不同。
-- **连接串导入**：除 `mysql://` / `jdbc:mysql://` / `host:port` 外，也认 `jdbc:hive2://host:10000/db` 与 `hive2://`，并会剥掉 beeline 追加的会话属性（如 `;principal=hive/_HOST@REALM`）。
-- **结果类型**：`BIGINT` 超出 `Number.MAX_SAFE_INTEGER` 时以字符串返回，不丢精度（驱动自带的转换会丢）。`DECIMAL`、`DATE`、`TIMESTAMP` 以及 `ARRAY`/`MAP`/`STRUCT` 按服务端返回的原文展示与导出；`BINARY` 显示为 `0x…`。
-- **已知边界**：一次只执行一条 SQL；只支持 `binary` 传输模式（不支持 `http`）；不做连接池。
-
-## 本地验证与打包
-
-- 构建 bundle：`node scripts/build.js`
-- Bundle 冒烟检查：`node scripts/check-bundle.js`（在 VS Code 之外加载 `dist/extension.js`、跑一遍 `activate()`、并验证两个驱动在 bundle 内可用）
-- Webview 检查：`node scripts/check-webview.js`
-- 编译（只有测试需要，产物在 `out/`）：`pnpm run compile`
-- 测试：`node --test "tests/**/*.test.js"`（glob 由 Node 自己展开。**不要写成 `node --test tests`** —— 在 Windows 上 Node 会把它当成模块路径而失败）
-- 打包：`node scripts/package-runtime.js`（会先构建 bundle）
-- 对**真实 MySQL** 跑端到端流式检查：`node scripts/check-live-mysql.js --host=127.0.0.1 --port=3306 --user=root --password=… --database=… [--seed]`
-- 对**真实 Spark Thrift Server** 跑端到端检查：`node scripts/check-live-spark.js --host=127.0.0.1 --port=10000 --auth=plain`。`--auth` 取 `plain` 或 `nosasl`，必须和服务端启动参数一致。脚本会自建 `e2e_types` 表和 `e2e_db` 库，所以只对一次性测试实例使用。
-
-`scripts/check-live-mysql.js` 不在 `pnpm test` 里，因为它需要一台可连的服务器；改动驱动层（`src/mysqlSession.ts`、`src/hiveSession.ts`、`src/querySession.ts`）后建议手动跑一次。它验证的是假流测不到的东西：真实 `Query.stream()` 行为、非 SELECT 语句的 `affectedRows`、**取消之后连接是否仍然干净**、以及重查导出的落盘结果。`--seed` 会自己建两张表并灌数据（7 行类型样本 + 3 万行），**会 TRUNCATE 这两张表**，所以请指向一次性库。
-
-`pnpm test` 把上面几步串成一条链。改动 `src/` 后需要重建 bundle：`pnpm run watch`，或用 `pnpm run watch:types` 只做类型检查的 watch —— **F5 调试加载的是 `dist/extension.js`，只跑 `tsc -w` 会让调试主机一直执行旧代码。**
-
-扩展的运行时是**单个 esbuild bundle**（`dist/extension.js`）。VSIX 里只有这个文件加 `package.json`、README、LICENSE 和图标，不再打包 `node_modules`（722 个文件降到 7 个）。安装后的扩展不依赖本机的 npm 或 SQLTools。
-
-## 当前 MVP 边界
-
-- 每个 SQL 文件在当前扩展会话中为每个实际用过的连接 ID 保留一条会话；不同文件独立，关闭文件或扩展停用时释放，不做连接池，也不自动回收空闲会话。
-- 普通执行一次只接受一条 SQL；无选区时自动选择光标所在语句，选区包含多条语句时仍会提示分开执行。分批任务通过独立入口明确指定步骤，仍逐条提交。
-- 结果面板默认最多保留并渲染 1000 行（可通过 `dorisSqlLite.maxResultRows` 调整），面板不做虚拟滚动。超出的部分不保留，只计入「共 N 行」。
-- 查询结果不会被整份留在内存里：预览只保留前 `maxResultRows` 行，截断后在面板导出需重跑。已知需要全部数据时，使用 0.9.2 的执行并导出入口，只执行一次并直接流式写本地文件。
-- Spark Thrift 不支持 Kerberos 认证，也不支持 `http` 传输模式；结果集里复杂类型的展示取决于服务端返回的文本形式。
-- Spark 的认证方式选错时，服务端**不会回包也不会报错**（例如服务端是 `--auth nosasl` 却选了 `SASL/PLAIN`）。扩展会在 20 秒后中断握手并提示检查认证方式，不会一直转圈。
-- 目前不包含 SSH 隧道、SQL 智能补全、事务控制和可编辑表格。
-
-## 顺序分批执行与无结果集通知（0.9.4）
-
-在当前电脑、VS Code 保持打开的情况下顺序分批补数。SQL 继续放在原文件，PowerShell 只生成批次参数，连接沿用扩展已有配置与 SecretStorage 密码。工作区需要受信任，本机需有 `pwsh`（Windows 找不到时回退 `powershell.exe`），并启用 `dorisSqlLite.sqlParameters`。
-
-### 1. 无结果集操作只显示通知
-
-- INSERT、DELETE、UPDATE、USE、SET 等实际没有结果集的操作完成后，不再新建或刷新结果页面；通知显示语句名、成功/失败/取消、耗时，以及服务端实际提供的影响行数，保留复制/保存 AI 反馈入口。
-- 判断依据是驱动返回的“是否有结果集”，不是首个 SQL 关键字，也不是行数是否为零。SELECT 返回零行仍显示正常空结果页；实际返回结果集的语句也保留结果展示。
-- 统一 MySQL/Doris 与 Spark 的结果标记和影响行数语义；服务端未提供计数时明确为未知，不把未知显示成影响 0 行。
-
-### 2. 一个 SQL 文件内顺序分批执行
-
-- 在 SQL 文件中右键或通过命令面板执行 `Doris SQL Lite: 顺序分批执行 SQL`。通过现有 `@name` 明确指定步骤及顺序，例如每批先“清理当天”再“回填当天”；不执行文件中的其他 SQL。可指定只在任务开始运行一次的初始化步骤，例如 USE、SET。
-- 开始时固定本次 SQL 文本和批次参数，显示批次数、首尾参数、步骤与连接后由用户启动；中途编辑文件只影响下一次任务。每次只有一个批次在执行，批次中的步骤也按顺序等待完成。
-- 批次参数只覆盖本次执行，不改 SQL 文件或参数记忆；优先级为：批次参数 > 当前语句 `@param` > 文件 `@default-param` > 行内默认值。初始化使用自身注释及行内默认值，不使用任何一批的参数。缺值、步骤名称缺失或重名时，在提交 SQL 前报错；会检查所有批次，最后一批缺值也不会先执行前面的写入。
-- 复用当前 SQL 文件按连接 ID 保留的会话和 SecretStorage 密码。一次性初始化每次任务开始执行一次；任务期间当前文件不能插入其他手工执行，其他文件沿用已有独立执行能力。
-
-### 3. PowerShell 生成批次参数
-
-- PowerShell `.ps1` 输出 UTF-8 JSON 参数数组，运行目录为 SQL 文件目录。脚本负责按天/小时等规则生成参数，扩展负责执行 SQL；扩展不向脚本传递数据库密码。不绕过本机 PowerShell 执行策略。
-- SQL 需要先保存为本地文件；脚本路径可为绝对路径或相对此 SQL 文件的路径，不加外围引号、不替换路径参数。三个批次注释只能写在第一条 SQL 前，名称数组使用 JSON 格式，按精确 `@name` 匹配；每组内不得重复，初始化和每批步骤不得重叠：
-
-```sql
--- @batch-script: ./backfill-params.ps1
--- @batch-steps: ["清理当天", "回填当天"]
--- @batch-init: ["会话设置"]
-
--- @default-connection: Doris数仓
--- @name: 会话设置
-SET time_zone = '+08:00';
-
--- @name: 清理当天
-DELETE FROM order_summary WHERE dt = '${biz_date}';
-
--- @name: 回填当天
-INSERT INTO order_summary
-SELECT * FROM order_source WHERE dt = '${biz_date}';
-```
-
-- 上述连接、表名和日期需替换为任务已确认的值。相邻 `backfill-params.ps1` 示例，结束日期不包含在内：
+面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，连接、参数、会话、结果、执行计划和 AI 审核材料沿同一条可核对工作流组织。
+
+当前发布线：`0.9.9`，目标版本：`1.0.0`。
+
+## 核心能力
+
+- 光标级执行：`Ctrl+Enter` 执行光标所在或最近一条 SQL。
+- 文件级连接：文件默认连接、语句级连接覆盖和按连接保留会话。
+- SQL 参数：`${name}`、默认值、候选值、参数页和实际发送 SQL 预览。
+- 执行计划：MySQL `EXPLAIN`、Doris `EXPLAIN VERBOSE`、Spark `EXPLAIN FORMATTED`。
+- 完整导出：`@output` 或面板按钮流式写出完整 TSV。
+- 顺序批次：PowerShell 生成参数，扩展预检全部批次并逐条执行。
+- 字段保护：注释声明字段，窗口内即时切换字段密文与字段原文。
+- AI 反馈：版本化 JSON，默认不含 SQL 正文、结果行或密码。
+- 统一界面：连接、参数、计划和结果页共享视觉与响应式规则。
+
+## 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| [使用指南](docs/usage.md) | 连接、SQL 注释、参数、执行、计划、结果、导出、会话和批次 |
+| [安全模型](docs/security.md) | SecretStorage、TLS、字段密文、密钥与工作区信任 |
+| [反馈 schema v1](docs/feedback-schema.md) | AI 反馈字段、批次摘要、完整报告和兼容规则 |
+| [架构](docs/architecture.md) | 模块分层、会话模型、驱动、Webview、文件完成点和测试边界 |
+| [开发与验证](docs/development.md) | 环境、构建、测试、预览、真实数据库检查和打包 |
+| [产品定位](docs/product.md) | 目标用户、产品原则、1.0 承诺和版本策略 |
+| [界面与交互](docs/ux.md) | 共享布局、页面职责、状态、响应式、可访问性和验收流程 |
+| [发布检查清单](docs/release-checklist.md) | 稳定版发布门禁 |
+| [变更日志](https://github.com/JSbiu/doris-sqltools-lite/blob/main/CHANGELOG.md) | 版本阶段和主要变化 |
+| [历史与设计记录](docs/history.md) | 旧版实现背景、实测和设计沿革 |
+| [Skill](https://github.com/JSbiu/doris-sqltools-lite/blob/main/skills/doris-sqltools-lite/SKILL.md) | 使用本扩展编写 SQL 时的 AI 操作约定 |
+
+## 支持范围
+
+| 数据源 | 协议 | 认证与传输 |
+| --- | --- | --- |
+| MySQL | MySQL protocol | 密码、TLS、私有 PEM CA |
+| Apache Doris | MySQL protocol | 密码、TLS、私有 PEM CA |
+| Spark Thrift | HiveServer2 Thrift | SASL/PLAIN、NOSASL、binary transport |
+
+VS Code 最低版本：`1.90.0`。
+
+扩展运行时由单个 bundle 提供，安装后不依赖本机 npm、独立 SQLTools 或其他数据库扩展。
+
+## 安装
+
+从仓库构建并安装：
 
 ```powershell
-$beginDate = [datetime]::new(2026, 10, 1)
-$endDate = [datetime]::new(2026, 10, 3)
-$batches = @(
-    for ($day = $beginDate; $day -lt $endDate; $day = $day.AddDays(1)) {
-        @{ biz_date = $day.ToString('yyyy-MM-dd') }
-    }
-)
-ConvertTo-Json -InputObject $batches -Compress
+pnpm install --frozen-lockfile
+pnpm test
+pnpm run package
+code --install-extension .\doris-sqltools-lite-0.9.9.vsix --force
 ```
 
-- 此脚本只输出 `[{"biz_date":"2026-10-01"},{"biz_date":"2026-10-02"}]`；也可明确生成每批的起止时间，工具不改写业务过滤条件。数组至少一项，每项是参数对象；值可为非空字符串、有限数字或布尔值，数字/布尔值按文本替换。只执行无参数步骤时可输出 `[{}]`。
-- 只有显式启动“分批执行”才运行参数脚本；普通执行与查看计划不运行脚本。脚本失败、输出格式错误或用户在生成参数时取消，不开始提交 SQL。
-- 参数脚本应把 JSON 作为唯一标准输出。`throw`、`Write-Error`、非零退出码均使任务失败；诊断可以写 stderr。stdout 超过 4 MiB 或 stderr 超过 8 KiB 会停止脚本；单次任务初始化与每批步骤合计最多 10,000 次，超过时请缩小参数范围。
-- 此方式需要 VS Code 保持运行。独立于 VS Code 的命令行、服务器定时调度、任意 shell 语言适配和任意命令流程编排不在首版范围内。
+安装后执行 `Developer: Reload Window`。用以下命令核对版本：
 
-### 4. 中断与反馈
+```powershell
+code --list-extensions --show-versions
+```
 
-- 任一步失败或用户取消后停止后续步骤/批次，等待当前操作收尾。连接断开时停止，不自动重连、重试写入或重放初始化；已经完成的批次不自动回滚。
-- 结束通知提供复制/保存 AI 反馈，`action=batch`。0.9.5 起默认摘要引用 `batchReportFile`；完整报告的 `batch.records` 按顺序记录初始化与逐批步骤，包含名称、连接、实际参数、源 SQL 行号、耗时及状态；路径共用 `source.path`，不重复 SQL 正文。`batchIndex` 从 1 开始；`not-run` 表示未执行，`submitted=false` 表示该步骤未提交；`completedBatches` 只计全部步骤成功的批次。`affectedRows=null` 表示影响行数未知，`needsReview=true` 表示已提交步骤的写入结果需核对。仍只保存当前窗口最近完成的一次任务。
-- 若某批 DELETE 成功但 INSERT 失败，标出该批哪些步骤已完成；超时或断线后无法确定写入结果时标记“需核对”。用户核对后可调整开始日期/批次重新运行，首版不做自动断点续跑或跨引擎事务补偿。
-- 首版分批任务用于无结果集的补数写入和初始化，不接受所选步骤的 `@output`。若实际返回结果集，停止任务；已经提交的语句按反馈核对。批量查询结果查看、多批 TSV 导出及自动断点续跑不在此版本范围。
+## 快速开始
 
-### 验证范围
-
-驱动与任务测试使用假后端，覆盖空 SELECT、未知影响行数、跨月/闰日/小时参数、顺序执行、全量参数预检查和部分写入停止；参数适配器另以本机 PowerShell 验证中文路径、脚本报错及进程取消。真实数据库和 VS Code 界面端到端行为仍需在对应环境验证，不以这些测试代替生产验证。
-
-## 批次摘要、完整报告与进度（0.9.5）
-
-批次执行继续使用 0.9.4 的 SQL 注释与参数脚本。0.9.5 将默认反馈精简为任务摘要，完整逐步明细保存为报告，并在现有进度通知中持续更新当前参数与耗时。
-
-### 复制或保存批次反馈
-
-- 沿用结束通知的“复制 AI 反馈 / 保存 AI 反馈…”和 `复制最近一次执行反馈` / `保存最近一次执行反馈` 命令。对已提交 SQL 的任务，首次复制先选择本地 `.json` 报告的保存位置，默认文件名以 `.batch-report.json` 结尾；保存完成后才复制包含 `batchReportFile` 绝对路径的摘要。后续复制复用该报告；文件被删除后重新选择保存。
-- 保存 `.md` 反馈时只需选择一个新文件名，扩展自动在同目录创建完整 `.batch-report.json`。已有报告会被复用。报告和批次 Markdown 均不覆盖已有文件，也不能覆盖源 SQL、参数脚本或结果文件；已有目标需换名。批次报告和配套 Markdown 仅支持本地文件系统。
-- 报告保存失败会显示“报告未保存”，SQL 的成功/失败状态保持原样，本次内存记录保留，用户可以重试保存。写入或关闭文件失败时清理本次创建的未完成文件；清理失败明确给出残留位置，不将其标为完整报告。取消保存时不复制缺少报告位置的摘要。
-- 成功、失败、取消的已提交任务均可保存报告。脚本失败、参数检查失败或开始前取消等没有提交任何 SQL 的情况，直接复制简短反馈，无需生成逐步报告。同一反馈正在复制/保存时，重复点击不会另开保存任务。
-
-### 摘要和完整报告怎么读
-
-- 默认摘要保留名称、`source`、连接、总批数、完整成功批数、耗时、状态及 `batchReportFile`。`batch.steps` 将初始化和每批步骤的名称、连接类型和源 SQL 行号各列一次；行号共用 `source.path`。
-- `batch.firstBatch` / `batch.lastBatch` 提供首尾批次各步骤的参数、`submitted` 和状态；只有一批时不重复列末批。样例不代表中间参数连续或全部执行成功，`not-run`、`submitted=false` 必须按未执行读取。
-- `batch.stopped` 提供停止位置、参数、状态、已成功的 `completedSteps` 和需核对的 `needsReviewSteps`。初始化失败会标明 `phase=init`；步骤之间取消时，下一步仍为 `not-run`。语句已确认成功但随后会话断开时，该步保留 `success`，停止原因单独说明。
-- 根据 `batchReportFile` 读取完整报告的 `batch.records`，核对所有批次的实际参数、提交情况、状态、源 SQL 位置、耗时、影响行数和错误。完整报告继续使用明确字段清单与既有脱敏/错误截断规则，不附 SQL 正文、结果行或连接密码。来源在执行时未保存、后来编辑或已关闭时，沿用 `source` 的提示，不能直接把当前磁盘文件当作执行版本。
-- 普通查询和计划的反馈字段、计划文件保存方式继续沿用原有用法。报告是用户保存的本次任务产物；窗口内仍只保留最近完成操作，Reload Window 会清空内存记录，不生成查询历史或持续执行日志。
-
-### 长任务进度
-
-- 现有通知约每秒更新：生成参数、等待启动、准备会话、执行 SQL 或取消收尾。执行时显示已完整完成批数、当前批次/步骤、连接、当前参数摘要、任务和本步耗时。任务计时从确认启动开始，本步计时包含该步准备会话和执行的时间。
-- 例如：`执行 SQL · 已完成 17/60 批 · 第 18 批 · 步骤：回填当天 · 连接：数仓 · 参数：biz_date=2026-10-18 · 任务 8分0秒 · 本步 2分10秒`。耗时表示已等待时间，不是服务端完成百分比或剩余时间估计。
-- 通知最多展示三个参数，每项最多展示前 48 个字符；换行、超量或超长时明确提示省略，完整值在最终报告。初始化显示自身参数；不同文件各自计时。取消后继续显示“取消收尾”，直到当前驱动结束并释放操作后停止更新。
-
-### 验证与执行边界
-
-测试用内存批次验证摘要和完整报告，用临时本地文件与故障模拟验证保存、冲突与清理，用虚拟时钟和假会话验证等待、取消及计时释放。执行仍按 0.9.4 的顺序、会话与中断规则进行；本版不自动重试、回滚或续跑。真实数据库和 VS Code 界面端到端行为需要在对应环境验证。
-
-## 字段可逆加密与统一输出（0.9.6）
-
-需要保护用户 ID、空间 ID 或普通文本时，在 SQL 注释中声明字段及其逻辑域：
+1. 在活动栏打开 **Doris SQLTools Lite**。
+2. 在“连接”视图执行 **添加连接**。
+3. 选择 Doris、MySQL 或 Spark Thrift，填写连接目标并测试。
+4. 新建 `.sql` 文件，在第一条 SQL 前声明默认连接。
+5. 将光标放在 SQL 上，按 `Ctrl+Enter`。
 
 ```sql
--- @default-connection: Spark数仓
+-- @default-connection: 分析 Doris
+-- @default-param: biz_date = 2026-10-30
 -- @default-encrypt: {"user_id":"user"}
--- @default-param: user_id = 00042
 
--- @name: 用户空间核查
--- @encrypt: {"space_id":"space", "contact_name":"contact"}
-SELECT CAST(user_id AS STRING) AS user_id, space_id, contact_name
-FROM user_spaces
-WHERE user_id = '${user_id}';
+-- @name: 订单汇总
+SELECT dt, COUNT(*) AS order_count
+FROM orders
+WHERE dt = '${biz_date}'
+GROUP BY dt;
 ```
 
-连接、表、字段和类型转换须按实际任务替换。`@default-encrypt` 只写在第一条 SQL 之前；`@encrypt` 作用于紧接的语句，与文件规则合并，同名字段覆盖逻辑域。规则是 JSON 对象，键精确匹配结果列名/AS 别名或 SQL 参数名，值为逻辑域；不解析表达式或自动猜测敏感字段。
+连接名称、表名、字段和参数按实际任务替换。
 
-- 同类标识可将 `user_id`、`owner_id` 都映射到 `user`。同一密钥、同一域、同一类型的相同值输出相同完整密文，不同原值不会合并；域不绑定文件、连接或查询次数。
-- 文件默认字段在聚合结果中可以缺失。局部 `@encrypt` 字段若既不是结果列、也不是实际使用的 SQL 参数，则停止对应展示/导出；受保护的重名结果列须给唯一 `AS`。无结果集的写入不因缺少输出列误报失败。
-- 已声明参数可填完整 `enc:v1:…` 密文，扩展先在本机校验密钥、域和认证信息，再还原并按原替换规则提交 SQL；不在 SQL 正文中搜索替换密文。批次中的全部参数在第一条 SQL 前检查，末批密文无效也不会先执行前面批次。SQL 引号、过滤范围和执行授权仍由原任务决定。
-- SQL、WHERE/JOIN/聚合和数据库存储继续使用原值。修改注释后重新执行生效，已有结果采用执行时的规则与密钥。未声明的字段按原值输出。
+## 常用工作流
 
-### 切换字段密文与字段原文
+### 查询与结果
 
-每个 VS Code 窗口初始为**字段密文模式**。点击状态栏“字段密文 / 字段原文”、结果页或计划页的模式按钮，或执行 `Doris SQL Lite: 切换字段密文 / 字段原文`。未配置保护字段的语句沿用原行为，不表示所有数据已经受保护。
+- `Ctrl+Enter` 执行当前语句。
+- 结果面板复用同一个标签页，支持筛选、三态排序、复制和导出。
+- 有结果集的语句显示面板；真实无结果集的写入只显示完成通知。
+- 面板保留 `maxResultRows` 行；完整导出写出全部结果。
 
-结果单元格、排序和筛选数据、参数默认值/候选值、复制 TSV、面板全量导出、直接 `@output` 导出、批次确认与运行参数、AI 摘要和逐步报告共用规则。预览原值只在扩展宿主内存中保留，切换当前预览不重跑 SQL；已写出的文件、原 SQL 和剪贴板历史不会自动改写。
+### 执行计划
 
-每次复制、导出或保存开始时固定模式、字段规则和密钥，进行中切换只影响后续操作，同份文件不会混用两种模式。参数表单也固定打开时的模式，切换后重新打开表单。大结果逐行转换并等待写盘，沿用原有内存上限和背压。
+- 将光标放在 SQL 上，按 `Ctrl+Alt+Enter`。
+- 计划页保留完整缩进和全部行。
+- “复制 AI 反馈 / 保存 AI 反馈…”引用完整计划文件。
+- 需要含 SQL、请求和计划的快照时，显式使用“复制完整材料”。
 
-反馈的 `dataMode` 为 `plain` / `encrypted`；`protection` 仅含 `mode`、非敏感 `keyId` 和字段域 `fields`，批次各步骤带自身的保护信息。字段原文与字段密文批次报告分别保存和复用，切换后不会引用另一模式的报告；既有 TSV 与当前反馈模式不符时，不把它填成当前模式的 `resultFile`。
+### 完整 TSV
 
-**SQL、计划和自由格式错误原文可能带硬编码值。** 对有保护字段的语句，字段密文模式只显示结构化反馈和错误类别，不展示、复制或保存这些原文，也不生成字段原文计划附件。需要审核完整计划或详细错误时，明确切到字段原文模式；切回字段密文模式可继续使用字段密文参数和结果。字段原文模式仍沿用密码脱敏，不改变数据库密码的保护。
+```sql
+-- @output: results/orders_2026-10-30.tsv
+SELECT * FROM orders WHERE dt = '2026-10-30';
+```
 
-### 密钥与单值解密
+`@output` 查询只提交一次，逐行写盘，不追加预览 LIMIT。已有文件不覆盖。
 
-- 独立随机的 AES-256-SIV 数据密钥保存到 VS Code SecretStorage，与连接密码分开；按需生成，启动扩展和普通未保护查询不生成业务密钥。重启后沿用已保存密钥，旧密钥不会因导入而删除。
-- `Doris SQL Lite: 导出字段加密密钥` 显式选择一个新的本地 JSON 文件。**该文件含敏感密钥，应自行保管**，已有目标不覆盖；不自动在 SQL、结果或报告旁生成备份。`导入字段加密密钥` 可导入原密钥，保留现有密钥；之后的新查询使用导入文件指定的活动密钥，已有结果继续用执行时的密钥。
-- 选中完整密文后执行 `Doris SQL Lite: 解密选中字段值`，也可通过命令输入密文；选择“在本机查看明文”或“复制明文”。解密不依赖原查询、内存映射或数据库；损坏、错误域和缺失密钥均失败，不返回伪造值。密钥丢失后无法仅凭密文还原。首版不提供整份历史 TSV 的批量解密。
+### 顺序批次
 
-使用 [RFC 5297 AES-SIV](https://www.rfc-editor.org/rfc/rfc5297.html)，固定依赖 `@stablelib/aes@2.0.1` 与 `@stablelib/siv@2.0.1`；完整格式为 `enc:v1:<keyId>:<base64url-domain>:<base64url-payload>`，认证包含版本、密钥 ID、域及值。确定性加密会保留相等关系、重复模式，并增加文本长度，不保持数字格式或大小排序；不使用短摘要作为可逆值。
+```sql
+-- @batch-script: scripts/days.ps1
+-- @batch-init: ["设置变量"]
+-- @batch-steps: ["清理当天", "回填当天"]
+```
 
-保留扩展收到的字符串、有限数字（含 `-0`）、大整数、布尔值、日期和二进制的类型及内容；NULL/undefined 保留为空，普通文本包含前导零、空字符串、中文和换行也可还原。驱动此前丢失的精度不能恢复；跨源同一 ID 类型不同，可先在 SQL 中统一类型。SQL 参数仍按文本替换，已声明参数以 `enc:` 开头时按密文校验；选中日期解密显示 ISO 文本，二进制显示十六进制。二进制密文不直接作为 SQL 参数，避免文本转换损坏字节。嵌套对象和数组不在首版范围，不会静默回落为明文。
+执行 `Doris SQLTools Lite: 顺序分批执行 SQL`。脚本输出参数数组，扩展预检全部批次后按顺序执行。完整用法见 [使用指南](docs/usage.md#顺序分批执行)。
 
-本地验证使用公开算法向量、生成的测试密钥、假驱动及临时文件；不连接真实生产数据库。VS Code CLI 安装核对不等于已打开窗口自动加载新版，安装后执行 `Developer: Reload Window`。
+### 字段密文
+
+```sql
+-- @default-encrypt: {"user_id":"user","owner_id":"user"}
+```
+
+窗口初始显示字段密文。状态栏、结果页和计划页的模式按钮共享切换。详细算法与密钥管理见 [安全模型](docs/security.md)。
+
+## 命令
+
+| 命令 ID | 标题 |
+| --- | --- |
+| `dorisSqlLite.addConnection` | `Doris SQLTools Lite: 添加连接` |
+| `dorisSqlLite.newQuery` | `Doris SQLTools Lite: 新建 SQL 查询` |
+| `dorisSqlLite.setConnection` | `Doris SQLTools Lite: 为当前文件选择连接` |
+| `dorisSqlLite.resetFileSessions` | `Doris SQLTools Lite: 重置当前文件的会话` |
+| `dorisSqlLite.editConnection` | `Doris SQLTools Lite: 编辑连接` |
+| `dorisSqlLite.runQuery` | `Doris SQLTools Lite: 执行光标处 SQL` |
+| `dorisSqlLite.runQueryToTsv` | `Doris SQLTools Lite: 执行并导出完整 TSV` |
+| `dorisSqlLite.runBatch` | `Doris SQLTools Lite: 顺序分批执行 SQL` |
+| `dorisSqlLite.copyLastFeedback` | `Doris SQLTools Lite: 复制最近一次执行反馈` |
+| `dorisSqlLite.saveLastFeedback` | `Doris SQLTools Lite: 保存最近一次执行反馈` |
+| `dorisSqlLite.toggleDataMode` | `Doris SQLTools Lite: 切换字段密文 / 字段原文` |
+| `dorisSqlLite.exportDataKeys` | `Doris SQLTools Lite: 导出字段加密密钥` |
+| `dorisSqlLite.importDataKeys` | `Doris SQLTools Lite: 导入字段加密密钥` |
+| `dorisSqlLite.decryptSelectedValue` | `Doris SQLTools Lite: 解密选中字段值` |
+| `dorisSqlLite.cancelQuery` | `Doris SQLTools Lite: 取消当前查询` |
+| `dorisSqlLite.explainQuery` | `Doris SQLTools Lite: 查看光标处执行计划` |
+| `dorisSqlLite.testConnection` | `Doris SQLTools Lite: 测试连接` |
+| `dorisSqlLite.removeConnection` | `Doris SQLTools Lite: 删除连接` |
+| `dorisSqlLite.forgetPassword` | `Doris SQLTools Lite: 清除已保存密码` |
+| `dorisSqlLite.setExportDirectory` | `Doris SQLTools Lite: 设置默认导出目录` |
+| `dorisSqlLite.clearExportDirectory` | `Doris SQLTools Lite: 清除默认导出目录` |
+| `dorisSqlLite.forgetSqlParameters` | `Doris SQLTools Lite: 清除当前文件的查询参数` |
+
+## 配置
+
+| 设置 | 默认值 | 作用 |
+| --- | --- | --- |
+| `dorisSqlLite.connections` | `[]` | 非敏感连接元数据，用户级 `machine` 作用域 |
+| `dorisSqlLite.maxResultRows` | `1000` | 面板保留和复制使用的最大行数 |
+| `dorisSqlLite.exportDirectory` | `""` | TSV 默认目录；空值表示每次选择 |
+| `dorisSqlLite.exportChunkRows` | `5000` | 导出时每批写入行数 |
+| `dorisSqlLite.escapeSpreadsheetFormulas` | `true` | 转义电子表格公式形状的单元格 |
+| `dorisSqlLite.sqlParameters` | `true` | 启用 `${name}` 参数替换 |
+| `dorisSqlLite.readRowLimit` | `0` | 读取停止上限；`0` 跟随预览上限，`-1` 读取完整结果 |
+| `dorisSqlLite.queryIdleTimeoutMs` | `300000` | 状态请求或相邻数据行的空闲超时 |
+
+## 安全摘要
+
+- 密码只保存在 VS Code SecretStorage。
+- 连接清单不含密码，使用用户设置 `scope: machine`。
+- SQL 参数保存在本机扩展状态。
+- 字段密钥独立保存在 SecretStorage。
+- MySQL / Doris TLS 默认校验证书链和 DNS 主机名。
+- 分批脚本只在受信任工作区运行。
+- 扩展不自动发送 SQL、结果、计划或参数到远端服务。
+
+完整边界与报告入口见 [安全模型](docs/security.md) 和 [SECURITY.md](SECURITY.md)。
+
+## AI 反馈
+
+反馈 `schemaVersion=1`，包含：
+
+- 扩展版本、SQL 名称、连接名称与类型。
+- 实际参数和来源路径、行号。
+- 操作、状态、提交情况、耗时和行数。
+- 结果、计划与批次报告路径。
+- 会话状态、是否需要核对和脱敏诊断。
+
+默认反馈不包含 SQL 正文、计划正文、结果行或连接凭证。完整字段与示例见 [反馈 schema v1](docs/feedback-schema.md)。
+
+## 开发
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm test
+pnpm run test:vscode
+pnpm run package
+```
+
+常用辅助命令：
+
+```powershell
+pnpm run preview:webviews
+pnpm run check:docs
+pnpm run check:webview
+pnpm run check:bundle
+```
+
+开发环境要求 Node.js 22+ 与 pnpm 11.25.0。扩展 bundle 目标运行时为 Node 20，最低 VS Code 版本为 1.90.0。详细说明见 [开发与验证](docs/development.md)。
+
+## 产品边界
+
+当前工作流聚焦：
+
+- 一次一条 SQL，配合文件级会话。
+- 手工触发的计划和顺序批次。
+- 有界结果预览与完整文件导出。
+- 显式生成、显式复制、显式保存的 AI 材料。
+- 单值解密和版本化反馈。
+
+SQL 智能补全、对象编辑、SSH 隧道编排、事务工作台和自动 AI 调用属于外部工具或后续版本方向。1.0 的范围与承诺见 [产品定位](docs/product.md)。
+
+## 许可
+
+MIT。字段加密声明见 [LICENSE](https://github.com/JSbiu/doris-sqltools-lite/blob/main/LICENSE)，运行时依赖的完整许可证文本见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

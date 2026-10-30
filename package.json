@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "在 VS Code 中执行 MySQL、Apache Doris 与 Spark Thrift SQL，查看执行计划，流式导出完整 TSV，并生成可核对的 AI 反馈与字段密文。",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -33,107 +33,107 @@
     "commands": [
       {
         "command": "dorisSqlLite.addConnection",
-        "title": "Doris SQL Lite: 添加连接",
+        "title": "Doris SQLTools Lite: 添加连接",
         "icon": "$(add)"
       },
       {
         "command": "dorisSqlLite.newQuery",
-        "title": "Doris SQL Lite: 新建 SQL 查询",
+        "title": "Doris SQLTools Lite: 新建 SQL 查询",
         "icon": "$(new-file)"
       },
       {
         "command": "dorisSqlLite.setConnection",
-        "title": "Doris SQL Lite: 为当前文件选择连接",
+        "title": "Doris SQLTools Lite: 为当前文件选择连接",
         "icon": "$(database)"
       },
       {
         "command": "dorisSqlLite.resetFileSessions",
-        "title": "Doris SQL Lite: 重置当前文件的会话",
+        "title": "Doris SQLTools Lite: 重置当前文件的会话",
         "icon": "$(debug-restart)"
       },
       {
         "command": "dorisSqlLite.editConnection",
-        "title": "Doris SQL Lite: 编辑连接",
+        "title": "Doris SQLTools Lite: 编辑连接",
         "icon": "$(edit)"
       },
       {
         "command": "dorisSqlLite.runQuery",
-        "title": "Doris SQL Lite: 执行光标处 SQL",
+        "title": "Doris SQLTools Lite: 执行光标处 SQL",
         "icon": "$(play)"
       },
       {
         "command": "dorisSqlLite.runQueryToTsv",
-        "title": "Doris SQL Lite: 执行并导出完整 TSV",
+        "title": "Doris SQLTools Lite: 执行并导出完整 TSV",
         "icon": "$(save-as)"
       },
       {
         "command": "dorisSqlLite.runBatch",
-        "title": "Doris SQL Lite: 顺序分批执行 SQL",
+        "title": "Doris SQLTools Lite: 顺序分批执行 SQL",
         "icon": "$(run-all)"
       },
       {
         "command": "dorisSqlLite.copyLastFeedback",
-        "title": "Doris SQL Lite: 复制最近一次执行反馈"
+        "title": "Doris SQLTools Lite: 复制最近一次执行反馈"
       },
       {
         "command": "dorisSqlLite.saveLastFeedback",
-        "title": "Doris SQL Lite: 保存最近一次执行反馈"
+        "title": "Doris SQLTools Lite: 保存最近一次执行反馈"
       },
       {
         "command": "dorisSqlLite.toggleDataMode",
-        "title": "Doris SQL Lite: 切换字段密文 / 字段原文",
+        "title": "Doris SQLTools Lite: 切换字段密文 / 字段原文",
         "icon": "$(lock)"
       },
       {
         "command": "dorisSqlLite.exportDataKeys",
-        "title": "Doris SQL Lite: 导出字段加密密钥"
+        "title": "Doris SQLTools Lite: 导出字段加密密钥"
       },
       {
         "command": "dorisSqlLite.importDataKeys",
-        "title": "Doris SQL Lite: 导入字段加密密钥"
+        "title": "Doris SQLTools Lite: 导入字段加密密钥"
       },
       {
         "command": "dorisSqlLite.decryptSelectedValue",
-        "title": "Doris SQL Lite: 解密选中字段值"
+        "title": "Doris SQLTools Lite: 解密选中字段值"
       },
       {
         "command": "dorisSqlLite.cancelQuery",
-        "title": "Doris SQL Lite: 取消当前查询",
+        "title": "Doris SQLTools Lite: 取消当前查询",
         "icon": "$(stop-circle)"
       },
       {
         "command": "dorisSqlLite.explainQuery",
-        "title": "Doris SQL Lite: 查看光标处执行计划",
+        "title": "Doris SQLTools Lite: 查看光标处执行计划",
         "icon": "$(inspect)"
       },
       {
         "command": "dorisSqlLite.testConnection",
-        "title": "Doris SQL Lite: 测试连接",
+        "title": "Doris SQLTools Lite: 测试连接",
         "icon": "$(debug-disconnect)"
       },
       {
         "command": "dorisSqlLite.removeConnection",
-        "title": "Doris SQL Lite: 删除连接",
+        "title": "Doris SQLTools Lite: 删除连接",
         "icon": "$(trash)"
       },
       {
         "command": "dorisSqlLite.forgetPassword",
-        "title": "Doris SQL Lite: 清除已保存密码",
+        "title": "Doris SQLTools Lite: 清除已保存密码",
         "icon": "$(key)"
       },
       {
         "command": "dorisSqlLite.setExportDirectory",
-        "title": "Doris SQL Lite: 设置默认导出目录",
+        "title": "Doris SQLTools Lite: 设置默认导出目录",
         "icon": "$(folder)"
       },
       {
         "command": "dorisSqlLite.clearExportDirectory",
-        "title": "Doris SQL Lite: 清除默认导出目录",
+        "title": "Doris SQLTools Lite: 清除默认导出目录",
         "icon": "$(close)"
       },
       {
         "command": "dorisSqlLite.forgetSqlParameters",
-        "title": "Doris SQL Lite: 清除当前文件的查询参数",
+        "title": "Doris SQLTools Lite: 清除当前文件的查询参数",
         "icon": "$(close)"
       }
     ],
@@ -153,7 +153,7 @@
       "activitybar": [
         {
           "id": "dorisSqlLite",
-          "title": "Doris SQL Lite",
+          "title": "Doris SQLTools Lite",
           "icon": "./media/icon.svg"
         }
       ]
@@ -258,7 +258,7 @@
       }
     ],
     "configuration": {
-      "title": "Doris SQL Lite",
+      "title": "Doris SQLTools Lite",
       "properties": {
         "dorisSqlLite.connections": {
           "type": "array",
@@ -374,12 +374,16 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
+    "check:docs": "node scripts/check-docs.js",
+    "check:notices": "node scripts/generate-third-party-notices.js --check",
     "check:webview": "node scripts/check-webview.js",
     "check:bundle": "node scripts/check-bundle.js",
+    "generate:notices": "node scripts/generate-third-party-notices.js",
     "preview:webviews": "node scripts/preview-webviews.js",
     "compile": "tsc -p ./",
     "lint": "eslint src",
-    "test": "tsc -p ./ && node scripts/check-webview.js && node scripts/build.js && node scripts/check-bundle.js && node --test \"tests/**/*.test.js\"",
+    "test": "tsc -p ./ && node scripts/check-docs.js && node scripts/generate-third-party-notices.js --check && node scripts/check-webview.js && node scripts/build.js && node scripts/check-bundle.js && node --test \"tests/**/*.test.js\"",
+    "test:vscode": "node tests/vscode/runTest.js",
     "watch": "node scripts/build.js --watch",
     "watch:types": "tsc -p ./ -w",
     "package": "node scripts/package-runtime.js"
@@ -393,7 +397,8 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "1.90.0",
+    "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "^3.6.1",
     "esbuild": "^0.28.2",
     "eslint": "^10.9.1",

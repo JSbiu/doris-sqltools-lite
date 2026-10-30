@@ -1,6 +1,5 @@
-# The entire runtime lives inside dist/extension.js, so only that bundle,
-# package.json, the readme, the licence and the icon are shipped. Everything a
-# developer needs stays out of the package.
+# The runtime lives inside dist/extension.js. Product and security docs ship
+# alongside it so README links remain available inside the installed extension.
 src/**
 out/**
 dist/*.map
@@ -14,6 +13,7 @@ node_modules/**
 .workbuddy/**
 .github/**
 AGENTS.md
+CONTRIBUTING.md
 .gitignore
 eslint.config.mjs
 tsconfig.json

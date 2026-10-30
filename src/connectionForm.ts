@@ -246,7 +246,7 @@ export function renderConnectionForm(draft: ConnectionDraft, mode: ConnectionFor
   <div class="page-shell connection-page">
   <header class="page-header">
     <div class="page-heading">
-      <div class="eyebrow">Doris SQL Lite · 数据库连接</div>
+      <div class="eyebrow">Doris SQLTools Lite · 数据库连接</div>
       <h1>${escapeHtml(heading)}</h1>
       <p class="sub">${escapeHtml(subtitle)}</p>
     </div>

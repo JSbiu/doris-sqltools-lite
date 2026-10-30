@@ -245,7 +245,7 @@ export function renderParameterForm(inputs: ParameterFormInputs): string {
   <div class="page-shell">
   <header class="page-header">
     <div class="page-heading">
-      <div class="eyebrow">Doris SQL Lite · ${escapeHtml(inputs.documentLabel)}</div>
+      <div class="eyebrow">Doris SQLTools Lite · ${escapeHtml(inputs.documentLabel)}</div>
       <h1>确认本次 SQL 参数</h1>
       <p class="sub">参数替换在本机完成。核对实际发送的 SQL 后，再提交给数据库。</p>
     </div>

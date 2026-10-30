@@ -16,10 +16,11 @@
 
 const fs = require('node:fs');
 const Module = require('node:module');
+const os = require('node:os');
 const path = require('node:path');
 const { EXTERNAL, outfile, projectRoot } = require('./bundle-config');
 
-const probePath = path.join(projectRoot, '.local', '_bundle-probe.js');
+const probePath = path.join(os.tmpdir(), `doris-sqltools-bundle-probe-${process.pid}-${Date.now()}.js`);
 
 const noopDisposable = { dispose() {} };
 
