@@ -166,11 +166,13 @@ function collectDefaults(matches: readonly ScanMatch[]): Map<string, string> {
 // own inline default; anything still unanswered is reported as missing and left
 // in place, so the caller can either ask for it or send the template untouched.
 //
-// The order of the two steps matters, which is why callers must not do this by
-// hand: substitution first (the scan skips escaped placeholders), then
-// unescaping. Unescaping first would turn `$${name}` into a real placeholder and
-// prompt the user for the value they explicitly escaped.
-export function resolveSqlParameters(sql: string, values: ParameterValues): ParameterResolution {
+// Scan the original template before unescaping its literal fragments. Inserted
+// values stay verbatim, including `$${...}` text produced by a transform.
+// Unescaping first would turn an escaped reference into a real parameter.
+export function resolveSqlParameters(
+  sql: string, values: ParameterValues,
+  transform?: (name: string, value: string) => string,
+): ParameterResolution {
   const matches = scan(sql);
   if (matches.length === 0) {
     return { sql: unescapeDollarPlaceholders(sql), missing: [], used: {} };
@@ -183,7 +185,7 @@ export function resolveSqlParameters(sql: string, values: ParameterValues): Para
   let cursor = 0;
 
   for (const match of matches) {
-    out += sql.slice(cursor, match.start);
+    out += unescapeDollarPlaceholders(sql.slice(cursor, match.start));
     cursor = match.end;
 
     const supplied = Object.hasOwn(values, match.name) ? values[match.name] : undefined;
@@ -195,21 +197,24 @@ export function resolveSqlParameters(sql: string, values: ParameterValues): Para
       }
       // Leave the placeholder in place; it is only ever sent if the caller
       // explicitly chooses "send as-is".
-      out += sql.slice(match.start, match.end);
+      out += unescapeDollarPlaceholders(sql.slice(match.start, match.end));
       continue;
     }
 
-    out += value;
-    Object.defineProperty(used, match.name, { value, enumerable: true, configurable: true });
+    // Missingness belongs to the supplied/default value. A ciphertext can
+    // legitimately decode to an empty string and must still be substituted.
+    const transformed = transform ? transform(match.name, value) : value;
+    out += transformed;
+    Object.defineProperty(used, match.name, { value: transformed, enumerable: true, configurable: true });
   }
 
-  out += sql.slice(cursor);
-  return { sql: unescapeDollarPlaceholders(out), missing, used };
+  out += unescapeDollarPlaceholders(sql.slice(cursor));
+  return { sql: out, missing, used };
 }
 
 // Turns `$${name}` into a literal `${name}`. Used on its own for the "send the
-// template untouched" path, and as the last step of substitution -- one helper so
-// the escape cannot mean two different things in two places.
+// template untouched" path, and on original template fragments during
+// substitution. Never apply it to supplied or transformed values.
 export function unescapeDollarPlaceholders(sql: string): string {
   return sql.replace(/\$\$\{/g, '${');
 }

@@ -6,6 +6,8 @@ export interface StatementContext {
   name?: string;
   connection?: string;
   output?: string;
+  encryption?: Readonly<Record<string, string>>;
+  requiredEncryption?: readonly string[];
   parameters: Record<string, string>;
   line: number;
   endLine: number;
@@ -18,6 +20,8 @@ interface Header {
   connection?: string;
   name?: string;
   output?: string;
+  defaultEncryption?: Record<string, string>;
+  encryption?: Record<string, string>;
   batchScript?: string;
   batchSteps?: string[];
   batchInit?: string[];
@@ -54,7 +58,7 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
       const match = /^--\s*@([a-z-]+):\s*(.*)$/.exec(comment);
       if (!match) throw new Error(`SQL 注释格式错误：${comment}`);
       const [, key, value] = match;
-      if (!['default-connection', 'default-param', 'connection', 'param', 'name', 'output',
+      if (!['default-connection', 'default-param', 'default-encrypt', 'connection', 'param', 'name', 'output', 'encrypt',
         'batch-script', 'batch-steps', 'batch-init'].includes(key)) {
         throw new Error(`未知 SQL 注释 @${key}。`);
       }
@@ -77,6 +81,8 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
         if (key === 'output') header.output = value.trim();
         if (key === 'connection') header.connection = value.trim();
         if (key === 'default-connection') header.defaultConnection = value.trim();
+        if (key === 'default-encrypt') header.defaultEncryption = encryptionFields(value, key);
+        if (key === 'encrypt') header.encryption = encryptionFields(value, key);
         if (key === 'batch-script') header.batchScript = value.trim();
         if (key === 'batch-steps') header.batchSteps = batchNames(value, key);
         if (key === 'batch-init') header.batchInit = batchNames(value, key);
@@ -88,6 +94,29 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
     index = end;
   }
   return header;
+}
+
+function encryptionFields(value: string, key: string): Record<string, string> {
+  const message = `@${key} 应为 JSON 对象，键为非空的列名或参数名，值为非空且不含换行的逻辑域字符串。`;
+  let fields: unknown;
+  try { fields = JSON.parse(value); } catch { /* Report the directive, not JSON internals. */ }
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw new Error(message);
+
+  // JSON.parse validates syntax but discards duplicate keys. Walk the original
+  // tokens in string-key : string-value pairs to check every decoded key/value.
+  const tokens = value.match(/"(?:[^"\\]|\\.)*"|[^\s]/g)!;
+  const entries: [string, string][] = [];
+  const seen = new Set<string>();
+  for (let index = 1; index < tokens.length - 1; index += 4) {
+    if (!tokens[index + 2].startsWith('"')) throw new Error(message);
+    const name: string = JSON.parse(tokens[index]);
+    const domain: string = JSON.parse(tokens[index + 2]);
+    if (!name.trim() || !domain.trim() || /[\r\n\u2028\u2029]/.test(domain)) throw new Error(message);
+    if (seen.has(name)) throw new Error(`@${key} 中的 JSON 字段「${name}」不能重复。`);
+    seen.add(name);
+    entries.push([name, domain]);
+  }
+  return Object.fromEntries(entries);
 }
 
 function batchNames(value: string, key: string): string[] {
@@ -152,6 +181,12 @@ export function resolveStatementContext(
     name: header.name,
     connection: header.connection ?? first.defaultConnection,
     output: header.output,
+    ...(first.defaultEncryption !== undefined || header.encryption !== undefined ? {
+      encryption: Object.fromEntries([
+        ...Object.entries(first.defaultEncryption ?? {}), ...Object.entries(header.encryption ?? {}),
+      ]),
+      requiredEncryption: Object.keys(header.encryption ?? {}),
+    } : {}),
     parameters: { ...first.defaults, ...header.parameters },
     line: document.slice(0, end > start ? start : range.start).split('\n').length,
     endLine: document.slice(0, Math.max(0, (end > start ? end : range.end) - 1)).split('\n').length,

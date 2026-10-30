@@ -8,6 +8,19 @@ const {
   unescapeDollarPlaceholders,
 } = require('../out/sqlParameters.js');
 
+test('transforms chosen defaults and supplied values after missingness, preserving empty decoded text and literal escapes', () => {
+  const transformed = [];
+  const result = resolveSqlParameters("SELECT '${id=token}', '${text}', '$${literal}';", { text: 'payload' }, (name, value) => {
+    transformed.push([name, value]); return name === 'id' ? '' : '$${do_not_change}';
+  });
+  assert.equal(result.sql, "SELECT '', '$${do_not_change}', '${literal}';");
+  assert.deepEqual(result.missing, []);
+  assert.deepEqual(result.used, { id: '', text: '$${do_not_change}' });
+  assert.deepEqual(transformed, [['id', 'token'], ['text', 'payload']]);
+  const unresolved = resolveSqlParameters('SELECT ${missing};', {}, () => assert.fail('missing values are not transformed'));
+  assert.deepEqual(unresolved.missing, ['missing']);
+});
+
 test('prototype property names require explicit parameter values and remain visible in the used-value snapshot', () => {
   const sql = 'SELECT ${constructor}, ${toString}, ${__proto__};';
   const unresolved = resolveSqlParameters(sql, {});
