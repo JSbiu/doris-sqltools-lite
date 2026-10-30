@@ -8,7 +8,6 @@
 
 - 增加产品定位、使用、安全、架构、反馈 schema、界面规范、开发和发布检查文档。
 - 增加 Markdown 链接、命令标题和版本一致性检查。
-- 增加 GitHub Actions：Linux/Windows 自动化与 VS Code 1.90 集成测试。
 - 增加官方 VS Code 集成测试入口，验证最低版本激活、命令注册、配置 schema 和连接表单。
 
 ### 改进

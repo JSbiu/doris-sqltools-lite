@@ -230,6 +230,6 @@ pnpm run generate:notices
 
 运行 `pnpm run check:webview`。检查器会定位未声明的 id、nonce 不匹配和选择器失效。
 
-### CI 与本地依赖不同
+### 锁文件与本地依赖
 
-CI 使用 `pnpm install --frozen-lockfile`。更新依赖后同步提交 `package.json` 与 `pnpm-lock.yaml`。
+验证前使用 `pnpm install --frozen-lockfile`。更新依赖后同步提交 `package.json` 与 `pnpm-lock.yaml`。
