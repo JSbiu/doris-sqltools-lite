@@ -99,11 +99,25 @@ test('keeps an explicit ssl flag in connection metadata', () => {
     port: 9030,
     username: 'root',
     ssl: true,
+    sslVerify: true,
+    sslCaFile: ' D:\\certificates\\internal-ca.pem ',
   });
 
   assert.ok(withSsl);
   assert.equal(withSsl.ssl, true);
-  assert.equal(serializeConnectionProfile(withSsl).ssl, true);
+  assert.equal(withSsl.sslVerify, true);
+  assert.equal(withSsl.sslCaFile, 'D:\\certificates\\internal-ca.pem');
+  assert.deepEqual(serializeConnectionProfile(withSsl), {
+    id: 'doris-ssl',
+    name: 'SSL Doris',
+    type: 'Doris',
+    host: '127.0.0.1',
+    port: 9030,
+    username: 'root',
+    ssl: true,
+    sslVerify: true,
+    sslCaFile: 'D:\\certificates\\internal-ca.pem',
+  });
 });
 
 test('omits ssl from metadata when it is not explicitly set', () => {
@@ -179,14 +193,21 @@ test('carries the Spark authentication mode through the metadata round-trip', ()
     port: 10000,
     username: 'hive',
     hiveAuth: 'nosasl',
+    ssl: true,
+    sslVerify: false,
+    sslCaFile: 'ignored.pem',
     password: 'hunter2',
   });
 
   assert.ok(profile);
   assert.equal(profile.type, 'Spark');
   assert.equal(profile.hiveAuth, 'nosasl');
+  assert.equal(profile.ssl, undefined);
+  assert.equal(profile.sslVerify, undefined);
+  assert.equal(profile.sslCaFile, undefined);
   const serialized = serializeConnectionProfile(profile);
   assert.equal(serialized.hiveAuth, 'nosasl');
+  assert.equal(Object.hasOwn(serialized, 'ssl'), false);
   // The whitelist must keep dropping the password even now that a new field was
   // added to it.
   assert.equal(Object.prototype.hasOwnProperty.call(serialized, 'password'), false);

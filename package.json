@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "A small MySQL/Doris query client for VS Code with passwords stored in SecretStorage.",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -11,6 +11,16 @@
   },
   "engines": {
     "vscode": "^1.90.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "普通查询、导出和连接管理可用；分批执行会运行工作区中的 PowerShell 参数脚本，因此需要受信任工作区。"
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "查询和结果查看可用；完整 TSV 导出、批次报告和反馈文件需要本地文件系统。"
+    }
   },
   "categories": [
     "Other"
@@ -253,7 +263,7 @@
         "dorisSqlLite.connections": {
           "type": "array",
           "scope": "machine",
-          "description": "Non-sensitive MySQL/Doris connection metadata. Kept in user settings so host names and account names never land in a project's .vscode/settings.json. Passwords are stored in VS Code SecretStorage.",
+          "description": "Non-sensitive MySQL, Doris and Spark Thrift connection metadata. Kept in user settings so host names and account names never land in a project's .vscode/settings.json. Passwords are stored in VS Code SecretStorage.",
           "items": {
             "type": "object",
             "required": [
@@ -294,7 +304,18 @@
               },
               "ssl": {
                 "type": "boolean",
-                "default": false
+                "default": false,
+                "description": "Use TLS for MySQL and Doris connections. Spark Thrift uses its configured SASL/NOSASL transport."
+              },
+              "sslVerify": {
+                "type": "boolean",
+                "default": true,
+                "description": "Validate the MySQL/Doris TLS certificate chain and, for DNS hosts, the certificate host name. Set false only for a trusted endpoint that presents a private or temporary certificate."
+              },
+              "sslCaFile": {
+                "type": "string",
+                "default": "",
+                "description": "Optional local PEM certificate authority file for MySQL/Doris TLS. An empty value uses the system trust store."
               },
               "hiveAuth": {
                 "type": "string",

@@ -25,6 +25,9 @@ export interface ConnectionProfile {
   database?: string;
   username: string;
   ssl?: boolean;
+  // TLS settings apply to MySQL and Doris. The Spark adapter uses SASL/NOSASL.
+  sslVerify?: boolean;
+  sslCaFile?: string;
   // Only meaningful for Spark; the MySQL/Doris path ignores it.
   hiveAuth?: HiveAuthMode;
 }
@@ -81,8 +84,18 @@ export function normalizeConnectionProfile(value: unknown): ConnectionProfile | 
   if (typeof value.database === 'string' && value.database.trim()) {
     profile.database = value.database;
   }
-  if (typeof value.ssl === 'boolean') {
-    profile.ssl = value.ssl;
+  if (type !== 'Spark') {
+    if (typeof value.ssl === 'boolean') {
+      profile.ssl = value.ssl;
+    }
+    if (profile.ssl === true) {
+      if (typeof value.sslVerify === 'boolean') {
+        profile.sslVerify = value.sslVerify;
+      }
+      if (typeof value.sslCaFile === 'string' && value.sslCaFile.trim()) {
+        profile.sslCaFile = value.sslCaFile.trim();
+      }
+    }
   }
   // Anything else -- including a Kerberos-ish value an edited settings file
   // might carry -- is dropped rather than passed to the driver.
@@ -104,8 +117,18 @@ export function serializeConnectionProfile(profile: ConnectionProfile): Connecti
   if (profile.database) {
     serialized.database = profile.database;
   }
-  if (profile.ssl !== undefined) {
-    serialized.ssl = profile.ssl;
+  if (profile.type !== 'Spark') {
+    if (profile.ssl !== undefined) {
+      serialized.ssl = profile.ssl;
+    }
+    if (profile.ssl === true) {
+      if (profile.sslVerify !== undefined) {
+        serialized.sslVerify = profile.sslVerify;
+      }
+      if (profile.sslCaFile) {
+        serialized.sslCaFile = profile.sslCaFile;
+      }
+    }
   }
   // Must be listed here too, otherwise the setting round-trip silently drops the
   // chosen authentication mode. Note this whitelist is what keeps `password` out

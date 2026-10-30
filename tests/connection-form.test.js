@@ -34,6 +34,8 @@ const draft = (overrides) => ({
   username: 'root',
   password: '',
   ssl: false,
+  sslVerify: true,
+  sslCaFile: '',
   hiveAuth: 'plain',
   clearSavedPassword: false,
   ...overrides,
@@ -88,6 +90,44 @@ test('only writes hiveAuth onto Spark profiles', () => {
     draftToProfile(draft({ type: 'Spark', port: '10000', hiveAuth: 'nosasl' }), 'id').hiveAuth,
     'nosasl',
   );
+});
+
+test('keeps TLS settings on MySQL and Doris profiles', () => {
+  const secure = draftToProfile(draft({
+    ssl: true,
+    sslVerify: true,
+    sslCaFile: '  D:\\certificates\\internal-ca.pem  ',
+  }), 'id');
+  assert.deepEqual(secure, {
+    id: 'id',
+    name: 'Local Doris',
+    type: 'Doris',
+    host: '127.0.0.1',
+    port: 9030,
+    username: 'root',
+    ssl: true,
+    sslVerify: true,
+    sslCaFile: 'D:\\certificates\\internal-ca.pem',
+  });
+
+  const accepted = draftToProfile(draft({ ssl: true, sslVerify: false, sslCaFile: 'ignored.pem' }), 'id');
+  assert.equal(accepted.sslVerify, false);
+  assert.equal(Object.hasOwn(accepted, 'sslCaFile'), false);
+});
+
+test('keeps Spark profiles on their SASL/NOSASL transport', () => {
+  const spark = draftToProfile(draft({
+    type: 'Spark',
+    port: '10000',
+    ssl: true,
+    sslVerify: false,
+    sslCaFile: 'ignored.pem',
+  }), 'id');
+
+  assert.equal(spark.ssl, undefined);
+  assert.equal(spark.sslVerify, undefined);
+  assert.equal(spark.sslCaFile, undefined);
+  assert.equal(spark.hiveAuth, 'plain');
 });
 
 test('round-trips the Spark authentication mode through edit', () => {
@@ -162,12 +202,26 @@ test('starts a new draft with type-specific defaults', () => {
 });
 
 test('never pre-fills the saved password when editing', () => {
-  const result = draftFromProfile(profile({ database: 'hue', ssl: true }));
+  const result = draftFromProfile(profile({
+    database: 'hue',
+    ssl: true,
+    sslVerify: true,
+    sslCaFile: 'D:\\certificates\\internal-ca.pem',
+  }));
   assert.equal(result.password, '');
   assert.equal(result.port, '9030');
   assert.equal(result.database, 'hue');
   assert.equal(result.ssl, true);
+  assert.equal(result.sslVerify, true);
+  assert.equal(result.sslCaFile, 'D:\\certificates\\internal-ca.pem');
   assert.equal(result.clearSavedPassword, false);
+});
+
+test('legacy TLS profiles default to certificate verification in the form', () => {
+  const result = draftFromProfile(profile({ ssl: true }));
+  assert.equal(result.ssl, true);
+  assert.equal(result.sslVerify, true);
+  assert.equal(result.sslCaFile, '');
 });
 
 test('parses a mysql:// connection string', () => {
@@ -450,6 +504,8 @@ test('trims text fields but never the password', () => {
     port: ' 9030 ',
     password: ' pw with spaces ',
     ssl: 'yes',
+    sslVerify: 'yes',
+    sslCaFile: '  D:\\ca.pem  ',
   });
 
   assert.equal(coerced.name, 'Local Doris');
@@ -459,6 +515,9 @@ test('trims text fields but never the password', () => {
   // Only a real boolean counts.
   assert.equal(coerced.ssl, false);
   assert.equal(coerceDraft({ ssl: true }).ssl, true);
+  assert.equal(coerced.sslVerify, true);
+  assert.equal(coerced.sslCaFile, 'D:\\ca.pem');
+  assert.equal(coerceDraft({ sslVerify: false }).sslVerify, false);
 });
 
 test('falls back to the default hive auth mode for an unknown value', () => {

@@ -77,6 +77,18 @@ export function openConnectionForm(options: ConnectionFormOptions): void {
       return;
     }
 
+    if (message.type === 'chooseCaFile') {
+      const selected = await vscode.window.showOpenDialog({
+        title: '选择 TLS CA 证书',
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        filters: { '证书文件': ['pem', 'crt', 'cer'] },
+      });
+      await post({ type: 'caFile', path: selected?.[0]?.scheme === 'file' ? selected[0].fsPath : undefined });
+      return;
+    }
+
     if (busy) {
       return;
     }
@@ -142,11 +154,13 @@ type FormOutbound =
   | { type: 'parsed'; parsed: ParsedConnectionUrl | undefined }
   | { type: 'testing' }
   | { type: 'testResult'; ok: boolean; message: string }
+  | { type: 'caFile'; path: string | undefined }
   | { type: 'issues'; errors: Partial<Record<DraftField, string>>; warnings: string[] };
 
 type FormInbound =
   | { type: 'cancel' }
   | { type: 'parseInput'; input?: unknown }
+  | { type: 'chooseCaFile' }
   | { type: 'test'; draft?: unknown }
   | { type: 'save'; draft?: unknown };
 
@@ -202,11 +216,13 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
 
   const clearPasswordBlock = isEdit
     ? `
+    <section class="card">
     <label class="check">
       <input type="checkbox" id="f-clear-pwd" />
       保存时清除已保存的密码
     </label>
-    <p class="hint">勾选后下次连接会重新询问密码。若同时填写了新密码，则以新密码为准。</p>`
+    <p class="hint">勾选后下次连接会重新询问密码。若同时填写了新密码，则以新密码为准。</p>
+    </section>`
     : '';
 
   return `<!doctype html>
@@ -317,14 +333,28 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
     </div>
   </section>
 
-  <section class="card">
+  <section class="card" id="tls-card"${draft.type === 'Spark' ? ' hidden' : ''}>
     <label class="check">
       <input type="checkbox" id="f-ssl"${draft.ssl ? ' checked' : ''} />
-      使用 SSL (TLS)
+      使用 TLS
     </label>
-    <p class="hint">启用后加密传输链路，但不校验服务端证书链（mysql2 的默认行为）。</p>
-    ${clearPasswordBlock}
+    <div id="tls-options"${draft.ssl ? '' : ' hidden'}>
+      <label class="check">
+        <input type="checkbox" id="f-ssl-verify"${draft.sslVerify ? ' checked' : ''} />
+        验证服务器证书和 DNS 主机名
+      </label>
+      <div class="field">
+        <label for="f-ssl-ca">CA 证书文件<span class="hint">可选，PEM 格式</span></label>
+        <div class="inline">
+          <input id="f-ssl-ca" type="text" spellcheck="false" autocomplete="off" value="${escapeHtml(draft.sslCaFile)}" placeholder="留空使用系统信任库" />
+          <button class="secondary" id="b-ssl-ca">选择…</button>
+        </div>
+      </div>
+      <p class="hint">验证模式会校验证书链；主机为 DNS 名称时同时校验证书主机名。私有 CA 可填写 PEM 文件路径，留空则使用系统信任库。</p>
+      <p class="hint" id="tls-warning"${draft.sslVerify ? ' hidden' : ''}>当前模式接受服务器提供的任何证书，请确认目标主机可信。</p>
+    </div>
   </section>
+  ${clearPasswordBlock}
 
   <div id="warnings"></div>
   <p id="status"></p>
@@ -354,9 +384,23 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
       username: id('f-username').value,
       password: id('f-password').value,
       ssl: id('f-ssl').checked,
+      sslVerify: id('f-ssl-verify').checked,
+      sslCaFile: id('f-ssl-ca').value,
       hiveAuth: id('f-hive-auth').value,
       clearSavedPassword: id('f-clear-pwd') ? id('f-clear-pwd').checked : false,
     });
+
+    const refreshTls = () => {
+      const spark = id('f-type').value === 'Spark';
+      const enabled = id('f-ssl').checked;
+      const verify = id('f-ssl-verify').checked;
+      id('tls-card').hidden = spark;
+      id('tls-options').hidden = !enabled;
+      id('f-ssl-verify').disabled = !enabled;
+      id('f-ssl-ca').disabled = !enabled || !verify;
+      id('b-ssl-ca').disabled = !enabled || !verify;
+      id('tls-warning').hidden = !enabled || verify;
+    };
 
     const localErrors = () => {
       const errors = {};
@@ -398,8 +442,13 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
         portField.value = targetDefault;
       }
       id('f-hive-auth-field').hidden = event.target.value !== 'Spark';
+      refreshTls();
       paint(localErrors());
     });
+
+    id('f-ssl').addEventListener('change', refreshTls);
+    id('f-ssl-verify').addEventListener('change', refreshTls);
+    id('b-ssl-ca').addEventListener('click', () => api.postMessage({ type: 'chooseCaFile' }));
 
     id('b-parse').addEventListener('click', () => {
       api.postMessage({ type: 'parseInput', input: id('f-input').value });
@@ -460,8 +509,13 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
         if (parsed.ssl) id('f-ssl').checked = true;
         if (!id('f-name').value.trim()) id('f-name').value = parsed.host;
         id('f-input').value = '';
+        refreshTls();
         paint(localErrors());
         setStatus('已用导入的内容填充字段。', 'ok');
+        return;
+      }
+      if (data.type === 'caFile' && data.path) {
+        id('f-ssl-ca').value = data.path;
         return;
       }
       if (data.type === 'testing') {
@@ -482,6 +536,8 @@ function renderForm(draft: ConnectionDraft, mode: ConnectionFormMode): string {
         if (Object.keys(data.errors || {}).length) setStatus('请先修正标红的字段。', 'bad');
       }
     });
+
+    refreshTls();
   </script>
 </body>
 </html>`;

@@ -20,6 +20,8 @@ export interface ConnectionDraft {
   username: string;
   password: string;
   ssl: boolean;
+  sslVerify: boolean;
+  sslCaFile: string;
   // Only used by Spark; carried for every type so switching the type in the form
   // never has to invent a value.
   hiveAuth: HiveAuthMode;
@@ -63,6 +65,8 @@ export function emptyDraft(type: DatabaseType = 'Doris'): ConnectionDraft {
     username: 'root',
     password: '',
     ssl: false,
+    sslVerify: true,
+    sslCaFile: '',
     hiveAuth: 'plain',
     clearSavedPassword: false,
   };
@@ -78,7 +82,9 @@ export function draftFromProfile(profile: ConnectionProfile): ConnectionDraft {
     username: profile.username,
     // Never pre-filled: the saved password is never read back into the form.
     password: '',
-    ssl: profile.ssl === true,
+    ssl: profile.type !== 'Spark' && profile.ssl === true,
+    sslVerify: profile.sslVerify !== false,
+    sslCaFile: profile.sslCaFile ?? '',
     hiveAuth: profile.hiveAuth ?? 'plain',
     clearSavedPassword: false,
   };
@@ -108,6 +114,8 @@ export function coerceDraft(raw: unknown): ConnectionDraft {
     // Never trimmed: leading or trailing spaces can be part of a password.
     password: typeof source.password === 'string' ? source.password : '',
     ssl: source.ssl === true,
+    sslVerify: source.sslVerify !== false,
+    sslCaFile: text(source.sslCaFile),
     // Anything the driver does not understand falls back to the default rather
     // than reaching the connection code.
     hiveAuth: isHiveAuthMode(source.hiveAuth) ? source.hiveAuth : 'plain',
@@ -180,14 +188,21 @@ export function draftToProfile(draft: ConnectionDraft, id: string): ConnectionPr
     host,
     port,
     username,
-    ssl: draft.ssl,
   };
   if (database) {
     profile.database = database;
   }
-  // Left off entirely for MySQL/Doris so their settings stay unchanged.
   if (draft.type === 'Spark') {
     profile.hiveAuth = draft.hiveAuth;
+  } else {
+    profile.ssl = draft.ssl;
+    if (draft.ssl) {
+      profile.sslVerify = draft.sslVerify;
+      const caFile = draft.sslCaFile.trim();
+      if (draft.sslVerify && caFile) {
+        profile.sslCaFile = caFile;
+      }
+    }
   }
   return profile;
 }

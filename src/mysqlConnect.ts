@@ -1,4 +1,5 @@
 import mysql from 'mysql2/promise';
+import { readFile } from 'node:fs/promises';
 import { redactErrorMessage, type ConnectionProfile } from './connectionSecurity';
 
 // The single place a MySQL/Doris socket is opened. Shared by the session
@@ -11,19 +12,45 @@ export interface MysqlConnectOptions {
   omitDatabase?: boolean;
 }
 
+export interface MysqlTlsOptions {
+  rejectUnauthorized: boolean;
+  verifyIdentity: boolean;
+  ca?: string;
+}
+
+export function buildMysqlTlsOptions(
+  profile: Pick<ConnectionProfile, 'type' | 'ssl' | 'sslVerify'>,
+  ca?: string,
+): MysqlTlsOptions | undefined {
+  if (profile.type === 'Spark' || profile.ssl !== true) {
+    return undefined;
+  }
+  if (profile.sslVerify === false) {
+    return { rejectUnauthorized: false, verifyIdentity: false };
+  }
+  return {
+    rejectUnauthorized: true,
+    verifyIdentity: true,
+    ...(ca ? { ca } : {}),
+  };
+}
+
 export async function createMysqlConnection(
   profile: ConnectionProfile,
   password: string,
   options: MysqlConnectOptions = {},
 ): Promise<mysql.Connection> {
   try {
+    const ca = profile.ssl === true && profile.sslVerify !== false && profile.sslCaFile
+      ? await readFile(profile.sslCaFile, 'utf8')
+      : undefined;
     return await mysql.createConnection({
       host: profile.host,
       port: profile.port,
       user: profile.username,
       password,
       database: options.omitDatabase ? undefined : profile.database || undefined,
-      ssl: profile.ssl ? {} : undefined,
+      ssl: buildMysqlTlsOptions(profile, ca),
       connectTimeout: 10_000,
       multipleStatements: false,
       dateStrings: true,

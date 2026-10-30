@@ -51,6 +51,7 @@ import { applyRowLimit } from './rowLimit';
 import { resolveStatementContext, findDirectiveConnection } from './sqlDirectives';
 import { buildExplainSql, planText } from './executionPlan';
 import { openPlanPanel } from './planPanel';
+import { setFeedbackExtensionVersion } from './sqlFeedback';
 import { DocumentSessions, SessionExpiredError, type DocumentOperation, type SessionEntry, type SessionSnapshot } from './documentSessions';
 import {
   QueryCancelledError,
@@ -159,6 +160,11 @@ function protectedMessage(error: unknown, protection?: ProtectionProjection, pro
 
 function modeLabel(protection?: ProtectionProjection): string {
   return protection ? `（${protection.mode === 'encrypted' ? '加密' : '明文'}模式）` : '';
+}
+
+function tlsLabel(profile: ConnectionProfile): string {
+  if (!profile.ssl) return '未启用 TLS';
+  return profile.sslVerify === false ? 'TLS · 接受服务器证书' : 'TLS · 校验证书';
 }
 
 function declaresProtection(sql: string): boolean {
@@ -277,12 +283,10 @@ class ConnectionItem extends vscode.TreeItem {
 
   public constructor(public readonly profile: ConnectionProfile) {
     super(profile.name, vscode.TreeItemCollapsibleState.None);
-    this.description = `${profile.type} · ${profile.host}:${profile.port}${
-      profile.ssl ? ' · SSL' : ''
-    }`;
+    this.description = `${profile.type} · ${profile.host}:${profile.port} · ${tlsLabel(profile)}`;
     this.tooltip = `${profile.name}\n${profile.username}@${profile.host}:${profile.port}${
       profile.database ? `/${profile.database}` : ''
-    }${profile.ssl ? '\nSSL (TLS) 已启用' : '\n未启用 SSL'}`;
+    }\n${tlsLabel(profile)}`;
     this.iconPath = new vscode.ThemeIcon('database');
     this.command = {
       command: 'dorisSqlLite.newQuery',
@@ -1106,6 +1110,7 @@ function createTsvWriter(
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  setFeedbackExtensionVersion(context.extension?.packageJSON?.version);
   dataKeys = new DataKeys(context.secrets);
   registerDataCommands(context, dataKeys);
   const manager = new ConnectionManager(context);
@@ -2291,7 +2296,7 @@ async function chooseProfile(
     profiles.map((profile) => ({
       label: profile.name,
       description: `${profile.type} · ${profile.host}:${profile.port}`,
-      detail: `${profile.username}${profile.database ? ` · ${profile.database}` : ' · 未指定 database'}${profile.ssl ? ' · SSL' : ''}`,
+      detail: `${profile.username}${profile.database ? ` · ${profile.database}` : ' · 未指定 database'} · ${tlsLabel(profile)}`,
       profile,
     })),
     { title: '选择数据库连接' }, token,
