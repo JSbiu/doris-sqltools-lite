@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@stablelib/aes':
+        specifier: 2.0.1
+        version: 2.0.1
+      '@stablelib/siv':
+        specifier: 2.0.1
+        version: 2.0.1
       hive-driver:
         specifier: ^1.0.1
         version: 1.0.1
@@ -375,6 +381,33 @@ packages:
   '@sindresorhus/merge-streams@2.3.0':
     resolution: {integrity: sha512-LtoMMhxAlorcGhmFYI+LhPgbPZCkgP6ra1YL604EeF6U98pLlQ3iWIGMdWSC+vWmPBWBNgmDBAhnAobLROJmwg==}
     engines: {node: '>=18'}
+
+  '@stablelib/aes@2.0.1':
+    resolution: {integrity: sha512-LpDuPe9Cr/IXXJaCHDCAITtVa7uLV6P+Cs3V8lZw87sElX7eOLk1OHTSzzvWagTJf++O+o3EISawHh1uzyi4qw==}
+
+  '@stablelib/binary@2.0.1':
+    resolution: {integrity: sha512-U9iAO8lXgEDONsA0zPPSgcf3HUBNAqHiJmSHgZz62OvC3Hi2Bhc5kTnQ3S1/L+sthDTHtCMhcEiklmIly6uQ3w==}
+
+  '@stablelib/blockcipher@2.0.0':
+    resolution: {integrity: sha512-c0iMTah5a5KxeqVyf6ejpaRkYanODvGaQn8wgvLLAnY23fHZMjhR6ycQVvasW2nIzAmc+faetpRORJqAfaE/yw==}
+
+  '@stablelib/cmac@2.0.1':
+    resolution: {integrity: sha512-GwR5fie/M3I9BgqDd0mRpoeeoN3e+zrSSpYp/ATVPqQ/gzBZ1EXXkSZU+UBZ2W03sOJylHNW3p6FtXGRSfGdkA==}
+
+  '@stablelib/constant-time@2.0.1':
+    resolution: {integrity: sha512-0NWPogffRm+UWBH0+iM5otZmNrVe5OHFIvyoNIVankMAYOQzMwcdVALOVPrB5Ho0dST+Oc3H8/hPh65Z8R/uew==}
+
+  '@stablelib/ctr@2.0.1':
+    resolution: {integrity: sha512-lV5klc4348B21/kw2O88RivMDFCryaprHtzxk6wk+eS3X2ZiPDzKpsKCSOLcklDDynueGKgdxFDkf3L8YFCmPg==}
+
+  '@stablelib/int@2.0.1':
+    resolution: {integrity: sha512-Ht63fQp3wz/F8U4AlXEPb7hfJOIILs8Lq55jgtD7KueWtyjhVuzcsGLSTAWtZs3XJDZYdF1WcSKn+kBtbzupww==}
+
+  '@stablelib/siv@2.0.1':
+    resolution: {integrity: sha512-aaQw5diYt0/npMOUbk2IWkBNfjxY0DLghU9l6k1HmGek79eVXLIHtwirsMtjeEWV6whrg4OkzVwKzHqz2temfQ==}
+
+  '@stablelib/wipe@2.0.1':
+    resolution: {integrity: sha512-1eU2K9EgOcV4qc9jcP6G72xxZxEm5PfeI5H55l08W95b4oRJaqhmlWRc4xZAm6IVSKhVNxMi66V67hCzzuMTAg==}
 
   '@textlint/ast-node-types@15.8.0':
     resolution: {integrity: sha512-5CiH9COYmovWmExQgs7763DzX6Gy9zjkjJ7JxCC95wyTcjwQn/8poNF6fv3qzRlmx8CRRde8DHr9FcgAAiPzgw==}
@@ -2009,6 +2042,43 @@ snapshots:
   '@secretlint/types@10.2.2': {}
 
   '@sindresorhus/merge-streams@2.3.0': {}
+
+  '@stablelib/aes@2.0.1':
+    dependencies:
+      '@stablelib/binary': 2.0.1
+      '@stablelib/blockcipher': 2.0.0
+      '@stablelib/wipe': 2.0.1
+
+  '@stablelib/binary@2.0.1':
+    dependencies:
+      '@stablelib/int': 2.0.1
+
+  '@stablelib/blockcipher@2.0.0': {}
+
+  '@stablelib/cmac@2.0.1':
+    dependencies:
+      '@stablelib/blockcipher': 2.0.0
+      '@stablelib/constant-time': 2.0.1
+      '@stablelib/wipe': 2.0.1
+
+  '@stablelib/constant-time@2.0.1': {}
+
+  '@stablelib/ctr@2.0.1':
+    dependencies:
+      '@stablelib/blockcipher': 2.0.0
+      '@stablelib/wipe': 2.0.1
+
+  '@stablelib/int@2.0.1': {}
+
+  '@stablelib/siv@2.0.1':
+    dependencies:
+      '@stablelib/blockcipher': 2.0.0
+      '@stablelib/cmac': 2.0.1
+      '@stablelib/constant-time': 2.0.1
+      '@stablelib/ctr': 2.0.1
+      '@stablelib/wipe': 2.0.1
+
+  '@stablelib/wipe@2.0.1': {}
 
   '@textlint/ast-node-types@15.8.0': {}
 
