@@ -376,6 +376,7 @@
     "build": "node scripts/build.js",
     "check:docs": "node scripts/check-docs.js",
     "check:notices": "node scripts/generate-third-party-notices.js --check",
+    "check:vsix": "node scripts/check-vsix.js",
     "check:webview": "node scripts/check-webview.js",
     "check:bundle": "node scripts/check-bundle.js",
     "generate:notices": "node scripts/generate-third-party-notices.js",

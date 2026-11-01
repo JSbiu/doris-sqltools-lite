@@ -38,8 +38,9 @@
 - [ ] 最低版本 `1.90.0` 激活通过。
 - [ ] 当前 stable 激活通过。
 - [ ] 22 个命令全部注册。
-- [ ] 配置 schema 可读取。
-- [ ] 连接表单可以打开。
+- [ ] 运行中的扩展命令与 `package.json` 完全一致。
+- [ ] 关键配置 schema、默认值和 machine scope 通过。
+- [ ] 添加连接 Webview 可以打开、关闭，并在关闭后再次打开。
 - [ ] 安装后 Reload Window，实际窗口确认加载新版本。
 
 ## 数据库验证
@@ -73,6 +74,8 @@
 ## VSIX
 
 - [ ] `pnpm run package`
+- [ ] 打包后自动 VSIX 检查通过。
+- [ ] `pnpm run check:vsix` 可独立复检当前产物。
 - [ ] 包内版本正确。
 - [ ] 包内 README、LICENSE、图标和 bundle 齐全。
 - [ ] 包内没有源码、测试、skill、node_modules、source map 或本机目录。

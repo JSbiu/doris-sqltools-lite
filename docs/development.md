@@ -27,6 +27,7 @@ pnpm install --frozen-lockfile
 | `pnpm run check:webview` | 检查四个 Webview 脚本、nonce 和选择器 |
 | `pnpm run check:bundle` | 在 VS Code 之外激活 bundle 并探测两个驱动 |
 | `pnpm run check:notices` | 检查第三方依赖声明与当前安装依赖一致 |
+| `pnpm run check:vsix` | 单独检查当前版本的实际 VSIX 内容 |
 | `pnpm run preview:webviews` | 把真实 Webview HTML 输出到系统临时目录 |
 | `pnpm test` | 编译、Webview、bundle 和全部 Node 测试 |
 | `pnpm run test:vscode` | 启动指定 VS Code 版本的集成测试 |
@@ -79,7 +80,9 @@ pnpm run test:vscode
 - `tests/vscode/runTest.js`
 - `tests/vscode/suite/index.js`
 
-集成测试验证扩展激活、命令注册、配置 schema 和连接表单入口。下载的 VS Code 位于 `.vscode-test/`，已被 Git 忽略。
+集成测试验证扩展激活、运行中的命令清单与 `package.json` 一致、关键配置的 schema/default/scope，以及添加连接 Webview 通过公开 Tab API 打开、关闭并在关闭后再次打开。等待界面变化时有 5 秒上限，结束时清理测试创建的标签页。下载的 VS Code 位于 `.vscode-test/`，已被 Git 忽略。
+
+这组测试证明扩展宿主可激活、公开命令和配置契约可用、连接表单确实创建为 Webview 标签页；数据库连接、表单填写和保存仍由真实使用验收覆盖。
 
 ## Webview 预览
 
@@ -129,10 +132,19 @@ doris-sqltools-lite-<version>.vsix
 
 VSIX 只包含运行所需文件。安装前核对：
 
-1. `package.json` 版本。
-2. VSIX 文件清单。
-3. 包内 README 与 LICENSE。
-4. bundle 大小。
+`pnpm run package` 在 `vsce package` 成功后自动检查实际生成的 VSIX。也可单独运行：
+
+```powershell
+pnpm run check:vsix
+```
+
+检查器读取 ZIP 中央目录，验证：
+
+1. 包内 `package.json` 的 publisher、name、displayName、version 和 main 与仓库一致。
+2. `dist/extension.js`、README、LICENSE 和 `media/icon.svg` 存在且非空。
+3. 源码、测试、脚本、skill、node_modules、source map、本机目录和其他 `.vscodeignore` 排除项没有进入包内。
+
+检查器使用 Node.js 内置 `fs` 与 `zlib`，可在 Windows、Linux 和 macOS 运行。
 
 本机安装：
 

@@ -13,7 +13,14 @@ const childProcess = require('node:child_process');
 const path = require('node:path');
 
 const projectRoot = path.resolve(__dirname, '..');
-const vsceCommand = path.join(projectRoot, 'node_modules', '.bin', 'vsce.CMD');
+const packageManifest = require(path.join(projectRoot, 'package.json'));
+const vsceCommand = path.join(
+  projectRoot,
+  'node_modules',
+  '.bin',
+  process.platform === 'win32' ? 'vsce.CMD' : 'vsce',
+);
+const vsixPath = path.join(projectRoot, `${packageManifest.name}-${packageManifest.version}.vsix`);
 
 function run(command, args, options) {
   return childProcess.spawnSync(command, args, {
@@ -30,7 +37,12 @@ try {
     exitCode = build.status ?? 1;
   } else {
     const result = run(vsceCommand, ['package', '--no-dependencies'], { shell: true });
-    exitCode = result.status ?? 1;
+    if (result.status !== 0) {
+      exitCode = result.status ?? 1;
+    } else {
+      const check = run(process.execPath, [path.join(__dirname, 'check-vsix.js'), vsixPath]);
+      exitCode = check.status ?? 1;
+    }
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
