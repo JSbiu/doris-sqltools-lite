@@ -2,7 +2,7 @@
 
 面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，连接、参数、会话、结果、执行计划和 AI 审核材料沿同一条可核对工作流组织。
 
-当前发布线：`0.9.9`，目标版本：`1.0.0`。
+当前发布线：`0.9.10`，目标版本：`1.0.0`。
 
 ## 核心能力
 
@@ -52,7 +52,7 @@ VS Code 最低版本：`1.90.0`。
 pnpm install --frozen-lockfile
 pnpm test
 pnpm run package
-code --install-extension .\doris-sqltools-lite-0.9.9.vsix --force
+code --install-extension .\doris-sqltools-lite-0.9.10.vsix --force
 ```
 
 安装后执行 `Developer: Reload Window`。用以下命令核对版本：

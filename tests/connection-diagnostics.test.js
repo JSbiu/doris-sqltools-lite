@@ -90,6 +90,59 @@ test('TLS 握手失败归为 ssl', () => {
   assert.equal(classifyDatabaseError(error).kind, 'ssl');
 });
 
+test('服务端未启用 TLS 时提示服务端配置或显式关闭 TLS', () => {
+  const advice = classifyDatabaseError(
+    errorWithCode('HANDSHAKE_NO_SSL_SUPPORT', 'Server does not support secure connection'),
+  );
+
+  assert.equal(advice.kind, 'ssl');
+  assert.match(advice.summary, /服务端未启用 TLS/);
+  assert.match(advice.hint, /关闭“使用 TLS 加密连接”/);
+  assert.doesNotMatch(advice.hint, /不校验证书链/);
+});
+
+test('证书主机名不匹配时提示 SAN、连接主机名和 sslCaFile', () => {
+  const advice = classifyDatabaseError(
+    errorWithCode(
+      'HANDSHAKE_SSL_ERROR',
+      "Hostname/IP does not match certificate's altnames: Host: db.internal is not cert's CN or SAN",
+    ),
+  );
+
+  assert.equal(advice.kind, 'ssl');
+  assert.match(advice.summary, /主机名不匹配/);
+  assert.match(advice.hint, /证书 SAN/);
+  assert.match(advice.hint, /sslCaFile/);
+  assert.doesNotMatch(advice.hint, /不校验证书链/);
+});
+
+test('证书链或有效期失败时提示私有 CA 和 sslVerify', () => {
+  const cases = [
+    errorWithCode('UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'unable to verify the first certificate'),
+    errorWithCode('CERT_HAS_EXPIRED', 'certificate has expired'),
+  ];
+
+  for (const error of cases) {
+    const advice = classifyDatabaseError(error);
+    assert.equal(advice.kind, 'ssl');
+    assert.match(advice.summary, /证书链校验失败/);
+    assert.match(advice.hint, /sslCaFile/);
+    assert.match(advice.hint, /sslVerify/);
+    assert.doesNotMatch(advice.hint, /不校验证书链/);
+  }
+});
+
+test('通用 TLS 握手失败提示端口协议与版本兼容性', () => {
+  const advice = classifyDatabaseError(
+    errorWithCode('HANDSHAKE_SSL_ERROR', 'wrong version number'),
+  );
+
+  assert.equal(advice.kind, 'ssl');
+  assert.match(advice.summary, /TLS 握手失败/);
+  assert.match(advice.hint, /TLS 版本/);
+  assert.match(advice.hint, /明文 MySQL 协议/);
+});
+
 test('查询被中断归为 interrupt', () => {
   const error = errorWithCode('ER_QUERY_INTERRUPTED', 'Query execution was interrupted');
 

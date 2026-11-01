@@ -30,6 +30,15 @@ interface DiagnosticRule {
 
 const CJK_PATTERN = /[一-鿿]/;
 
+const TLS_NO_SUPPORT_HINT =
+  '确认服务端已在当前端口启用 TLS；如果该端口按设计提供明文 MySQL 协议，请在连接配置中关闭“使用 TLS 加密连接”后重试。';
+const TLS_HOSTNAME_HINT =
+  '核对连接主机名与证书 SAN；主机名由代理或跳板机改写时，填写证书覆盖的 DNS 主机名。证书由私有 CA 签发时，同时用 sslCaFile 指向该 CA。确认目标与主机映射可信后也可以显式关闭 sslVerify。';
+const TLS_CHAIN_HINT =
+  '核对 sslCaFile 是否指向签发服务端证书的 PEM CA，并检查本机系统时间与证书有效期。证书链确认无误后保持“验证服务器证书和 DNS 主机名”开启；对于已确认可信的私有或临时目标，可以显式关闭 sslVerify。';
+const TLS_GENERIC_HINT =
+  '确认目标端口使用 MySQL/Doris TLS、服务端证书完整且两端支持兼容的 TLS 版本；如果该端口提供明文 MySQL 协议，请关闭“使用 TLS 加密连接”后重试。';
+
 // More specific rules first: the first match wins.
 const RULES: readonly DiagnosticRule[] = [
   {
@@ -154,9 +163,45 @@ const RULES: readonly DiagnosticRule[] = [
   },
   {
     kind: 'ssl',
+    codes: ['HANDSHAKE_NO_SSL_SUPPORT'],
+    patterns: [/server does not support secure connection/i, /does not support (?:ssl|tls)/i],
+    summary: '服务端未启用 TLS。',
+    hint: TLS_NO_SUPPORT_HINT,
+  },
+  {
+    kind: 'ssl',
+    codes: ['ERR_TLS_CERT_ALTNAME_INVALID'],
+    patterns: [/hostname\/ip does not match certificate'?s altnames/i, /certificate.*(?:hostname|subject alternative name).*mismatch/i],
+    summary: 'TLS 服务端证书与连接主机名不匹配。',
+    hint: TLS_HOSTNAME_HINT,
+  },
+  {
+    kind: 'ssl',
+    codes: [
+      'CERT_HAS_EXPIRED',
+      'CERT_NOT_YET_VALID',
+      'CERT_UNTRUSTED',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      'SELF_SIGNED_CERT_IN_CHAIN',
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    ],
+    patterns: [
+      /certificate (?:chain )?verify failed/i,
+      /certificate has expired/i,
+      /certificate is not yet valid/i,
+      /self[- ]signed certificate/i,
+      /unable to (?:get|verify).*(?:issuer|leaf|certificate)/i,
+    ],
+    summary: 'TLS 服务端证书链校验失败。',
+    hint: TLS_CHAIN_HINT,
+  },
+  {
+    kind: 'ssl',
+    codes: ['HANDSHAKE_SSL_ERROR'],
     patterns: [/ssl connection error/i],
-    summary: 'SSL 握手失败。',
-    hint: '服务端可能未启用 SSL：在连接配置里取消勾选 SSL 后重试。本扩展启用 SSL 后不校验证书链。',
+    summary: 'TLS 握手失败。',
+    hint: TLS_GENERIC_HINT,
   },
   {
     kind: 'server',
@@ -241,8 +286,8 @@ export function classifyDatabaseError(error: unknown): DatabaseErrorAdvice {
   if (code && /SSL|TLS|CERT/i.test(code)) {
     return {
       kind: 'ssl',
-      summary: 'SSL 握手失败。',
-      hint: '服务端可能未启用 SSL：在连接配置里取消勾选 SSL 后重试。本扩展启用 SSL 后不校验证书链。',
+      summary: 'TLS 握手失败。',
+      hint: TLS_GENERIC_HINT,
     };
   }
 
