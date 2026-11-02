@@ -102,7 +102,7 @@
 ```json
 {
   "schemaVersion": 1,
-  "extensionVersion": "0.9.10",
+  "extensionVersion": "0.9.11",
   "name": "订单明细",
   "connectionName": "分析 Doris",
   "databaseType": "Doris",
