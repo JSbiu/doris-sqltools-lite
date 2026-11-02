@@ -71,6 +71,7 @@ export const WEBVIEW_BASE_CSS = `
   input::placeholder { color: var(--vscode-input-placeholderForeground); }
   .page-shell { width: min(100%, 1080px); margin: 0 auto; }
   .page-shell.wide { max-width: none; }
+  .page-shell, .page-header, .page-heading, .badge-row, .section { min-width: 0; }
   .page-header {
     display: flex;
     flex-wrap: wrap;
@@ -154,12 +155,14 @@ export const WEBVIEW_BASE_CSS = `
   }
   .check input { flex: 0 0 auto; margin-top: 3px; }
   .status-banner {
+    min-width: 0;
     padding: 9px 11px;
     color: var(--vscode-foreground);
     background: var(--ui-surface-strong);
     border: 1px solid var(--ui-line-soft);
     border-left: 3px solid var(--ui-line);
     border-radius: var(--ui-radius-sm);
+    overflow-wrap: anywhere;
   }
   .status-banner:empty { display: none; }
   .status-banner.ok { border-left-color: var(--vscode-testing-iconPassed); }
@@ -208,6 +211,23 @@ export const WEBVIEW_BASE_CSS = `
     tab-size: 2;
   }
   .action-feedback { color: var(--vscode-descriptionForeground); font-size: 11.5px; }
+  summary.button-like {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 5px 12px;
+    color: inherit;
+    background: transparent;
+    border: 1px solid var(--ui-line-soft);
+    border-radius: var(--ui-radius-sm);
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+  }
+  summary.button-like:hover { background: var(--vscode-list-hoverBackground); }
+  summary.button-like:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
   @media (max-width: 680px) {
     body { padding: 14px; }
     .page-header { gap: 10px; }

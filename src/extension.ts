@@ -322,6 +322,10 @@ class ConnectionProvider implements vscode.TreeDataProvider<ConnectionItem> {
   }
 }
 
+// Default previews are small, but maxResultRows can be raised substantially.
+// Cache the common case while avoiding a permanently retained multi-megabyte TSV.
+const MAX_CACHED_CLIPBOARD_CHARS = 8 * 1024 * 1024;
+
 class ResultPanel {
   private static current: ResultPanel | undefined;
   private result: QueryResultView = {
@@ -338,6 +342,8 @@ class ResultPanel {
     maxRows: 1000,
     readComplete: true,
   };
+  private copyCache?: string;
+  private outputRows: Row[] = [];
 
   private constructor(private readonly panel: vscode.WebviewPanel) {}
 
@@ -412,11 +418,6 @@ class ResultPanel {
     this.render();
   }
 
-  private get rows(): Row[] {
-    const projection = this.metadata.protection?.withMode(getDataMode());
-    return projection ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
-  }
-
   private get columns(): string[] {
     return this.result.columns;
   }
@@ -426,6 +427,8 @@ class ResultPanel {
   }
 
   private render(): void {
+    this.outputRows = [];
+    this.copyCache = undefined;
     try { this.renderResult(); }
     catch (error) {
       if (!this.metadata.protection) throw error;
@@ -436,7 +439,10 @@ class ResultPanel {
 
   private renderResult(): void {
     const scriptNonce = nonce();
-    const shownRows = this.rows.map((row) =>
+    const projection = this.metadata.protection?.withMode(getDataMode());
+    const projectedRows = projection ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
+    this.outputRows = projectedRows;
+    const shownRows = projectedRows.map((row) =>
       this.columns.map((column) => {
         const value = row[column];
         if (value === null || value === undefined) {
@@ -467,13 +473,12 @@ class ResultPanel {
     const truncatedNotice = !this.result.truncated
       ? ''
       : this.metadata.readComplete
-        ? `<div class="status-banner warning">本次结果共 ${this.result.totalRows} 行，面板保留前 ${this.metadata.maxRows} 行。导出会写出全部 ${this.result.totalRows} 行，复制使用当前显示的 ${this.rows.length} 行。</div>`
+        ? `<div class="status-banner warning">本次结果共 ${this.result.totalRows} 行，面板保留前 ${this.metadata.maxRows} 行。导出会写出全部 ${this.result.totalRows} 行，复制使用已加载的 ${projectedRows.length} 行。</div>`
         // Reading stopped at the limit, so there is no total to report -- saying
         // "共 N 行" here would be a lie the user cannot see through.
-        : `<div class="status-banner warning">已读取 ${this.result.totalRows} 行并达到上限。面板与复制使用已加载的 ${this.rows.length} 行；导出会重新执行查询并写出完整结果。</div>`;
+        : `<div class="status-banner warning">已读取 ${this.result.totalRows} 行并达到上限。面板与复制使用已加载的 ${projectedRows.length} 行；导出会重新执行查询并写出完整结果。</div>`;
     // What was actually substituted, not what the file says: with ${...} in the
     // statement the editor no longer shows the values that ran.
-    const projection = this.metadata.protection?.withMode(getDataMode());
     const parameterEntries = Object.entries(projection?.parameters(this.metadata.parameters ?? {}) ?? this.metadata.parameters ?? {});
     const parameterNotice = parameterEntries.length === 0
       ? ''
@@ -487,7 +492,7 @@ class ResultPanel {
     // say that next to the table instead of implying a server-side ORDER BY.
     const sortScopeNotice = !hasTable
       ? ''
-      : `<div class="table-meta"><span id="sort-status" class="sort-status" role="status" aria-live="polite">原始顺序</span><span>排序与筛选作用于已加载的 ${this.rows.length} 行；复制与导出保持查询返回顺序。</span></div>`;
+      : `<div class="table-meta"><span id="sort-status" class="sort-status" role="status" aria-live="polite">原始顺序</span><span>基于已加载的 ${projectedRows.length} 行排序与筛选 · 复制与导出保持查询返回顺序</span></div>`;
     const title = this.metadata.statementName ?? '查询结果';
     const modeControl = projection
       ? `<button class="badge accent mode-button" id="data-mode" title="切换当前窗口的字段保护输出方式"><span>${projection.mode === 'encrypted' ? '字段密文' : '字段原文'}</span><span class="mode-hint">点击切换</span></button>`
@@ -501,7 +506,7 @@ class ResultPanel {
   <style>
     ${WEBVIEW_BASE_CSS}
     .result-page { padding-bottom: 18px; }
-    .result-commandbar {
+    .result-toolbar {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
@@ -512,11 +517,29 @@ class ResultPanel {
       border: 1px solid var(--ui-line-soft);
       border-radius: var(--ui-radius);
     }
-    .filter-wrap { position: relative; flex: 1 1 240px; max-width: 420px; }
+    .filter-wrap { position: relative; flex: 1 1 220px; max-width: 440px; }
     .filter-wrap input { padding-left: 30px; }
     .filter-icon { position: absolute; left: 9px; top: 50%; color: var(--vscode-descriptionForeground); transform: translateY(-50%); pointer-events: none; }
-    .action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-    .action-group.secondary { margin-left: auto; }
+    .primary-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-left: auto; }
+    .more-actions { position: relative; }
+    .more-actions summary { list-style: none; }
+    .more-actions summary::-webkit-details-marker { display: none; }
+    .more-actions[open] > summary { border-color: var(--vscode-focusBorder); }
+    .action-menu {
+      position: absolute;
+      z-index: 30;
+      top: calc(100% + 5px);
+      right: 0;
+      display: grid;
+      min-width: 190px;
+      padding: 5px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--ui-line);
+      border-radius: var(--ui-radius-sm);
+      box-shadow: 0 5px 18px color-mix(in srgb, var(--vscode-editor-background) 65%, transparent);
+    }
+    .action-menu button { width: 100%; border: 0; text-align: left; white-space: nowrap; }
+    .action-menu .menu-note { padding: 6px 10px; color: var(--vscode-descriptionForeground); font-size: 11px; }
     .mode-button { gap: 7px; padding: 2px 9px; color: var(--vscode-foreground); background: transparent; font-weight: 600; }
     .mode-button:hover { background: var(--vscode-list-hoverBackground); }
     .mode-hint { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 500; }
@@ -567,6 +590,20 @@ class ResultPanel {
     .success-state h2 { margin-bottom: 4px; font-size: 16px; }
     .success-state p { margin: 0; color: var(--vscode-descriptionForeground); }
     .success-icon { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-testing-iconPassed); font-weight: 700; }
+    @media (max-width: 680px) {
+      .filter-wrap { flex-basis: 100%; max-width: none; }
+      .primary-actions { width: 100%; margin-left: 0; }
+      .primary-actions > button { flex: 1 1 120px; }
+      .more-actions { flex: 0 0 auto; margin-left: auto; }
+      .action-menu { right: 0; max-width: calc(100vw - 56px); }
+      .action-menu button { white-space: normal; }
+    }
+    @media (max-width: 420px) {
+      .result-toolbar { padding: 9px; }
+      .primary-actions { gap: 6px; }
+      .primary-actions > button { flex-basis: 96px; }
+      .table-meta { align-items: flex-start; flex-direction: column; }
+    }
   </style>
 </head>
 <body>
@@ -579,23 +616,27 @@ class ResultPanel {
     </div>
     <div class="badge-row">
       ${this.metadata.databaseType ? `<span class="badge accent">${escapeHtml(this.metadata.databaseType)}</span>` : ''}
-      <span class="badge" role="status" aria-live="polite"><span id="visible-count">${this.rows.length}</span> 行</span>
+      <span class="badge" role="status" aria-live="polite"><span id="visible-count">${projectedRows.length}</span> 行</span>
       <span class="badge">${this.columns.length} 列</span>
       ${modeControl}
     </div>
   </header>
-  <div class="result-commandbar">
-    ${hasTable ? `<div class="filter-wrap"><span class="filter-icon" aria-hidden="true">⌕</span><input id="result-filter" type="search" placeholder="筛选当前结果…" aria-label="筛选当前结果" title="筛选只改变当前显示" /></div>` : ''}
-    ${hasTable ? `
-      <div class="action-group">
+  <div class="result-toolbar">
+    ${hasTable ? `<div class="filter-wrap"><span class="filter-icon" aria-hidden="true">⌕</span><input id="result-filter" type="search" placeholder="筛选已加载行…" aria-label="筛选已加载行" title="筛选只改变当前显示" /></div>` : ''}
+    <div class="primary-actions">
+      ${hasTable ? `
+        <button class="secondary" data-action="copy" data-default-label="复制结果" title="复制已加载的 ${projectedRows.length} 行为 TSV">复制结果</button>
         <button data-export="default" data-format="tsv" data-default-label="导出 TSV" title="${escapeHtml(exportHint)}">导出 TSV</button>
-        <button class="secondary" data-action="copy" data-default-label="复制 TSV">复制 TSV</button>
-        <button class="ghost" data-export="custom" data-format="tsv" data-default-label="其他位置…" title="这次导出时选择位置">其他位置…</button>
-      </div>
-    ` : ''}
-    <div class="action-group secondary">
-      <button class="ghost" data-action="copy-feedback" data-default-label="复制 AI 反馈">复制 AI 反馈</button>
-      <button class="ghost" data-action="save-feedback" data-default-label="保存 AI 反馈…">保存 AI 反馈…</button>
+      ` : ''}
+      <details class="more-actions" id="more-actions">
+        <summary class="ghost button-like" aria-label="更多结果操作" aria-controls="action-menu">更多操作 ▾</summary>
+        <div class="action-menu" id="action-menu" role="group" aria-label="更多结果操作">
+          ${hasTable ? `<button class="ghost" data-export="custom" data-format="tsv" data-default-label="导出到其他位置…" title="这次导出时选择位置">导出到其他位置…</button>` : ''}
+          <div class="menu-note">AI 反馈包含执行上下文与状态</div>
+          <button class="ghost" data-action="copy-feedback" data-default-label="复制 AI 反馈">复制 AI 反馈</button>
+          <button class="ghost" data-action="save-feedback" data-default-label="保存 AI 反馈…">保存 AI 反馈…</button>
+        </div>
+      </details>
     </div>
   </div>
   <p id="action-status" class="status-banner action-status" role="status" aria-live="polite"></p>
@@ -613,6 +654,7 @@ class ResultPanel {
     const saveFeedbackButton = document.querySelector('button[data-action="save-feedback"]');
     const actionStatus = document.getElementById('action-status');
     const actionButtons = [copyButton, exportButton, exportElsewhereButton, copyFeedbackButton, saveFeedbackButton];
+    const moreActions = document.getElementById('more-actions');
     let pendingButton;
     const setPending = (button, label) => {
       if (!button) return;
@@ -638,6 +680,21 @@ class ResultPanel {
       pendingButton = exportElsewhereButton;
       setPending(exportElsewhereButton, '正在导出…');
       api.postMessage({ type: 'export', format: exportElsewhereButton.dataset.format, chooseLocation: true });
+    });
+    actionButtons.forEach((button) => button?.addEventListener('click', () => {
+      if (moreActions) moreActions.open = false;
+    }));
+    document.addEventListener('click', (event) => {
+      if (moreActions?.open && !moreActions.contains(event.target)) moreActions.open = false;
+    });
+    document.addEventListener('focusin', (event) => {
+      if (moreActions?.open && !moreActions.contains(event.target)) moreActions.open = false;
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && moreActions?.open) {
+        moreActions.open = false;
+        moreActions.querySelector('summary')?.focus();
+      }
     });
     const filter = document.getElementById('result-filter');
     const rows = [...document.querySelectorAll('tbody tr[data-row]')];
@@ -983,9 +1040,10 @@ class ResultPanel {
   }
 
   public async copyToClipboard(): Promise<void> {
-    const projection = this.metadata.protection?.withMode(getDataMode());
-    const rows = projection ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
-    await vscode.env.clipboard.writeText(toTsv(rows, this.columns));
+    const rows = this.outputRows;
+    const text = this.copyCache ?? toTsv(rows, this.columns);
+    this.copyCache = text.length <= MAX_CACHED_CLIPBOARD_CHARS ? text : undefined;
+    await vscode.env.clipboard.writeText(text);
     if (this.result.truncated) {
       vscode.window.showInformationMessage(
         this.metadata.readComplete

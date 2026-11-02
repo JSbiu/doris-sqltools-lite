@@ -130,9 +130,15 @@ function harness(sql, options = {}) {
     return entry;
   };
   const panelFor = (index = calls.results.length - 1) => {
-    const panel = new hooks.ResultPanel({});
+    const panel = new hooks.ResultPanel({
+      title: '',
+      webview: { html: '', postMessage: async () => true, onDidReceiveMessage: () => ({ dispose() {} }) },
+      reveal() {},
+      onDidDispose() {},
+    });
     panel.result = calls.results[index].result;
     panel.metadata = calls.results[index].metadata;
+    panel.render();
     return panel;
   };
   return { calls, hooks, editor, manager, state, session, profileSessions, profiles, options, seed, panelFor,
@@ -967,6 +973,7 @@ test('protected parameters reach each driver as plaintext while preview copies a
     const encrypted = h.calls.writes.at(-1).text;
     assert.ok(encrypted.includes(token)); assert.ok(!encrypted.includes('private-id-'));
     assert.equal(h.calls.executed.length, 2);
+    panel.render();
     await panel.copyToClipboard(); assert.ok(h.calls.clipboard.includes('private-id-001'));
     setDataMode('encrypted');
   }

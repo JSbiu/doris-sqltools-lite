@@ -120,6 +120,7 @@ class FakeElement {
     this.hidden = Object.prototype.hasOwnProperty.call(attributes, 'hidden');
     this.listeners = new Map();
     this.value = attributes.value ?? '';
+    this.open = Object.prototype.hasOwnProperty.call(attributes, 'open');
   }
 
   get id() {
@@ -173,9 +174,30 @@ class FakeElement {
     this.listeners.get(type).push(handler);
   }
 
+  contains(other) {
+    for (let node = other; node; node = node.parentNode) {
+      if (node === this) return true;
+    }
+    return false;
+  }
+
+  focus() {
+    this.ownerDocument.activeElement = this;
+  }
+
   dispatch(type) {
     for (const handler of this.listeners.get(type) ?? []) {
       handler.call(this, { type, target: this, preventDefault() {} });
+    }
+  }
+
+  dispatchEvent(event) {
+    for (const handler of this.listeners.get(event.type) ?? []) {
+      handler.call(this, {
+        preventDefault() {},
+        composedPath() { return [event.target, this]; },
+        ...event,
+      });
     }
   }
 
@@ -252,6 +274,19 @@ function appendText(parent, text) {
 
 function parseHtml(html) {
   const root = new FakeElement('#document');
+  root.ownerDocument = root;
+  root.activeElement = null;
+  const documentListeners = new Map([['click', []], ['focusin', []], ['keydown', []]]);
+  root.addEventListener = (type, handler) => {
+    const listeners = documentListeners.get(type) ?? [];
+    listeners.push(handler);
+    documentListeners.set(type, listeners);
+  };
+  root.dispatchEvent = (event) => {
+    for (const handler of documentListeners.get(event.type) ?? []) {
+      handler({ preventDefault() {}, composedPath: () => [event.target, root], ...event });
+    }
+  };
   const stack = [root];
   let cursor = 0;
 
@@ -287,6 +322,7 @@ function parseHtml(html) {
     const nameEnd = content.search(/\s/);
     const tag = (nameEnd === -1 ? content : content.slice(0, nameEnd)).toLowerCase();
     const element = new FakeElement(tag, parseAttributes(nameEnd === -1 ? '' : content.slice(nameEnd)), stack[stack.length - 1]);
+    element.ownerDocument = root;
     stack[stack.length - 1].children.push(element);
     cursor = close + 1;
 
@@ -532,7 +568,7 @@ test('shows the loaded-row scope and resets sort and filter on a re-render', () 
   assert.match(html, /--ui-radius:/);
   assert.match(html, /id="action-status" class="status-banner action-status" role="status" aria-live="polite"/);
   assert.match(html, /table \{ width: max-content; min-width: 100%;/);
-  assert.match(html, /排序与筛选作用于已加载的 4 行/);
+  assert.match(html, /基于已加载的 4 行排序与筛选/);
   assert.match(html, /复制与导出保持查询返回顺序/);
 
   const view = openPanel(html);
@@ -587,7 +623,60 @@ test('sorting and filtering never change copied content or the copy/export messa
 
   view.button('button[data-export="custom"]').dispatch('click');
   assert.deepEqual({ ...view.messages[2] }, { type: 'export', format: 'tsv', chooseLocation: true });
+  assert.equal(view.document.getElementById('more-actions').open, false, 'choosing an action closes the menu');
   assert.deepEqual(panel.result.rows.map((row) => row.v), ['b1', 'a2', 'b3', 'a4']);
+});
+
+test('secondary actions stay in a dismissible menu and repeated copies reuse the exact TSV', async () => {
+  const { panel, html } = renderPanel(resultOf(['one', 'two']));
+  const view = openPanel(html);
+  const menu = view.document.getElementById('more-actions');
+  assert.equal(menu.open, false);
+  assert.equal(view.button('.primary-actions > button[data-action="copy-feedback"]'), null);
+  assert.equal(view.button('.action-menu button[data-action="copy-feedback"]').textContent, '复制 AI 反馈');
+
+  menu.open = true;
+  view.document.dispatchEvent({ type: 'click', target: view.filter() });
+  assert.equal(menu.open, false, 'clicking elsewhere dismisses the menu');
+  menu.open = true;
+  view.document.dispatchEvent({ type: 'focusin', target: view.filter() });
+  assert.equal(menu.open, false, 'moving focus elsewhere dismisses the menu');
+  menu.open = true;
+  view.document.dispatchEvent({ type: 'keydown', key: 'Escape' });
+  assert.equal(menu.open, false, 'Escape dismisses the menu');
+  assert.equal(view.document.activeElement, menu.querySelector('summary'), 'Escape restores the menu trigger focus');
+
+  await panel.copyToClipboard();
+  const first = clipboard.text;
+  panel.result.rows[0].v = 'edited outside the snapshot';
+  await panel.copyToClipboard();
+  assert.equal(clipboard.text, first, 'copy keeps the projection shown by this result snapshot');
+
+  panel.update(resultOf(['new']), {
+    connectionName: 'demo', durationMs: 5, maxRows: 1000, readComplete: true,
+  });
+  await panel.copyToClipboard();
+  assert.equal(clipboard.text, 'v\r\nnew', 'a new result invalidates the previous copy');
+});
+
+test('projects protected rows once per render and reuses that snapshot for copy', async () => {
+  let rowCalls = 0;
+  const protection = {
+    mode: 'encrypted',
+    withMode: () => protection,
+    parameters: (parameters) => parameters,
+    row: (row) => {
+      rowCalls += 1;
+      return { ...row, v: `encrypted:${row.v}` };
+    },
+  };
+  const { panel, html } = renderPanel(resultOf(['a', 'b', 'c']), { protection });
+
+  assert.equal(rowCalls, 3, 'rendering projects each row exactly once');
+  assert.match(html, /id="visible-count">3<\/span> 行/);
+  await panel.copyToClipboard();
+  assert.equal(clipboard.text, 'v\r\nencrypted:a\r\nencrypted:b\r\nencrypted:c');
+  assert.equal(rowCalls, 3, 'copy reuses the rendered projection');
 });
 
 test('feedback actions block overlapping toolbar actions and release them after cancellation or failure', () => {
@@ -653,7 +742,7 @@ test('encrypted result HTML, sort attributes and clipboard contain no protected 
   assert.ok(!html.includes('private-id-')); assert.match(html, /data-sort-value="enc:v1:/);
   await panel.copyToClipboard(); assert.ok(!clipboard.text.includes('private-id-'));
   setDataMode('plain'); panel.render();
-  assert.equal(panel.rows[0].v, 'private-id-001');
+  assert.equal(panel.outputRows[0].v, 'private-id-001');
   await panel.copyToClipboard(); assert.ok(clipboard.text.includes('private-id-001'));
   setDataMode('encrypted');
 });

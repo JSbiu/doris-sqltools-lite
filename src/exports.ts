@@ -43,9 +43,11 @@ export function escapeSpreadsheetFormula(value: string): string {
 
 export function toTsv(rows: Row[], columns: string[], options: TsvEncodeOptions = {}): string {
   // Clipboard payloads keep the historical shape: no trailing separator. The
-  // row cap means this is never asked to build a huge string.
-  const blocks = [...toTsvBlocks(rows, columns, Math.max(rows.length, 1), options)];
-  return blocks.join('').replace(/\r\n$/, '');
+  // direct path avoids collecting a second array of blocks and then joining
+  // them into one large string on every copy.
+  const header = encodeTsvHeader(columns, options);
+  const body = encodeTsvRows(rows, columns, options);
+  return `${header}${body}`.replace(/\r\n$/, '');
 }
 
 const TSV_SEPARATOR = '\t';
