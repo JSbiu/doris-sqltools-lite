@@ -71,7 +71,7 @@
 | --- | --- | --- | --- |
 | [x] 打包 | `pnpm run package` 成功，自动检查与独立 `pnpm run check:vsix` 通过 | 2026-11-06：`pnpm run package` 与自动检查通过；`pnpm run check:vsix` 独立复检通过 | 通过（当前基线） |
 | [x] 包内容 | 身份/版本/入口/bundle/README/LICENSE/图标齐全；无源码、测试、skill、node_modules、source map、本机目录 | 2026-11-06：当前 `0.9.11` VSIX 为 17 个扩展文件、669,223 字节、SHA-256 `2170F08A…ED51` | 通过（当前基线） |
-| [ ] 干净安装 | 独立 VS Code 用户目录首次安装候选包，Reload Window 后能激活并列出 22 个命令；各命令可由命令面板发现 | 隔离目录路径、CLI 与窗口证据；日期： | 阻断 |
+| [ ] 干净安装 | 独立 VS Code 用户目录首次安装候选包，Reload Window 后能激活并列出 22 个命令；各命令可由命令面板发现 | 2026-11-06：`check:vsix-install` 在隔离 VS Code `1.90.0` 与 `1.145.1` 中安装、激活、核对 22 个命令及配置通过；实际窗口 Reload Window 与命令面板仍需观察 | 部分通过 |
 | [ ] 从 0.9.11 升级 | 保留连接设置、密码、字段密钥与记住的参数；升级后密文仍可解密、已有结果仍按原模式打开 | 升级前后窗口核对记录；日期： | 阻断 |
 | [ ] 当前版本 | `code --list-extensions --show-versions` 与已加载窗口版本一致 | 2026-11-05：CLI 为 `local.doris-sqltools-lite@0.9.11`；已加载窗口版本未核验 | 部分通过 |
 

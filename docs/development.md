@@ -29,6 +29,7 @@ pnpm install --frozen-lockfile
 | `pnpm run check:bundle` | 在 VS Code 之外激活 bundle 并探测两个驱动 |
 | `pnpm run check:notices` | 检查第三方依赖声明与当前安装依赖一致 |
 | `pnpm run check:vsix` | 单独检查当前版本的实际 VSIX 内容 |
+| `pnpm run check:vsix-install` | 在隔离 VS Code 配置中安装并激活当前 VSIX |
 | `pnpm run preview:webviews` | 把真实 Webview HTML 输出到系统临时目录 |
 | `pnpm test` | 编译、Webview、bundle 和全部 Node 测试 |
 | `pnpm run test:vscode` | 启动指定 VS Code 版本的集成测试 |
@@ -148,6 +149,8 @@ pnpm run check:vsix
 3. 源码、测试、脚本、skill、node_modules、source map、本机目录和其他 `.vscodeignore` 排除项没有进入包内。
 
 检查器使用 Node.js 内置 `fs` 与 `zlib`，可在 Windows、Linux 和 macOS 运行。
+
+`pnpm run check:vsix-install` 默认使用 VS Code `1.90.0` 的隔离用户目录，先确认目录中没有本扩展，再安装当前 VSIX，并通过官方扩展测试启动器核对版本、激活、22 个命令与关键配置。可传入 `--vscode-version=1.145.1` 复验其他版本，例如：`node scripts/check-vsix-install.js --vscode-version=1.145.1`。它不需要复用本机日常 VS Code 的扩展目录，也不连接数据库；窗口级 Reload Window、密码/密钥保留和命令面板人工观察仍需单独验收。
 
 本机安装：
 
