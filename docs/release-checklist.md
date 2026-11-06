@@ -23,20 +23,20 @@
 
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| [ ] 依赖 | `pnpm install --frozen-lockfile` 成功；生产依赖与第三方声明一致 | 命令输出；日期： | 待跑 |
-| [x] 编译与 lint | TypeScript 直接编译、ESLint 均无错误 | 2026-11-04/05：`pnpm lint` 通过；`pnpm test` 的 `tsc -p ./` 通过 | 通过 |
-| [x] 测试链 | 文档、许可、Webview、bundle 检查和全部 Node 测试通过；失败用例能检出回归 | 2026-11-04：`pnpm test` 615/615 通过；2026-11-05：稳定契约 3/3、文档/许可/Webview、bundle 激活复验通过 | 通过 |
-| [x] Webview 结构 | 四个页面的脚本、nonce、CSP、选择器、共享主题和交互契约通过 | 2026-11-04/05：`check-webview.js` 四页通过；`tests/webview-contract.test.js` 通过 | 通过 |
-| [ ] 最低版本集成 | VS Code `1.90.0` 激活；22 个运行命令与清单一致；关键配置与连接 Webview 可打开/关闭/重开 | `pnpm run test:vscode`；日期： | 待跑 |
-| [ ] 当前 stable 集成 | 对当前 stable 重复同一组集成断言 | `$env:VSCODE_TEST_VERSION='stable'; pnpm run test:vscode`；日期： | 待跑 |
-| [x] 差异 | `git diff --check` 通过；提交范围只含本次交付 | 2026-11-04：`git diff --check` 通过；范围为本清单与新增契约测试 | 通过 |
+| [x] 依赖 | `pnpm install --frozen-lockfile` 成功；生产依赖与第三方声明一致 | 2026-11-06：`pnpm install --frozen-lockfile --ignore-scripts` 与第三方声明检查通过 | 通过 |
+| [x] 编译与 lint | TypeScript 直接编译、ESLint 均无错误 | 2026-11-06：`pnpm lint` 通过；`pnpm test` 的 `tsc -p ./` 通过 | 通过 |
+| [x] 测试链 | 文档、许可、Webview、bundle 检查和全部 Node 测试通过；失败用例能检出回归 | 2026-11-06：`pnpm test` 615/615 通过，含 3 项稳定契约测试；文档/许可/Webview、bundle 激活均通过 | 通过 |
+| [x] Webview 结构 | 四个页面的脚本、nonce、CSP、选择器、共享主题和交互契约通过 | 2026-11-06：`check-webview.js` 四页通过；`tests/webview-contract.test.js` 通过 | 通过 |
+| [x] 最低版本集成 | VS Code `1.90.0` 激活；22 个运行命令与清单一致；关键配置与连接 Webview 可打开/关闭/重开 | 2026-11-06：`pnpm run test:vscode` 通过，Exit code 0 | 通过 |
+| [x] 当前 stable 集成 | 对当前 stable 重复同一组集成断言 | 2026-11-06：下载并运行 VS Code `1.145.1`，`$env:VSCODE_TEST_VERSION='stable'; pnpm run test:vscode` 通过，Exit code 0 | 通过 |
+| [x] 差异 | `git diff --check` 通过；提交范围只含本次交付 | 2026-11-06：`git diff --check` 通过；范围为本清单、布局检查工具与开发说明 | 通过 |
 
 ## C. 界面与可访问性
 
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| [ ] 四页真实渲染 | `pnpm run preview:webviews` 生成连接、参数、计划、结果页；1200/720/420/320px 页面级横向溢出为 0 | 2026-11-04：四页 HTML 已生成；多档宽度与主题截图沿用 0.9.11 记录，候选版需复验 | 部分通过 |
-| [ ] 主题与缩放 | 浅色、深色、高对比主题及 200% 缩放下层级、焦点和文字可读 | 截图或 VS Code 窗口记录；日期： | 待验 |
+| [x] 四页真实渲染 | `pnpm run preview:webviews` 生成连接、参数、计划、结果页；1200/720/420/320px 页面级横向溢出为 0 | 2026-11-06：`pnpm run preview:webviews` 与 `pnpm run check:layout` 通过，四页四档宽度页面级溢出为 0 | 通过 |
+| [ ] 主题与缩放 | 浅色、深色、高对比主题及 200% 缩放下层级、焦点和文字可读 | 2026-11-06：布局脚本在三种主题变量和 100%/200% 设备比例下通过结构断言；VS Code 窗口内的视觉层级与文字可读仍未核验 | 部分通过 |
 | [ ] 键盘操作 | 只用键盘完成连接、参数、计划、结果复制/导出；菜单支持 Escape 与焦点返回 | 实际操作记录；日期： | 待验 |
 | [ ] 状态模型 | 初始、进行中、成功、空结果、截断、警告、失败、取消、清理残留逐项符合 `docs/ux.md` | 页面与对应测试证据；日期： | 待核 |
 
@@ -69,8 +69,8 @@
 
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| [ ] 打包 | `pnpm run package` 成功，自动检查与独立 `pnpm run check:vsix` 通过 | 2026-11-05：重新打包命令审批超时；已复验 bundle 构建与激活，但候选版仍须重新打包 | 阻断 |
-| [x] 包内容 | 身份/版本/入口/bundle/README/LICENSE/图标齐全；无源码、测试、skill、node_modules、source map、本机目录 | 2026-11-05：已有 `0.9.11` VSIX 独立检查通过，17 个扩展文件、666,434 字节、SHA-256 `7B593B…A4` | 通过（当前基线） |
+| [x] 打包 | `pnpm run package` 成功，自动检查与独立 `pnpm run check:vsix` 通过 | 2026-11-06：`pnpm run package` 与自动检查通过；`pnpm run check:vsix` 独立复检通过 | 通过（当前基线） |
+| [x] 包内容 | 身份/版本/入口/bundle/README/LICENSE/图标齐全；无源码、测试、skill、node_modules、source map、本机目录 | 2026-11-06：当前 `0.9.11` VSIX 为 17 个扩展文件、669,223 字节、SHA-256 `2170F08A…ED51` | 通过（当前基线） |
 | [ ] 干净安装 | 独立 VS Code 用户目录首次安装候选包，Reload Window 后能激活并列出 22 个命令；各命令可由命令面板发现 | 隔离目录路径、CLI 与窗口证据；日期： | 阻断 |
 | [ ] 从 0.9.11 升级 | 保留连接设置、密码、字段密钥与记住的参数；升级后密文仍可解密、已有结果仍按原模式打开 | 升级前后窗口核对记录；日期： | 阻断 |
 | [ ] 当前版本 | `code --list-extensions --show-versions` 与已加载窗口版本一致 | 2026-11-05：CLI 为 `local.doris-sqltools-lite@0.9.11`；已加载窗口版本未核验 | 部分通过 |
@@ -84,7 +84,7 @@
 | [ ] 文档 | README 快速开始可从零完成；使用、安全、反馈、开发、UX、产品范围、变更日志与当前版本一致 | 文档检查与人工核对；日期： | 待核 |
 | [x] 使用 skill | 仓库 `skills/` 只描述已实现行为，并与本机安装副本逐文件一致 | 2026-11-05：`SKILL.md` 与 `agents/openai.yaml` 仓库/安装副本 SHA-256 逐文件一致 | 通过 |
 | [ ] 发布范围 | 1.0 不夹带未决定的新功能；已知阻断项清零或由用户逐项明确接受 | `git diff --check`、门禁表；日期： | 阻断 |
-| [ ] Git | 核对分支、工作区、暂存区和远端；提交符合约定；推送 `origin/main` | 提交号、推送结果；日期： | 待办 |
+| [x] Git | 核对分支、工作区、暂存区和远端；提交符合约定；推送 `origin/main` | 2026-11-06：`git push origin main` 成功，`30f2212..b8ad836`；本轮新改动待提交 | 部分通过 |
 | [ ] 发布记录 | 写明提交号、VSIX、命令验证、真实环境边界、未验证范围和未推送/已推送状态 | 变更日志与聊天交付；日期： | 待办 |
 
 ## H. 真实使用观察

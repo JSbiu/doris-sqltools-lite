@@ -378,6 +378,7 @@
     "check:notices": "node scripts/generate-third-party-notices.js --check",
     "check:vsix": "node scripts/check-vsix.js",
     "check:webview": "node scripts/check-webview.js",
+    "check:layout": "node scripts/check-webview-layout.js",
     "check:bundle": "node scripts/check-bundle.js",
     "generate:notices": "node scripts/generate-third-party-notices.js",
     "preview:webviews": "node scripts/preview-webviews.js",

@@ -25,6 +25,7 @@ pnpm install --frozen-lockfile
 | `pnpm run watch:types` | 只监听 TypeScript 类型编译 |
 | `pnpm run lint` | ESLint |
 | `pnpm run check:webview` | 检查四个 Webview 脚本、nonce 和选择器 |
+| `pnpm run check:layout` | 用无头 Chrome 检查四页布局、主题变量、响应式和 200% 缩放 |
 | `pnpm run check:bundle` | 在 VS Code 之外激活 bundle 并探测两个驱动 |
 | `pnpm run check:notices` | 检查第三方依赖声明与当前安装依赖一致 |
 | `pnpm run check:vsix` | 单独检查当前版本的实际 VSIX 内容 |
@@ -103,6 +104,8 @@ pnpm run preview:webviews
 - 操作按钮保持单行文字。
 
 完整页面职责、状态模型、键盘与高对比主题检查见 [界面与交互规范](ux.md)。
+
+`pnpm run check:layout` 会先调用 `pnpm run preview:webviews` 生成真实 HTML，再通过 Chrome DevTools Protocol 检查 320px、420px、720px、1200px 与 100%/200% 设备比例下的页面级横向溢出、主题焦点变量、`aria-live` 状态区、结果表自身滚动和“更多操作”菜单视口边界。默认是 Chrome/Edge 的常用安装路径；可用 `CHROME_PATH` 指定其他可执行文件。主题变量覆盖不等于 VS Code 窗口内主题切换，完整键盘流程仍需实际窗口验收。
 
 ## Bundle 检查
 
