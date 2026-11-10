@@ -13,6 +13,7 @@ export interface FeedbackRecord {
   currentSource: () => FeedbackSource;
   startedAt: number;
   planText?: string;
+  sqlText?: string;
   protection?: ProtectionProjection;
   batchProtections?: ReadonlyMap<string, ProtectionProjection>;
   protectRaw?: boolean;

@@ -16,7 +16,6 @@ import {
   encodeTsvHeader,
   encodeTsvRows,
   isExportFormat,
-  toTsv,
   TSV_CHUNK_ROWS,
   type ExportFormat,
 } from './exports';
@@ -26,7 +25,7 @@ import { runBatchScript } from './batchScript';
 import { BatchProgress } from './batchProgress';
 import { readBatchDefinition, parseBatchParameters, prepareBatchTask, createBatchFeedback, runBatchTask } from './batchExecution';
 import { createTsvFileWriter, type TsvFileWriter } from './tsvFileWriter';
-import { copyFeedback, saveFeedback, rememberFeedback, type FeedbackRecord } from './feedbackActions';
+import { rememberFeedback, type FeedbackRecord } from './feedbackActions';
 import { classifyDatabaseError, formatDatabaseError } from './connectionDiagnostics';
 import { openParameterForm } from './parameterForm';
 import {
@@ -49,10 +48,18 @@ import {
 } from './queryResults';
 import { applyRowLimit } from './rowLimit';
 import { resolveStatementContext, findDirectiveConnection } from './sqlDirectives';
-import { buildExplainSql, planText } from './executionPlan';
-import { openPlanPanel } from './planPanel';
+import { buildExplainSql, planText, type PlanSnapshot } from './executionPlan';
 import { setFeedbackExtensionVersion } from './sqlFeedback';
 import { WEBVIEW_BASE_CSS, escapeHtml } from './webviewTheme';
+import { DEFAULT_COPY_MODE, type CopyMode } from './copyMode';
+import {
+  buildErrorCopy,
+  buildPlanCopy,
+  buildResultCopy,
+  buildSqlReference,
+  type OutputCopyContext,
+  type OutputSource,
+} from './outputCopy';
 import { DocumentSessions, SessionExpiredError, type DocumentOperation, type SessionEntry, type SessionSnapshot } from './documentSessions';
 import {
   QueryCancelledError,
@@ -192,6 +199,8 @@ interface ResultPanelMetadata {
   database?: string;
   durationMs: number;
   maxRows: number;
+  copyMode?: CopyMode;
+  source?: OutputSource;
   // False when reading stopped at the row limit, which means totalRows is a
   // lower bound rather than a count of the whole answer.
   readComplete: boolean;
@@ -205,6 +214,21 @@ interface ResultPanelMetadata {
   // Enough to run the statement again. Rows past maxResultRows are counted but
   // never stored, so a truncated result has no full set in memory to export.
   rerun?: ResultRerun;
+}
+
+interface PlanOutput {
+  snapshot: PlanSnapshot;
+  sourceUri: vscode.Uri;
+  copyMode: CopyMode;
+  source: OutputSource;
+  protection?: ProtectionProjection;
+}
+
+function sameOutputSource(left: OutputSource | undefined, right: OutputSource | undefined): boolean {
+  if (!left || !right) return left === right;
+  return left.path === right.path
+    && left.startLine === right.startLine
+    && left.endLine === right.endLine;
 }
 
 interface ResultOrigin {
@@ -328,6 +352,9 @@ const MAX_CACHED_CLIPBOARD_CHARS = 8 * 1024 * 1024;
 
 class ResultPanel {
   private static current: ResultPanel | undefined;
+  private plan?: PlanOutput;
+  private hasResult = false;
+  private activeTab: 'result' | 'plan' = 'result';
   private result: QueryResultView = {
     rows: [],
     columns: [],
@@ -342,80 +369,97 @@ class ResultPanel {
     maxRows: 1000,
     readComplete: true,
   };
-  private copyCache?: string;
+  private copyCache?: { mode: CopyMode; text: string };
   private outputRows: Row[] = [];
 
   private constructor(private readonly panel: vscode.WebviewPanel) {}
 
   public static open(result: QueryResultView, metadata: ResultPanelMetadata): void {
-    if (ResultPanel.current) {
-      ResultPanel.current.update(result, metadata);
-      ResultPanel.current.panel.reveal(vscode.ViewColumn.Beside, true);
-      return;
-    }
+    const resultPanel = ResultPanel.ensure();
+    resultPanel.update(result, metadata);
+    resultPanel.activeTab = 'result';
+    resultPanel.render();
+    resultPanel.panel.reveal(vscode.ViewColumn.Beside, true);
+  }
 
+  public static openPlan(
+    snapshot: PlanSnapshot, sourceUri: vscode.Uri, copyMode: CopyMode, protection?: ProtectionProjection,
+  ): void {
+    const resultPanel = ResultPanel.ensure();
+    resultPanel.setPlan(snapshot, sourceUri, copyMode, protection);
+    resultPanel.activeTab = 'plan';
+    resultPanel.render();
+    resultPanel.panel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
+  private static ensure(): ResultPanel {
+    if (ResultPanel.current) return ResultPanel.current;
     const panel = vscode.window.createWebviewPanel(
-      'dorisSqlLiteResults',
-      `结果 · ${metadata.statementName ?? metadata.connectionName}`,
+      'dorisSqlLiteOutput',
+      '查询输出',
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true },
     );
-
     const resultPanel = new ResultPanel(panel);
     const modeSubscription = onDataModeChange(() => resultPanel.render());
     ResultPanel.current = resultPanel;
-    resultPanel.update(result, metadata);
     panel.onDidDispose(() => {
       modeSubscription.dispose();
-      if (ResultPanel.current === resultPanel) {
-        ResultPanel.current = undefined;
-      }
+      if (ResultPanel.current === resultPanel) ResultPanel.current = undefined;
     });
-    panel.webview.onDidReceiveMessage(async (message: { type?: unknown; format?: unknown; chooseLocation?: unknown }) => {
-      if (message.type === 'toggle-mode') {
-        await vscode.commands.executeCommand('dorisSqlLite.toggleDataMode');
-        return;
-      }
+    panel.webview.onDidReceiveMessage(async (message: {
+      type?: unknown; tab?: unknown; format?: unknown; chooseLocation?: unknown;
+    }) => {
+      const tab = message.tab === 'plan' ? 'plan' : 'result';
       if (message.type === 'copy') {
         try {
-          await resultPanel.copyToClipboard();
-          await panel.webview.postMessage({ type: 'actionComplete', action: 'copy' });
+          if (tab === 'plan') await resultPanel.copyPlan();
+          else await resultPanel.copyResult();
+          await panel.webview.postMessage({ type: 'actionComplete', action: 'copy', tab });
         } catch (error) {
           showError('复制失败', error);
-          await panel.webview.postMessage({ type: 'actionFailed', action: 'copy' });
+          await panel.webview.postMessage({ type: 'actionFailed', action: 'copy', tab });
         }
         return;
       }
-      if (message.type === 'export' && isExportFormat(message.format)) {
+      if (message.type === 'export') {
         try {
-          const exported = await resultPanel.export(message.format, {
-            chooseLocation: message.chooseLocation === true,
+          const exported = tab === 'plan'
+            ? await resultPanel.exportPlan()
+            : isExportFormat(message.format)
+              ? await resultPanel.export(message.format, { chooseLocation: message.chooseLocation === true })
+              : false;
+          await panel.webview.postMessage({
+            type: exported ? 'actionComplete' : 'actionCancelled', action: 'export', tab,
           });
-          await panel.webview.postMessage({ type: exported ? 'actionComplete' : 'actionCancelled', action: 'export' });
         } catch (error) {
           showError('导出失败', error);
-          await panel.webview.postMessage({ type: 'actionFailed', action: 'export' });
-        }
-      }
-      if (message.type === 'copy-feedback' || message.type === 'save-feedback') {
-        try {
-          if (!resultPanel.metadata.feedback) throw new Error('这次结果没有可用反馈，请重新执行查询。');
-          const done = message.type === 'copy-feedback'
-            ? await copyFeedback(resultPanel.metadata.feedback) : await saveFeedback(resultPanel.metadata.feedback);
-          await panel.webview.postMessage({ type: done ? 'actionComplete' : 'actionCancelled', action: 'feedback' });
-        } catch (error) {
-          showError('反馈操作失败', error);
-          await panel.webview.postMessage({ type: 'actionFailed', action: 'feedback' });
+          await panel.webview.postMessage({ type: 'actionFailed', action: 'export', tab });
         }
       }
     });
+    return resultPanel;
   }
 
   private update(result: QueryResultView, metadata: ResultPanelMetadata): void {
     this.result = result;
     this.metadata = metadata;
-    this.panel.title = `结果 · ${metadata.statementName ?? metadata.connectionName}`;
-    this.render();
+    this.hasResult = true;
+    this.panel.title = `查询输出 · ${metadata.statementName ?? metadata.connectionName}`;
+    if (this.plan && !sameOutputSource(this.plan.source, metadata.source)) this.plan = undefined;
+  }
+
+  private setPlan(
+    snapshot: PlanSnapshot, sourceUri: vscode.Uri, copyMode: CopyMode, protection?: ProtectionProjection,
+  ): void {
+    const source: OutputSource = {
+      path: snapshot.sourcePath ?? sourceUri.fsPath ?? sourceUri.toString(),
+      startLine: snapshot.startLine ?? 1,
+      endLine: snapshot.endLine ?? snapshot.startLine ?? 1,
+      saved: snapshot.saved ?? sourceUri.scheme === 'file',
+    };
+    this.plan = { snapshot, sourceUri, copyMode, source, protection };
+    this.panel.title = `查询输出 · ${snapshot.name}`;
   }
 
   private get columns(): string[] {
@@ -429,74 +473,95 @@ class ResultPanel {
   private render(): void {
     this.outputRows = [];
     this.copyCache = undefined;
-    try { this.renderResult(); }
+    try { this.renderUnified(); }
     catch (error) {
       if (!this.metadata.protection) throw error;
       // Clear a previous plain DOM even if the new projection fails.
-      this.panel.webview.html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none';"></head><body>受保护结果暂时无法显示，请核对字段类型或通过状态栏切换模式。</body></html>`;
+      this.panel.webview.html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none';"></head><body>受保护结果暂时无法显示，请核对字段类型后重试。</body></html>`;
     }
   }
 
-  private renderResult(): void {
+  private renderUnified(): void {
     const scriptNonce = nonce();
-    const projection = this.metadata.protection?.withMode(getDataMode());
-    const projectedRows = projection ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
-    this.outputRows = projectedRows;
-    const shownRows = projectedRows.map((row) =>
-      this.columns.map((column) => {
+    const hasResult = this.hasResult;
+    const hasPlan = this.plan !== undefined;
+    if (!hasResult && !hasPlan) {
+      this.panel.webview.html = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"></head><body>执行 SQL 或查看计划后，结果会显示在这里。</body></html>';
+      return;
+    }
+    const activeTab = hasPlan && this.activeTab === 'plan' ? 'plan' : hasResult ? 'result' : 'plan';
+    this.activeTab = activeTab;
+    const projection = hasResult ? this.metadata.protection?.withMode(getDataMode()) : undefined;
+    const projectedRows = hasResult && projection
+      ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
+    if (hasResult) this.outputRows = projectedRows;
+    const columns = hasResult ? this.result.columns : [];
+    const hasTable = hasResult && columns.length > 0;
+    const resultCopyMode = this.metadata.copyMode ?? DEFAULT_COPY_MODE;
+    const planCopyMode = this.plan?.copyMode ?? DEFAULT_COPY_MODE;
+    const activeCopyMode = activeTab === 'plan' ? planCopyMode : resultCopyMode;
+    const copyHint = activeCopyMode === 'origin'
+      ? '复制：origin（纯内容）' : '复制：extra（引用 + 参数 + 耗时 + 内容）';
+    const exportLabel = activeTab === 'plan' ? '导出计划' : '导出 TSV';
+    const title = this.metadata.statementName ?? this.plan?.snapshot.name ?? '查询输出';
+    const connectionName = hasResult ? this.metadata.connectionName : this.plan?.snapshot.connectionName ?? '';
+    const databaseType = hasResult ? this.metadata.databaseType : this.plan?.snapshot.databaseType;
+    const database = hasResult ? this.metadata.database : undefined;
+    const durationMs = hasResult ? this.metadata.durationMs : this.plan?.snapshot.durationMs ?? 0;
+    const protection = activeTab === 'result' ? this.metadata.protection : undefined;
+    const protectedFields = Object.keys(protection?.rules ?? {});
+    const protectionBadge = protectedFields.length > 0
+      ? `<span class="badge accent">${protectedFields.length} 字段${protection!.mode === 'encrypted' ? '已保护' : '原文'}</span>`
+      : '';
+
+    const header = [
+      '<th class="row-number" aria-label="行号">#</th>',
+      ...columns.map((column, index) => `<th scope="col" aria-sort="none" data-sort-header="${index}"><button type="button" class="sort-button" data-sort-column="${index}" data-sort-label="${escapeHtml(column)}" title="排序：${escapeHtml(column)}" aria-label="按 ${escapeHtml(column)} 排序：当前为原始顺序">${escapeHtml(column)}<span class="sort-indicator" aria-hidden="true">↕</span></button></th>`),
+    ].join('');
+    const body = projectedRows
+      .map((row, index) => `<tr data-row data-original-index="${index}"><td class="row-number">${index + 1}</td>${columns.map((column) => {
         const value = row[column];
         if (value === null || value === undefined) {
-          return { html: '<span class="null-value">NULL</span>', sort: ' data-sort-null="1"' };
+          return '<td data-sort-null="1"><span class="null-value">NULL</span></td>';
         }
         const text = displayValue(value);
         if (typeof value === 'number' && Number.isFinite(value)) {
-          return {
-            html: escapeHtml(text),
-            sort: ` data-sort-kind="number" data-sort-value="${escapeHtml(String(value))}"`,
-          };
+          return `<td data-sort-kind="number" data-sort-value="${escapeHtml(String(value))}">${escapeHtml(text)}</td>`;
         }
-        // Everything else is sorted as its displayed text, which keeps text IDs
-        // and non-finite numbers exactly as the user sees them.
-        return { html: escapeHtml(text), sort: ` data-sort-kind="text" data-sort-value="${escapeHtml(text)}"` };
-      }),
-    );
-    const header = [
-      '<th class="row-number" aria-label="行号">#</th>',
-      ...this.columns.map((column, index) => `<th scope="col" aria-sort="none" data-sort-header="${index}"><button type="button" class="sort-button" data-sort-column="${index}" data-sort-label="${escapeHtml(column)}" title="排序：${escapeHtml(column)}" aria-label="按 ${escapeHtml(column)} 排序：当前为原始顺序">${escapeHtml(column)}<span class="sort-indicator" aria-hidden="true">↕</span></button></th>`),
-    ].join('');
-    const body = shownRows
-      .map((cells, index) => `<tr data-row data-original-index="${index}"><td class="row-number">${index + 1}</td>${cells.map((cell) => `<td${cell.sort}>${cell.html}</td>`).join('')}</tr>`)
+        return `<td data-sort-kind="text" data-sort-value="${escapeHtml(text)}">${escapeHtml(text)}</td>`;
+      }).join('')}</tr>`)
       .join('');
-    const hasTable = this.columns.length > 0;
-    const exportDirectory = configuredExportDirectory();
-    const exportHint = exportDirectory ? `导出到默认目录：${exportDirectory}` : '选择导出位置';
-    const truncatedNotice = !this.result.truncated
+    const truncatedNotice = !hasResult || !this.result.truncated
       ? ''
       : this.metadata.readComplete
         ? `<div class="status-banner warning">本次结果共 ${this.result.totalRows} 行，面板保留前 ${this.metadata.maxRows} 行。导出会写出全部 ${this.result.totalRows} 行，复制使用已加载的 ${projectedRows.length} 行。</div>`
-        // Reading stopped at the limit, so there is no total to report -- saying
-        // "共 N 行" here would be a lie the user cannot see through.
         : `<div class="status-banner warning">已读取 ${this.result.totalRows} 行并达到上限。面板与复制使用已加载的 ${projectedRows.length} 行；导出会重新执行查询并写出完整结果。</div>`;
-    // What was actually substituted, not what the file says: with ${...} in the
-    // statement the editor no longer shows the values that ran.
-    const parameterEntries = Object.entries(projection?.parameters(this.metadata.parameters ?? {}) ?? this.metadata.parameters ?? {});
-    const parameterNotice = parameterEntries.length === 0
-      ? ''
-      : `<section class="section compact parameter-panel"><div class="section-header"><span class="section-title">本次参数</span><span class="section-note">${parameterEntries.length} 项</span></div><div class="parameter-list">${parameterEntries
-          .map(([name, value]) => `<span class="parameter-chip"><span class="parameter-key">${escapeHtml(name)}</span><span class="parameter-value">${escapeHtml(value)}</span></span>`)
-          .join('')}</div></section>`;
-    const resultContent = hasTable
-      ? `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，未返回数据</td></tr>`}</tbody></table></div>`
-      : `<section class="success-state"><span class="success-icon">✓</span><div><h2>语句执行成功</h2><p>${this.result.affectedRows === null ? '影响行数未知' : `影响 ${this.result.affectedRows} 行`} · ${formatDuration(this.metadata.durationMs)}</p></div></section>`;
-    // Sorting and filtering only ever reorder what is already in the panel, so
-    // say that next to the table instead of implying a server-side ORDER BY.
-    const sortScopeNotice = !hasTable
-      ? ''
+    const resultTable = hasTable
+      ? `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${columns.length + 1}">查询成功，返回 0 行</td></tr>`}</tbody></table></div>`
+      : '<section class="success-state"><span class="success-icon">✓</span><div><h2>语句执行成功</h2><p>没有可显示的列。</p></div></section>';
+    const sortScopeNotice = !hasTable ? ''
       : `<div class="table-meta"><span id="sort-status" class="sort-status" role="status" aria-live="polite">原始顺序</span><span>基于已加载的 ${projectedRows.length} 行排序与筛选 · 复制与导出保持查询返回顺序</span></div>`;
-    const title = this.metadata.statementName ?? '查询结果';
-    const modeControl = projection
-      ? `<button class="badge accent mode-button" id="data-mode" title="切换当前窗口的字段保护输出方式"><span>${projection.mode === 'encrypted' ? '字段密文' : '字段原文'}</span><span class="mode-hint">点击切换</span></button>`
-      : '<span class="badge">普通输出</span>';
+    const resultPane = hasResult ? `
+<section class="output-pane" data-tab="result" data-copy-mode="${resultCopyMode}"${activeTab === 'result' ? '' : ' hidden'}>
+  <div class="result-toolbar">
+    ${hasTable ? '<div class="filter-wrap"><span class="filter-icon" aria-hidden="true">⌕</span><input id="result-filter" type="search" placeholder="筛选已加载行…" aria-label="筛选已加载行" title="筛选只改变当前显示" /></div>' : ''}
+  </div>
+  <div class="result-notices">${truncatedNotice}</div>
+  ${hasTable ? `<section class="table-section">${sortScopeNotice}${resultTable}</section>` : resultTable}
+</section>` : '';
+    const planPane = this.plan ? `
+<section class="output-pane" data-tab="plan" data-copy-mode="${planCopyMode}"${activeTab === 'plan' ? '' : ' hidden'}>
+  <div class="plan-meta">${escapeHtml(this.plan.snapshot.source)} · ${escapeHtml(this.plan.snapshot.databaseType)}${this.plan.snapshot.durationMs !== undefined ? ` · ${formatDuration(this.plan.snapshot.durationMs)}` : ''}</div>
+  <section class="section">
+    <div class="section-header"><span class="section-title">计划正文</span><span class="section-note">按原 SQL 生成，未追加预览 LIMIT</span></div>
+    <pre class="code-surface plan-code">${escapeHtml(this.plan.snapshot.plan || '服务端未返回计划文本。')}</pre>
+  </section>
+</section>` : '';
+    const tabs = hasResult && hasPlan
+      ? `<div class="output-tabs" role="tablist">
+  <button class="output-tab" type="button" role="tab" data-tab="result" aria-selected="${activeTab === 'result'}">结果</button>
+  <button class="output-tab" type="button" role="tab" data-tab="plan" aria-selected="${activeTab === 'plan'}">计划</button>
+</div>` : '';
 
     this.panel.webview.html = `<!doctype html>
 <html lang="zh-CN">
@@ -505,72 +570,21 @@ class ResultPanel {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}';" />
   <style>
     ${WEBVIEW_BASE_CSS}
-    .result-page { padding-bottom: 18px; }
-    .result-toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 10px 12px;
-      margin-bottom: 12px;
-      padding: 10px 12px;
-      background: var(--ui-surface);
-      border: 1px solid var(--ui-line-soft);
-      border-radius: var(--ui-radius);
-    }
+    .output-tabs { display: flex; gap: 4px; margin: 0 0 12px; border-bottom: 1px solid var(--ui-line-soft); }
+    .output-tab { padding: 7px 14px; color: var(--vscode-descriptionForeground); background: transparent; border: 0; border-bottom: 2px solid transparent; }
+    .output-tab[aria-selected="true"] { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder); }
+    .output-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; padding: 10px 12px; background: var(--ui-surface); border: 1px solid var(--ui-line-soft); border-radius: var(--ui-radius); }
+    .output-toolbar .section-note { margin-left: auto; }
+    .output-pane[hidden] { display: none; }
+    .plan-meta { margin-bottom: 10px; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); font-size: 11.5px; word-break: break-all; }
+    .plan-code { max-height: calc(100vh - 330px); min-height: 220px; white-space: pre; }
+    .result-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin-bottom: 12px; padding: 10px 12px; background: var(--ui-surface); border: 1px solid var(--ui-line-soft); border-radius: var(--ui-radius); }
     .filter-wrap { position: relative; flex: 1 1 220px; max-width: 440px; }
     .filter-wrap input { padding-left: 30px; }
     .filter-icon { position: absolute; left: 9px; top: 50%; color: var(--vscode-descriptionForeground); transform: translateY(-50%); pointer-events: none; }
-    .primary-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-left: auto; }
-    .more-actions { position: relative; }
-    .more-actions summary { list-style: none; }
-    .more-actions summary::-webkit-details-marker { display: none; }
-    .more-actions[open] > summary { border-color: var(--vscode-focusBorder); }
-    .action-menu {
-      position: absolute;
-      z-index: 30;
-      top: calc(100% + 5px);
-      right: 0;
-      display: grid;
-      min-width: 190px;
-      padding: 5px;
-      background: var(--vscode-editorWidget-background);
-      border: 1px solid var(--ui-line);
-      border-radius: var(--ui-radius-sm);
-      box-shadow: 0 5px 18px color-mix(in srgb, var(--vscode-editor-background) 65%, transparent);
-    }
-    .action-menu button { width: 100%; border: 0; text-align: left; white-space: nowrap; }
-    .action-menu .menu-note { padding: 6px 10px; color: var(--vscode-descriptionForeground); font-size: 11px; }
-    .mode-button { gap: 7px; padding: 2px 9px; color: var(--vscode-foreground); background: transparent; font-weight: 600; }
-    .mode-button:hover { background: var(--vscode-list-hoverBackground); }
-    .mode-hint { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 500; }
     .result-notices { display: grid; gap: 8px; margin-bottom: 12px; }
-    .parameter-panel { margin-bottom: 12px; }
-    .parameter-list { display: flex; flex-wrap: wrap; gap: 7px; }
-    .parameter-chip {
-      display: inline-flex;
-      align-items: baseline;
-      gap: 5px;
-      max-width: min(100%, 420px);
-      padding: 4px 8px;
-      background: var(--ui-code);
-      border: 1px solid var(--ui-line-soft);
-      border-radius: var(--ui-radius-sm);
-      font-family: var(--vscode-editor-font-family);
-      font-size: 11.5px;
-    }
-    .parameter-key { color: var(--vscode-descriptionForeground); }
-    .parameter-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .table-section { border: 1px solid var(--ui-line-soft); border-radius: var(--ui-radius); overflow: hidden; background: var(--ui-surface-strong); }
-    .table-meta {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: baseline;
-      gap: 5px 12px;
-      padding: 9px 12px;
-      color: var(--vscode-descriptionForeground);
-      border-bottom: 1px solid var(--ui-line-soft);
-      font-size: 11.5px;
-    }
+    .table-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; padding: 9px 12px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--ui-line-soft); font-size: 11.5px; }
     .sort-status { color: var(--vscode-foreground); font-weight: 600; }
     .table-wrap { overflow: auto; max-height: calc(100vh - 290px); }
     table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; white-space: nowrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
@@ -592,109 +606,94 @@ class ResultPanel {
     .success-icon { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-testing-iconPassed); font-weight: 700; }
     @media (max-width: 680px) {
       .filter-wrap { flex-basis: 100%; max-width: none; }
-      .primary-actions { width: 100%; margin-left: 0; }
-      .primary-actions > button { flex: 1 1 120px; }
-      .more-actions { flex: 0 0 auto; margin-left: auto; }
-      .action-menu { right: 0; max-width: calc(100vw - 56px); }
-      .action-menu button { white-space: normal; }
-    }
-    @media (max-width: 420px) {
-      .result-toolbar { padding: 9px; }
-      .primary-actions { gap: 6px; }
-      .primary-actions > button { flex-basis: 96px; }
-      .table-meta { align-items: flex-start; flex-direction: column; }
+      .output-toolbar .section-note { flex-basis: 100%; margin-left: 0; }
     }
   </style>
 </head>
 <body>
-  <div class="page-shell wide result-page">
-  <header class="page-header">
-    <div class="page-heading">
-      <div class="eyebrow">查询结果 · ${escapeHtml(this.metadata.connectionName)}</div>
-      <h1>${escapeHtml(title)}</h1>
-      <p class="sub">${this.metadata.database ? `数据库 ${escapeHtml(this.metadata.database)} · ` : ''}${formatDuration(this.metadata.durationMs)} · 查询返回的原始顺序</p>
+  <div class="page-shell wide">
+    <header class="page-header">
+      <div class="page-heading">
+        <div class="eyebrow">查询输出 · ${escapeHtml(connectionName)}</div>
+        <h1>${escapeHtml(title)}</h1>
+        <p class="sub">${database ? `数据库 ${escapeHtml(database)} · ` : ''}${formatDuration(durationMs)} · 结果与计划共用复制/导出</p>
+      </div>
+      <div class="badge-row">
+        ${databaseType ? `<span class="badge accent">${escapeHtml(databaseType)}</span>` : ''}
+        ${hasResult ? `<span class="badge" role="status" aria-live="polite"><span id="visible-count">${projectedRows.length}</span> 行</span>` : ''}
+        ${hasResult ? `<span class="badge">${columns.length} 列</span>` : ''}
+        ${protectionBadge}
+      </div>
+    </header>
+    ${tabs}
+    <div class="output-toolbar">
+      <button id="copy-output" type="button">复制</button>
+      <button id="export-output" class="secondary" type="button">${exportLabel}</button>
+      <span id="copy-hint" class="section-note">${copyHint}</span>
     </div>
-    <div class="badge-row">
-      ${this.metadata.databaseType ? `<span class="badge accent">${escapeHtml(this.metadata.databaseType)}</span>` : ''}
-      <span class="badge" role="status" aria-live="polite"><span id="visible-count">${projectedRows.length}</span> 行</span>
-      <span class="badge">${this.columns.length} 列</span>
-      ${modeControl}
-    </div>
-  </header>
-  <div class="result-toolbar">
-    ${hasTable ? `<div class="filter-wrap"><span class="filter-icon" aria-hidden="true">⌕</span><input id="result-filter" type="search" placeholder="筛选已加载行…" aria-label="筛选已加载行" title="筛选只改变当前显示" /></div>` : ''}
-    <div class="primary-actions">
-      ${hasTable ? `
-        <button class="secondary" data-action="copy" data-default-label="复制结果" title="复制已加载的 ${projectedRows.length} 行为 TSV">复制结果</button>
-        <button data-export="default" data-format="tsv" data-default-label="导出 TSV" title="${escapeHtml(exportHint)}">导出 TSV</button>
-      ` : ''}
-      <details class="more-actions" id="more-actions">
-        <summary class="ghost button-like" aria-label="更多结果操作" aria-controls="action-menu">更多操作 ▾</summary>
-        <div class="action-menu" id="action-menu" role="group" aria-label="更多结果操作">
-          ${hasTable ? `<button class="ghost" data-export="custom" data-format="tsv" data-default-label="导出到其他位置…" title="这次导出时选择位置">导出到其他位置…</button>` : ''}
-          <div class="menu-note">AI 反馈包含执行上下文与状态</div>
-          <button class="ghost" data-action="copy-feedback" data-default-label="复制 AI 反馈">复制 AI 反馈</button>
-          <button class="ghost" data-action="save-feedback" data-default-label="保存 AI 反馈…">保存 AI 反馈…</button>
-        </div>
-      </details>
-    </div>
-  </div>
-  <p id="action-status" class="status-banner action-status" role="status" aria-live="polite"></p>
-  <div class="result-notices">${truncatedNotice}</div>
-  ${parameterNotice}
-  ${hasTable ? `<section class="table-section">${sortScopeNotice}<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body || `<tr class="empty-row"><td colspan="${this.columns.length + 1}">查询成功，返回 0 行</td></tr>`}</tbody></table></div></section>` : resultContent}
+    <p id="action-status" class="status-banner action-status" role="status" aria-live="polite"></p>
+    ${resultPane}
+    ${planPane}
   </div>
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
-    document.getElementById('data-mode')?.addEventListener('click', () => api.postMessage({ type: 'toggle-mode' }));
-    const copyButton = document.querySelector('button[data-action="copy"]');
-    const exportButton = document.querySelector('button[data-export="default"]');
-    const exportElsewhereButton = document.querySelector('button[data-export="custom"]');
-    const copyFeedbackButton = document.querySelector('button[data-action="copy-feedback"]');
-    const saveFeedbackButton = document.querySelector('button[data-action="save-feedback"]');
+    const copyButton = document.getElementById('copy-output');
+    const exportButton = document.getElementById('export-output');
+    const copyHint = document.getElementById('copy-hint');
     const actionStatus = document.getElementById('action-status');
-    const actionButtons = [copyButton, exportButton, exportElsewhereButton, copyFeedbackButton, saveFeedbackButton];
-    const moreActions = document.getElementById('more-actions');
-    let pendingButton;
-    const setPending = (button, label) => {
-      if (!button) return;
-      actionButtons.forEach((action) => { if (action) action.disabled = true; });
-      button.textContent = label;
+    const tabs = [...document.querySelectorAll('.output-tab')];
+    const panes = [...document.querySelectorAll('.output-pane')];
+    let activeTab = (panes.find((pane) => !pane.hidden) || panes[0])?.dataset.tab || 'result';
+    const paneFor = (tab) => document.querySelector('.output-pane[data-tab="' + tab + '"]');
+    const exportLabelFor = () => activeTab === 'plan' ? '导出计划' : '导出 TSV';
+    const refreshToolbar = () => {
+      const mode = paneFor(activeTab)?.dataset.copyMode || 'extra';
+      copyHint.textContent = mode === 'origin'
+        ? '复制：origin（纯内容）' : '复制：extra（引用 + 参数 + 耗时 + 内容）';
+      exportButton.textContent = exportLabelFor();
     };
-    [copyFeedbackButton, saveFeedbackButton].forEach((button) => button?.addEventListener('click', () => {
+    tabs.forEach((tab) => tab.addEventListener('click', () => {
+      activeTab = tab.dataset.tab;
+      panes.forEach((pane) => { pane.hidden = pane.dataset.tab !== activeTab; });
+      tabs.forEach((item) => item.setAttribute('aria-selected', String(item === tab)));
+      refreshToolbar();
+    }));
+    refreshToolbar();
+    let pendingButton;
+    const begin = (button, label) => {
       pendingButton = button;
-      setPending(button, '正在处理…');
-      api.postMessage({ type: button.dataset.action });
-    }));
-    copyButton?.addEventListener('click', () => {
-      pendingButton = copyButton;
-      setPending(copyButton, '正在复制…');
-      api.postMessage({ type: 'copy' });
+      copyButton.disabled = true;
+      exportButton.disabled = true;
+      button.textContent = label;
+      actionStatus.textContent = '';
+      actionStatus.className = 'status-banner action-status';
+    };
+    copyButton.addEventListener('click', () => {
+      begin(copyButton, '正在复制…');
+      api.postMessage({ type: 'copy', tab: activeTab });
     });
-    exportButton?.addEventListener('click', () => {
-      pendingButton = exportButton;
-      setPending(exportButton, '正在导出…');
-      api.postMessage({ type: 'export', format: exportButton.dataset.format });
+    exportButton.addEventListener('click', () => {
+      begin(exportButton, '正在导出…');
+      api.postMessage({ type: 'export', tab: activeTab, format: activeTab === 'result' ? 'tsv' : undefined });
     });
-    exportElsewhereButton?.addEventListener('click', () => {
-      pendingButton = exportElsewhereButton;
-      setPending(exportElsewhereButton, '正在导出…');
-      api.postMessage({ type: 'export', format: exportElsewhereButton.dataset.format, chooseLocation: true });
-    });
-    actionButtons.forEach((button) => button?.addEventListener('click', () => {
-      if (moreActions) moreActions.open = false;
-    }));
-    document.addEventListener('click', (event) => {
-      if (moreActions?.open && !moreActions.contains(event.target)) moreActions.open = false;
-    });
-    document.addEventListener('focusin', (event) => {
-      if (moreActions?.open && !moreActions.contains(event.target)) moreActions.open = false;
-    });
-    document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && moreActions?.open) {
-        moreActions.open = false;
-        moreActions.querySelector('summary')?.focus();
-      }
+    window.addEventListener('message', ({ data }) => {
+      const completed = data.type === 'actionComplete';
+      const failed = data.type === 'actionFailed';
+      copyButton.disabled = false;
+      exportButton.disabled = false;
+      if (!pendingButton) return;
+      pendingButton.textContent = completed
+        ? data.action === 'copy' ? '已复制' : '已导出'
+        : failed ? '操作失败' : '已取消';
+      actionStatus.textContent = completed
+        ? data.action === 'copy' ? '已复制到剪贴板。' : '导出已完成。'
+        : failed ? '操作未完成，详情请查看通知。' : '已取消。';
+      actionStatus.className = 'status-banner action-status' + (failed ? ' bad' : completed ? ' ok' : '');
+      const restore = () => {
+        pendingButton.textContent = data.action === 'copy' ? '复制' : exportLabelFor();
+        pendingButton = undefined;
+      };
+      if (completed) window.setTimeout(restore, 1200); else restore();
     });
     const filter = document.getElementById('result-filter');
     const rows = [...document.querySelectorAll('tbody tr[data-row]')];
@@ -706,10 +705,9 @@ class ResultPanel {
         row.hidden = !matches;
         if (matches) visible += 1;
       });
-      document.getElementById('visible-count').textContent = String(visible);
+      const count = document.getElementById('visible-count');
+      if (count) count.textContent = String(visible);
     });
-    // Sorting only reorders the rows already in the table. It never posts a
-    // message, so copy, export and the stored result keep their original order.
     const tbody = document.querySelector('tbody');
     const sortButtons = [...document.querySelectorAll('th button[data-sort-column]')];
     const sortStatus = document.getElementById('sort-status');
@@ -725,16 +723,12 @@ class ResultPanel {
         ? { group: 'number', number: Number(raw), text: raw }
         : { group: 'text', number: 0, text: raw };
     };
-    const groupRank = (group) => {
-      if (sortDirection === 'descending') {
-        return group === 'text' ? 0 : group === 'number' ? 1 : 2;
-      }
-      return group === 'number' ? 0 : group === 'text' ? 1 : 2;
-    };
+    const groupRank = (group) => sortDirection === 'descending'
+      ? group === 'text' ? 0 : group === 'number' ? 1 : 2
+      : group === 'number' ? 0 : group === 'text' ? 1 : 2;
     const restoreOriginalOrder = () => {
       if (!tbody) return;
-      [...rows]
-        .sort((left, right) => originalIndex(left) - originalIndex(right))
+      [...rows].sort((left, right) => originalIndex(left) - originalIndex(right))
         .forEach((row) => tbody.appendChild(row));
     };
     const applySort = () => {
@@ -743,12 +737,8 @@ class ResultPanel {
       decorated.sort((left, right) => {
         const groupDelta = groupRank(left.key.group) - groupRank(right.key.group);
         if (groupDelta !== 0) return groupDelta;
-        let delta = 0;
-        if (left.key.group === 'number') {
-          delta = left.key.number - right.key.number;
-        } else if (left.key.group === 'text') {
-          delta = left.key.text < right.key.text ? -1 : left.key.text > right.key.text ? 1 : 0;
-        }
+        let delta = left.key.group === 'number' ? left.key.number - right.key.number
+          : left.key.group === 'text' ? (left.key.text < right.key.text ? -1 : left.key.text > right.key.text ? 1 : 0) : 0;
         if (delta !== 0) return sortDirection === 'descending' ? -delta : delta;
         return left.index - right.index;
       });
@@ -761,55 +751,33 @@ class ResultPanel {
         const active = sortDirection !== 'none' && column === sortColumn;
         button.closest('th')?.setAttribute('aria-sort', active ? sortDirection : 'none');
         const indicator = button.querySelector('.sort-indicator');
-        if (indicator) indicator.textContent = active ? (sortDirection === 'ascending' ? '↑' : '↓') : '↕';
+        if (indicator) indicator.textContent = active ? sortDirection === 'ascending' ? '↑' : '↓' : '↕';
         const label = labelOf(button);
-        button.setAttribute(
-          'aria-label',
-          active
-            ? '按 ' + label + ' 排序：当前' + directionLabels[sortDirection] + '，点击切换为' + (sortDirection === 'ascending' ? '降序' : '原始顺序')
-            : '按 ' + label + ' 排序：当前为原始顺序',
-        );
+        button.setAttribute('aria-label', active
+          ? '按 ' + label + ' 排序：当前' + directionLabels[sortDirection] + '，点击切换为' + (sortDirection === 'ascending' ? '降序' : '原始顺序')
+          : '按 ' + label + ' 排序：当前为原始顺序');
       });
       if (!sortStatus) return;
       const current = sortButtons.find((button) => Number(button.getAttribute('data-sort-column')) === sortColumn);
       sortStatus.textContent = sortDirection === 'none' || !current
-        ? '原始顺序'
-        : '按“' + labelOf(current) + '”' + directionLabels[sortDirection];
+        ? '原始顺序' : '按“' + labelOf(current) + '”' + directionLabels[sortDirection];
     };
-    sortButtons.forEach((button) => {
-      button.addEventListener('click', () => {
-        const column = Number(button.getAttribute('data-sort-column'));
-        if (column !== sortColumn) {
-          sortColumn = column;
-          sortDirection = 'ascending';
-        } else {
-          sortDirection = sortDirection === 'none' ? 'ascending' : sortDirection === 'ascending' ? 'descending' : 'none';
-        }
-        if (sortDirection === 'none') {
-          sortColumn = -1;
-          restoreOriginalOrder();
-        } else {
-          applySort();
-        }
-        updateSortUi();
-      });
-    });
-    window.addEventListener('message', ({ data }) => {
-      const button = pendingButton ?? (data.action === 'copy' ? copyButton : exportButton);
-      pendingButton = undefined;
-      if (!button) return;
-      const completed = data.type === 'actionComplete';
-      const failed = data.type === 'actionFailed';
-      button.textContent = completed ? (data.action === 'copy' ? '已复制' : data.action === 'feedback' ? '已完成' : '已导出') : button.dataset.defaultLabel;
-      actionStatus.textContent = completed
-        ? data.action === 'copy' ? '已复制当前结果。' : data.action === 'feedback' ? '反馈操作已完成。' : '导出已完成。'
-        : failed ? '操作未完成，详情请查看通知。' : '已取消。';
-      actionStatus.className = 'status-banner action-status' + (failed ? ' bad' : completed ? ' ok' : '');
-      window.setTimeout(() => {
-        actionButtons.forEach((action) => { if (action) action.disabled = false; });
-        button.textContent = button.dataset.defaultLabel;
-      }, completed ? 1200 : 0);
-    });
+    sortButtons.forEach((button) => button.addEventListener('click', () => {
+      const column = Number(button.getAttribute('data-sort-column'));
+      if (column !== sortColumn) {
+        sortColumn = column;
+        sortDirection = 'ascending';
+      } else {
+        sortDirection = sortDirection === 'none' ? 'ascending' : sortDirection === 'ascending' ? 'descending' : 'none';
+      }
+      if (sortDirection === 'none') {
+        sortColumn = -1;
+        restoreOriginalOrder();
+      } else {
+        applySort();
+      }
+      updateSortUi();
+    }));
   </script>
 </body>
 </html>`;
@@ -1039,19 +1007,84 @@ class ResultPanel {
     return written;
   }
 
-  public async copyToClipboard(): Promise<void> {
-    const rows = this.outputRows;
-    const text = this.copyCache ?? toTsv(rows, this.columns);
-    this.copyCache = text.length <= MAX_CACHED_CLIPBOARD_CHARS ? text : undefined;
-    await vscode.env.clipboard.writeText(text);
-    if (this.result.truncated) {
-      vscode.window.showInformationMessage(
-        this.metadata.readComplete
-          ? `已复制当前显示的 ${rows.length} 行（共 ${this.result.totalRows} 行）；需要全部数据请用导出。`
-          : `已复制当前显示的 ${rows.length} 行（结果未读完，实际不止这些）；需要全部数据请用导出。`,
-      );
-    }
+  private resultCopyContext(): OutputCopyContext {
+    const projection = this.metadata.protection?.withMode(getDataMode());
+    return {
+      name: this.metadata.statementName ?? this.title,
+      connectionName: this.metadata.connectionName,
+      databaseType: this.metadata.databaseType,
+      database: this.metadata.database,
+      parameters: projection?.parameters(this.metadata.parameters ?? {}) ?? this.metadata.parameters,
+      durationMs: this.metadata.durationMs,
+      protectionFields: this.metadata.protection?.info?.fields,
+      source: this.metadata.source,
+    };
   }
+
+  private planCopyContext(): OutputCopyContext | undefined {
+    if (!this.plan) return undefined;
+    const projection = this.plan.protection?.withMode(getDataMode());
+    return {
+      name: this.plan.snapshot.name,
+      connectionName: this.plan.snapshot.connectionName,
+      databaseType: this.plan.snapshot.databaseType,
+      parameters: projection?.parameters(this.plan.snapshot.parameters) ?? this.plan.snapshot.parameters,
+      durationMs: this.plan.snapshot.durationMs,
+      generatedAt: this.plan.snapshot.generatedAt,
+      protectionFields: this.plan.protection?.info?.fields,
+      source: this.plan.source,
+    };
+  }
+
+  private async copyResult(): Promise<void> {
+    const mode = this.metadata.copyMode ?? DEFAULT_COPY_MODE;
+    const text = this.copyCache?.mode === mode ? this.copyCache.text : buildResultCopy({
+      mode,
+      rows: this.outputRows,
+      columns: this.columns,
+      context: this.resultCopyContext(),
+      totalRows: this.result.totalRows,
+      readComplete: this.metadata.readComplete,
+      truncated: this.result.truncated,
+    });
+    this.copyCache = text.length <= MAX_CACHED_CLIPBOARD_CHARS ? { mode, text } : undefined;
+    await vscode.env.clipboard.writeText(text);
+  }
+
+  private async copyPlan(): Promise<void> {
+    if (!this.plan) throw new Error('当前没有可复制的执行计划。');
+    const context = this.planCopyContext();
+    if (!context) throw new Error('当前没有可复制的执行计划。');
+    await vscode.env.clipboard.writeText(buildPlanCopy({
+      mode: this.plan.copyMode,
+      plan: this.plan.snapshot.plan,
+      context,
+    }));
+  }
+
+  private async exportPlan(): Promise<boolean> {
+    if (!this.plan) throw new Error('当前没有可导出的执行计划。');
+    const folder = this.plan.sourceUri.scheme === 'untitled'
+      ? vscode.workspace.workspaceFolders?.[0]?.uri
+      : vscode.Uri.joinPath(this.plan.sourceUri, '..');
+    const defaultUri = folder
+      ? vscode.Uri.joinPath(folder, buildExportFileName(this.plan.snapshot.name, 'txt', new Date()))
+      : undefined;
+    const target = await vscode.window.showSaveDialog({
+      title: '导出执行计划',
+      saveLabel: '导出计划',
+      filters: { '执行计划': ['txt'] },
+      defaultUri,
+    });
+    if (!target) return false;
+    if (target.toString() === this.plan.sourceUri.toString()) {
+      throw new Error('不能覆盖原 SQL 文件。');
+    }
+    await vscode.workspace.fs.writeFile(target, Buffer.from(this.plan.snapshot.plan, 'utf8'));
+    vscode.window.showInformationMessage(`已导出执行计划到 ${target.fsPath || target.toString()}。`);
+    return true;
+  }
+
 }
 
 // Re-run only on the exact original session and revision, while holding the
@@ -1412,11 +1445,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         showError('执行并导出失败', error);
       }
     }),
-    vscode.commands.registerCommand('dorisSqlLite.copyLastFeedback', async () => {
-      try { await copyFeedback(); } catch (error) { showError('复制反馈失败', error); }
-    }),
-    vscode.commands.registerCommand('dorisSqlLite.saveLastFeedback', async () => {
-      try { await saveFeedback(); } catch (error) { showError('保存反馈失败', error); }
+    vscode.commands.registerCommand('dorisSqlLite.copySqlReference', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.languageId !== 'sql') {
+        void vscode.window.showInformationMessage('请先打开 SQL 文件。');
+        return;
+      }
+      const context = resolveStatementContext(
+        editor.document.getText(),
+        editor.document.offsetAt(editor.selection.start),
+        editor.document.offsetAt(editor.selection.end),
+      );
+      if (!context) {
+        void vscode.window.showInformationMessage('没有可复制的 SQL。');
+        return;
+      }
+      const documentKey = editor.document.uri.toString();
+      const connectionId = connectionSession.documentConnections.get(documentKey)
+        ?? connectionSession.defaultConnectionId;
+      const profile = manager.getProfiles().find((candidate) => candidate.id === connectionId);
+      const saved = editor.document.uri.scheme === 'file' && !editor.document.isDirty;
+      const text = buildSqlReference({
+        name: context.name ?? basename(editor.document.fileName),
+        databaseType: profile?.type,
+        source: {
+          path: editor.document.uri.scheme === 'file' ? editor.document.uri.fsPath : '',
+          startLine: context.line,
+          endLine: context.endLine,
+          saved,
+        },
+        sql: context.sql,
+      });
+      await vscode.env.clipboard.writeText(text);
+      vscode.window.setStatusBarMessage('已复制 SQL 引用', 2000);
     }),
     vscode.commands.registerCommand('dorisSqlLite.resetFileSessions', async () => {
       const editor = vscode.window.activeTextEditor;
@@ -1719,18 +1780,46 @@ async function runQuery(
     });
 }
 
-function notifyWithFeedback(
-  message: string, feedback: FeedbackRecord | undefined, kind: 'info' | 'error' = 'info',
-): void {
-  const actions = ['复制 AI 反馈', '保存 AI 反馈…'];
-  const notice = kind === 'error'
-    ? vscode.window.showErrorMessage(message, ...actions)
-    : vscode.window.showInformationMessage(message, ...actions);
+function feedbackOutputContext(record: FeedbackRecord): OutputCopyContext {
+  const source = record.value.source;
+  const projection = record.protection?.withMode(getDataMode());
+  return {
+    name: record.value.name,
+    connectionName: record.value.connectionName,
+    databaseType: record.value.databaseType,
+    parameters: projection?.parameters(record.value.parameters) ?? record.value.parameters,
+    durationMs: record.value.durationMs,
+    generatedAt: record.value.generatedAt,
+    protectionFields: record.protection?.info?.fields,
+    source: {
+      path: source.path,
+      startLine: source.startLine,
+      endLine: source.endLine,
+      saved: source.savedAtExecution,
+    },
+    sql: record.sqlText,
+  };
+}
+
+function notifyCompletion(message: string): void {
+  void vscode.window.showInformationMessage(message);
+}
+
+function notifyErrorWithCopy(message: string, record?: FeedbackRecord): void {
+  const action = '复制错误引用';
+  const notice = vscode.window.showErrorMessage(message, action);
   void notice.then(async (answer) => {
+    if (answer !== action || !record) return;
     try {
-      if (answer === actions[0]) await copyFeedback(feedback);
-      if (answer === actions[1]) await saveFeedback(feedback);
-    } catch (error) { showError('反馈操作失败', error); }
+      const detail = record.value.error ?? message;
+      await vscode.env.clipboard.writeText(buildErrorCopy({
+        context: feedbackOutputContext(record),
+        error: record.protectRaw ? protectedMessage(detail, record.protection, true) : detail,
+      }));
+      vscode.window.setStatusBarMessage('已复制错误引用', 2000);
+    } catch (error) {
+      showError('复制错误引用失败', error);
+    }
   });
 }
 
@@ -1916,13 +2005,12 @@ async function runBatch(
       const stopped = details.batch?.records.find((record) => record.status === 'failed' || record.status === 'cancelled');
       const completion = details.batch ? `已完成 ${details.batch.completedBatches}/${details.batch.batchCount} 批` : '尚未提交 SQL';
       const position = stopped ? `；停止于${stopped.phase === 'init' ? '初始化' : `第 ${stopped.batchIndex} 批`}「${stopped.name}」` : '';
-      notifyWithFeedback(
-        `${details.name}：${details.status === 'success' ? '分批执行成功' : details.status === 'cancelled' ? '分批执行已取消' : '分批执行失败'}，${completion}${position}，耗时 ${formatDuration(details.durationMs)}。`
-          + (details.needsReview ? ' 已提交步骤的写入结果需核对。' : '')
-          + (details.error && (details.status === 'failed' || details.error.includes('进程树终止失败'))
-            ? ` ${protectedMessage(details.error, undefined, feedback.protectRaw)}` : ''),
-        feedback, details.status === 'failed' ? 'error' : 'info',
-      );
+      const message = `${details.name}：${details.status === 'success' ? '分批执行成功' : details.status === 'cancelled' ? '分批执行已取消' : '分批执行失败'}，${completion}${position}，耗时 ${formatDuration(details.durationMs)}。`
+        + (details.needsReview ? ' 已提交步骤的写入结果需核对。' : '')
+        + (details.error && (details.status === 'failed' || details.error.includes('进程树终止失败'))
+          ? ` ${protectedMessage(details.error, undefined, feedback.protectRaw)}` : '');
+      if (details.status === 'failed') void vscode.window.showErrorMessage(message);
+      else notifyCompletion(message);
     }
   });
 }
@@ -2025,6 +2113,7 @@ async function executeQuery(
     return;
   }
   const statement = prepared.sql;
+  if (feedback) feedback.sqlText = context?.sql ?? statement;
   if (details) details.parameters = prepared.used;
   // Verify the parameter output before submitting any SQL.
   protection?.withMode('encrypted').parameters(prepared.used);
@@ -2151,9 +2240,15 @@ async function executeQuery(
             const plan = planText(result.columns, result.rows);
             if (details) details.status = 'success';
             if (feedback) feedback.planText = plan;
-            openPlanPanel({
+            const copyMode = context?.copy ?? DEFAULT_COPY_MODE;
+            ResultPanel.openPlan({
               name: context?.name ?? sourceLabel,
               source: `${details?.source.path ?? sourceUri.toString()}:${context?.line ?? 1}-${context?.endLine ?? 1}`,
+              sourcePath: details?.source.path ?? sourceUri.fsPath ?? sourceUri.toString(),
+              startLine: context?.line ?? 1,
+              endLine: context?.endLine ?? context?.line ?? 1,
+              saved: details?.source.savedAtExecution ?? sourceUri.scheme === 'file',
+              copyMode,
               connectionName: profile.name,
               databaseType: profile.type,
               parameters: prepared.used,
@@ -2161,7 +2256,8 @@ async function executeQuery(
               explainSql,
               plan,
               generatedAt: new Date().toISOString(),
-            }, sourceUri, feedback);
+              durationMs: Date.now() - startedAt,
+            }, sourceUri, copyMode, protection);
             return;
           }
           if (fileWriter) {
@@ -2184,13 +2280,7 @@ async function executeQuery(
             if (details) { details.status = 'success'; details.resultFile = targetPath; details.warning = writer.cleanupWarning; }
             void vscode.window.showInformationMessage(
               `已导出 ${written} 行到 ${targetPath}，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒。${modeLabel(protection)}`,
-              '复制 AI 反馈', '保存 AI 反馈…',
-            ).then(async (answer) => {
-              try {
-                if (answer === '复制 AI 反馈') await copyFeedback(feedback);
-                if (answer === '保存 AI 反馈…') await saveFeedback(feedback);
-              } catch (error) { showError('反馈操作失败', error); }
-            });
+            );
             if (writer.cleanupWarning) void vscode.window.showWarningMessage(protectedMessage(writer.cleanupWarning, protection));
             return;
           }
@@ -2251,8 +2341,8 @@ async function executeQuery(
               details.status = 'cancelled';
               details.needsReview = details.submitted && details.hasResultSet !== true;
             }
-            notifyWithFeedback(`已取消「${context?.name ?? profile.name}」，耗时 ${formatDuration(Date.now() - startedAt)}。`
-              + (details?.needsReview ? ' 已提交操作的完成情况需核对。' : ''), feedback);
+            notifyCompletion(`已取消「${context?.name ?? profile.name}」，耗时 ${formatDuration(Date.now() - startedAt)}。`
+              + (details?.needsReview ? ' 已提交操作的完成情况需核对。' : ''));
             return;
           }
           // An injected statement ends by itself, so stopReason stays undefined
@@ -2281,8 +2371,8 @@ async function executeQuery(
             if (!view.hasResultSet) details.affectedRows = view.affectedRows;
           }
           if (!view.hasResultSet) {
-            notifyWithFeedback(
-              `「${context?.name ?? profile.name}」执行成功，${view.affectedRows === null ? '影响行数未知' : `影响 ${view.affectedRows} 行`}，耗时 ${formatDuration(Date.now() - startedAt)}。`, feedback,
+            notifyCompletion(
+              `「${context?.name ?? profile.name}」执行成功，${view.affectedRows === null ? '影响行数未知' : `影响 ${view.affectedRows} 行`}，耗时 ${formatDuration(Date.now() - startedAt)}。`,
             );
             return;
           }
@@ -2296,6 +2386,13 @@ async function executeQuery(
             database: profile.database,
             durationMs: Date.now() - startedAt,
             maxRows,
+            copyMode: context?.copy ?? DEFAULT_COPY_MODE,
+            source: {
+              path: details?.source.path ?? sourceUri.fsPath ?? sourceUri.toString(),
+              startLine: context?.line ?? 1,
+              endLine: context?.endLine ?? context?.line ?? 1,
+              saved: details?.source.savedAtExecution ?? sourceUri.scheme === 'file',
+            },
             parameters: prepared.used,
             feedback,
             protection,
@@ -2323,19 +2420,19 @@ async function executeQuery(
           }
           if (isQueryCancelled(error) || (!outputMode && isCancelled(token))) {
             if (details) { details.status = 'cancelled'; details.needsReview = !outputMode && details.submitted && details.hasResultSet !== true; }
-            notifyWithFeedback(outputMode
+            notifyCompletion(outputMode
               ? '已取消执行并导出，未完成的临时文件已清理。'
               : `已取消「${context?.name ?? profile.name}」，耗时 ${formatDuration(Date.now() - startedAt)}。`
-                + (details?.needsReview ? ' 已提交操作的完成情况需核对。' : ''), feedback);
+                + (details?.needsReview ? ' 已提交操作的完成情况需核对。' : ''));
           } else {
             if (details) {
               details.status = 'failed'; details.error = formatDatabaseError(error);
               details.needsReview = !outputMode && details.submitted && (entry?.session?.broken === true || classifyDatabaseError(error).kind === 'network');
             }
             if (outputMode) showError(`执行并导出失败（${profile.name}）`, new Error(protectedMessage(error, protection)));
-            else notifyWithFeedback(
+            else notifyErrorWithCopy(
               `「${context?.name ?? profile.name}」执行失败，耗时 ${formatDuration(Date.now() - startedAt)}。 ${protectedMessage(error, protection)}`
-                + (details?.needsReview ? ' 已提交操作的写入结果需核对。' : ''), feedback, 'error',
+                + (details?.needsReview ? ' 已提交操作的写入结果需核对。' : ''), feedback,
             );
           }
         }

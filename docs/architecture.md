@@ -20,12 +20,11 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `extension.ts` | 激活、命令、树视图、状态栏、查询编排、结果面板、导出与计划入口 |
+| `extension.ts` | 激活、命令、树视图、状态栏、查询编排、统一输出面板、导出与复制入口 |
 | `connectionForm.ts` | 连接添加/编辑 Webview |
 | `parameterForm.ts` | SQL 参数确认 Webview |
-| `planPanel.ts` | 执行计划 Webview |
-| `webviewTheme.ts` | 四个 Webview 的共享视觉、响应式和可访问性规则 |
-| `dataCommands.ts` | 字段模式、密钥导入导出与单值解密命令 |
+| `webviewTheme.ts` | 连接、参数和输出 Webview 的共享视觉、响应式和可访问性规则 |
+| `dataCommands.ts` | 字段原文切换、密钥导入导出与单值解密等高级命令 |
 
 VS Code 接口层可以组合纯逻辑模块，纯逻辑模块不反向依赖 UI。
 
@@ -53,6 +52,8 @@ VS Code 接口层可以组合纯逻辑模块，纯逻辑模块不反向依赖 UI
 | `queryResults.ts` | SQL 语句范围、行收集、结果 view |
 | `rowLimit.ts` | 预览 LIMIT 注入与危险尾部语法保护 |
 | `sqlDirectives.ts` | 文件注释、连接、参数、输出、字段和批次解析 |
+| `copyMode.ts` | `@copy: origin/extra` 的类型与校验 |
+| `outputCopy.ts` | 引用链接、origin/extra 结果与计划复制文本 |
 | `sqlParameters.ts` | `${...}` 扫描、默认值、候选和替换 |
 | `executionPlan.ts` | 各引擎 EXPLAIN SQL 与计划文本 |
 | `directExport.ts` | 一次执行并导出前的语句类型检查 |
@@ -71,17 +72,18 @@ VS Code 接口层可以组合纯逻辑模块，纯逻辑模块不反向依赖 UI
 
 同一文件的一次操作持有 `DocumentOperation`。计划、查询、导出、参数表单和批次通过该锁互斥。不同文件拥有独立操作。
 
-### 字段保护与反馈
+### 字段保护与复制
 
 | 模块 | 职责 |
 | --- | --- |
 | `fieldEncryption.ts` | AES-256-SIV、类型编码、token 校验 |
 | `dataKeys.ts` | SecretStorage 密钥生成、缓存、导入和活动指针 |
 | `dataProtection.ts` | 字段规则投影、参数解码、sink 保护 |
-| `sqlFeedback.ts` | 反馈白名单、schema 版本、摘要与完整报告 |
-| `feedbackActions.ts` | 剪贴板、Markdown、计划与批次报告写入 |
+| `outputCopy.ts` | 引用、上下文和原始内容组装 |
+| `sqlFeedback.ts` | 旧反馈 schema，1.0 UI 不再使用，保留 1.x 兼容 |
+| `feedbackActions.ts` | 旧反馈产物写入，1.0 UI 不再调用 |
 
-字段密钥与连接密码分开管理。反馈投影保留原执行记录，模式切换只改变展示和输出快照。
+字段密钥与连接密码分开管理。字段保护只投影结果数据和导出；计划和 SQL 引用保持可见。
 
 ## 查询流程
 
@@ -95,8 +97,9 @@ VS Code 接口层可以组合纯逻辑模块，纯逻辑模块不反向依赖 UI
   -> row LIMIT planning
   -> driver execute
   -> result collector or TSV writer
-  -> result panel / notification
-  -> feedback record
+  -> 统一输出面板（结果 / 计划）
+  -> copy (@copy) / export
+  -> notification
 ```
 
 ### 会话复用
@@ -152,7 +155,7 @@ open temporary file
 
 ## Webview
 
-四个页面共享：
+连接、参数和输出面板共享：
 
 - 页头与任务说明
 - 状态徽章
@@ -174,12 +177,12 @@ Node 单元测试覆盖：
 - 纯解析、状态机和数据库驱动假流。
 - Webview 实际 HTML 与内联脚本。
 - 临时文件、取消、错误和竞争条件。
-- 反馈 schema 与字段保护。
+- 复制契约与字段保护。
 
 VS Code 集成测试覆盖：
 
 - 最低 VS Code 版本激活。
-- 扩展 ID 与 22 个命令注册。
+- 扩展 ID 与 21 个命令注册。
 - 配置 schema 存在。
 - 连接表单命令可以执行。
 

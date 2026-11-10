@@ -1,5 +1,7 @@
 # 1.0 发布门禁
 
+> 2026-11-10 输出模型调整：结果和计划合并为统一输出面板；复制由 `@copy: origin|extra` 控制；AI 反馈界面、全局字段模式和多余右键入口已移除。当前候选为 `0.9.12`；真实 Doris、Spark、TLS、升级与观察门禁未清零，不能宣称 1.0 已发布。下表旧日期证据保留为历史记录，数量以当前清单为准。
+
 本清单用于判定是否可以发布 `1.0.0`，不是命令目录。每项记录三类结果：
 
 - **通过**：本轮已有命令输出、文件、截图或实际操作证据；在“证据”栏写明检查日期与结果。
@@ -13,9 +15,9 @@
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
 | [x] 扩展 ID 与运行入口 | `local.doris-sqltools-lite`、名称、`main`、最低 VS Code `1.90.0` 不变；SecretStorage 命名空间不受影响 | 2026-11-04：`tests/stable-contract.test.js` 3/3 通过 | 通过 |
-| [x] 命令与快捷键 | 22 个命令 ID、中文标题、`Ctrl+Enter`、`Ctrl+Alt+Enter` 不变；集成测试与清单精确一致 | 2026-11-06：稳定契约测试、1.90.0/stable 集成测试与隔离 VSIX 激活均核对 22 个运行命令 | 通过 |
+| [x] 命令与快捷键 | 21 个命令 ID、中文标题、`Ctrl+Enter`、`Ctrl+Alt+Enter`；旧反馈命令已移除，新增 `copySqlReference`；集成测试与清单精确一致 | 2026-11-10：稳定契约测试更新为 21 个运行命令 | 通过 |
 | [x] 配置键 | 8 个 `dorisSqlLite.*` 配置键、默认值、范围与 `scope` 不变；新增键须向后兼容 | 2026-11-04：契约测试覆盖键、默认值和 scope | 通过 |
-| [x] 反馈 schema v1 | `schemaVersion=1`、字段白名单和风险脱敏不变；变更语义必须升 schema 并给迁移说明 | 2026-11-04：`tests/stable-contract.test.js`、`tests/sql-feedback.test.js`、`docs/feedback-schema.md` 通过 | 通过 |
+| [x] 反馈 schema v1（兼容） | 旧 `schemaVersion=1` 契约保留；1.0 输出界面不再使用反馈 JSON | 2026-11-10：`tests/stable-contract.test.js`、`tests/sql-feedback.test.js` 通过；UI 已移除入口 | 通过（兼容） |
 | [x] 字段密文与密钥文件 | `enc:v1`、密钥 `version=1` 可继续解密/导入；格式变更必须给转换与兼容方案 | 2026-11-04：v1 加解密与密钥导出格式断言通过；`field-encryption.test.js`、`data-keys.test.js` 全通过 | 通过 |
 | [x] 工作区与存储边界 | 密码和字段密钥只在 SecretStorage；连接元数据为用户级设置；脚本执行要求信任工作区 | 2026-11-06：代码核对 `context.secrets`、`machine` scope 与 `isTrusted` 检查；`package-manifest.test.js` 覆盖 limited 能力 | 通过（代码/测试） |
 
@@ -24,20 +26,20 @@
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
 | [x] 依赖 | `pnpm install --frozen-lockfile` 成功；生产依赖与第三方声明一致 | 2026-11-06：`pnpm install --frozen-lockfile --ignore-scripts` 与第三方声明检查通过 | 通过 |
-| [x] 编译与 lint | TypeScript 直接编译、ESLint 均无错误 | 2026-11-06：`pnpm lint` 通过；`pnpm test` 的 `tsc -p ./` 通过 | 通过 |
-| [x] 测试链 | 文档、许可、Webview、bundle 检查和全部 Node 测试通过；失败用例能检出回归 | 2026-11-06：`pnpm test` 615/615 通过，含 3 项稳定契约测试；文档/许可/Webview、bundle 激活均通过 | 通过 |
-| [x] Webview 结构 | 四个页面的脚本、nonce、CSP、选择器、共享主题和交互契约通过 | 2026-11-06：`check-webview.js` 四页通过；`tests/webview-contract.test.js` 通过 | 通过 |
-| [x] 最低版本集成 | VS Code `1.90.0` 激活；22 个运行命令与清单一致；关键配置与连接 Webview 可打开/关闭/重开 | 2026-11-06：`pnpm run test:vscode` 通过，Exit code 0 | 通过 |
-| [x] 当前 stable 集成 | 对当前 stable 重复同一组集成断言 | 2026-11-06：下载并运行 VS Code `1.145.1`，`$env:VSCODE_TEST_VERSION='stable'; pnpm run test:vscode` 通过，Exit code 0 | 通过 |
+| [x] 编译与 lint | TypeScript 直接编译、ESLint 均无错误 | 2026-11-10：`pnpm lint` 通过；`pnpm test` 的 `tsc -p ./` 通过 | 通过 |
+| [x] 测试链 | 文档、许可、Webview、bundle 检查和全部 Node 测试通过；失败用例能检出回归 | 2026-11-10：`pnpm test` 610/610 通过，含 origin/extra、备用 SQL 模板与受保护错误引用回归；文档/许可/Webview、bundle 激活均通过 | 通过 |
+| [x] Webview 结构 | 连接、参数和输出面板的脚本、nonce、CSP、选择器、共享主题和交互契约通过 | 2026-11-10：`check-webview.js` 与 `tests/webview-contract.test.js` 通过 | 通过 |
+| [x] 最低版本集成 | VS Code `1.90.0` 激活；21 个运行命令与清单一致；关键配置与连接 Webview 可打开/关闭/重开 | 2026-11-10：`pnpm run test:vscode` 通过，Exit code 0 | 通过 |
+| [x] 当前 stable 集成 | 对当前 stable 重复同一组集成断言 | 2026-11-10：下载并运行 VS Code `1.145.2`，`$env:VSCODE_TEST_VERSION='stable'; pnpm run test:vscode` 通过，Exit code 0 | 通过 |
 | [x] 差异 | `git diff --check` 通过；提交范围只含本次交付 | 2026-11-06：`git diff --check` 通过；范围为本清单、布局检查工具与开发说明 | 通过 |
 
 ## C. 界面与可访问性
 
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| [x] 四页真实渲染 | `pnpm run preview:webviews` 生成连接、参数、计划、结果页；1200/720/420/320px 页面级横向溢出为 0 | 2026-11-06：`pnpm run preview:webviews` 与 `pnpm run check:layout` 通过，四页四档宽度页面级溢出为 0 | 通过 |
+| [x] 输出面板真实渲染 | `pnpm run preview:webviews` 生成连接、参数、输出面板结果/计划 Tab；1200/720/420/320px 页面级横向溢出为 0 | 2026-11-10：`pnpm run preview:webviews` 与 `pnpm run check:layout` 通过 | 通过 |
 | [ ] 主题与缩放 | 浅色、深色、高对比主题及 200% 缩放下层级、焦点和文字可读 | 2026-11-06：布局脚本在三种主题变量和 100%/200% 设备比例下通过结构断言；VS Code 窗口内的视觉层级与文字可读仍未核验 | 部分通过 |
-| [ ] 键盘操作 | 只用键盘完成连接、参数、计划、结果复制/导出；菜单支持 Escape 与焦点返回 | 实际操作记录；日期： | 待验 |
+| [ ] 键盘操作 | 只用键盘完成连接、参数、结果/计划 Tab 切换、复制/导出 | 实际操作记录；日期： | 待验 |
 | [ ] 状态模型 | 初始、进行中、成功、空结果、截断、警告、失败、取消、清理残留逐项符合 `docs/ux.md` | 页面与对应测试证据；日期： | 待核 |
 
 `pnpm test` 的结构检查只证明 HTML、脚本与样式契约存在；本节窗口级检查需要单独记录，不能用它自动勾选。
@@ -61,7 +63,7 @@
 | --- | --- | --- | --- |
 | [ ] 凭据 | 设置、日志、反馈、测试夹具不含真实密码；保存、认证失败清除、手动清除路径可用 | 2026-11-06：定向测试与代码核对通过；保存/清除的 GUI 路径和实际凭据仍未观察 | 部分通过 |
 | [ ] 字段保护 | 密文导出、导入、模式切换、单值解密可用；丢密钥/域不符/篡改密文在提交前失败 | 2026-11-06：`data-keys`、`data-protection`、`data-commands`、`field-encryption` 定向测试通过；GUI 路径未观察 | 部分通过 |
-| [ ] 受保护材料 | 字段密文模式的反馈、计划、错误不泄露原文；显式原文模式按用户意图输出 | 2026-11-06：`sql-feedback`、`feedback-actions`、`plan-panel`、`result-panel-sort` 测试覆盖；实际复制内容未观察 | 部分通过 |
+| [ ] 受保护材料 | 字段密文模式的反馈、计划、错误不泄露原文；显式原文模式按用户意图输出 | 2026-11-10：`query-workflow` 覆盖受保护参数在结果/错误复制中的密文输出与原始 SQL 模板回退；`result-panel-sort` 覆盖受保护结果；实际复制内容未观察 | 部分通过 |
 | [ ] 文件完成点 | TSV、计划、反馈、批次报告均不覆盖已有目标；取消清理，清理失败报告残留路径 | 2026-11-06：`tsv-file-writer`、`feedback-actions`、MySQL 全量导出测试通过；窗口级实际文件操作未观察 | 部分通过 |
 | [ ] 会话失败 | 会话丢失停止后续批次；失败不自动重试；已完成/需核对/未执行步骤计数准确 | 2026-11-06：`batch-execution`、`document-sessions`、`session-failures`、`query-workflow` 定向测试通过；真实断线未复现 | 部分通过 |
 
@@ -69,9 +71,9 @@
 
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| [x] 打包 | `pnpm run package` 成功，自动检查与独立 `pnpm run check:vsix` 通过 | 2026-11-06：`pnpm run package` 与自动检查通过；`pnpm run check:vsix` 独立复检通过 | 通过（当前基线） |
-| [x] 包内容 | 身份/版本/入口/bundle/README/LICENSE/图标齐全；无源码、测试、skill、node_modules、source map、本机目录 | 2026-11-06：当前 `0.9.11` VSIX 为 17 个扩展文件、669,223 字节、SHA-256 `2170F08A…ED51` | 通过（当前基线） |
-| [ ] 干净安装 | 独立 VS Code 用户目录首次安装候选包，Reload Window 后能激活并列出 22 个命令；各命令可由命令面板发现 | 2026-11-06：`check:vsix-install` 在隔离 VS Code `1.90.0` 与 `1.145.1` 中安装、激活、核对 22 个命令及配置通过；实际窗口 Reload Window 与命令面板仍需观察 | 部分通过 |
+| [x] 打包 | `pnpm run package` 成功，自动检查与独立 `pnpm run check:vsix` 通过 | 2026-11-10：`pnpm run package` 与自动检查通过；`pnpm run check:vsix` 独立复检通过 | 通过（当前基线） |
+| [x] 包内容 | 身份/版本/入口/bundle/README/LICENSE/图标齐全；无源码、测试、skill、node_modules、source map、本机目录 | 2026-11-10：当前 `0.9.12` VSIX 为 17 个扩展文件；包检查通过，未含源码、测试、skill、source map 或本机目录 | 通过（当前基线） |
+| [ ] 干净安装 | 独立 VS Code 用户目录首次安装候选包，Reload Window 后能激活并列出 21 个命令；各命令可由命令面板发现 | 2026-11-10：隔离 VS Code 1.90.0 的 `check:vsix-install` 通过并核对 21 个命令；实际窗口 Reload Window 与命令面板仍需观察 | 部分通过 |
 | [ ] 从 0.9.11 升级 | 保留连接设置、密码、字段密钥与记住的参数；升级后密文仍可解密、已有结果仍按原模式打开 | 升级前后窗口核对记录；日期： | 阻断 |
 | [ ] 当前版本 | `code --list-extensions --show-versions` 与已加载窗口版本一致 | 2026-11-05：CLI 为 `local.doris-sqltools-lite@0.9.11`；已加载窗口版本未核验 | 部分通过 |
 
@@ -82,7 +84,7 @@
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
 | [ ] 文档 | README 快速开始可从零完成；使用、安全、反馈、开发、UX、产品范围、变更日志与当前版本一致 | 文档检查与人工核对；日期： | 待核 |
-| [x] 使用 skill | 仓库 `skills/` 只描述已实现行为，并与本机安装副本逐文件一致 | 2026-11-05：`SKILL.md` 与 `agents/openai.yaml` 仓库/安装副本 SHA-256 逐文件一致 | 通过 |
+| [x] 使用 skill | 仓库 `skills/` 只描述已实现行为，并与本机安装副本逐文件一致 | 2026-11-10：`SKILL.md` 与 `agents/openai.yaml` 仓库/安装副本 SHA-256 逐文件一致 | 通过 |
 | [ ] 发布范围 | 1.0 不夹带未决定的新功能；已知阻断项清零或由用户逐项明确接受 | `git diff --check`、门禁表；日期： | 阻断 |
 | [x] Git | 核对分支、工作区、暂存区和远端；提交符合约定；推送 `origin/main` | 2026-11-06：已依次推送至 `b8ad836`、`2cd4e6e` 和 `facb5a0`；本轮清单更新待提交 | 部分通过 |
 | [ ] 发布记录 | 写明提交号、VSIX、命令验证、真实环境边界、未验证范围和未推送/已推送状态 | 变更日志与聊天交付；日期： | 待办 |
@@ -91,7 +93,7 @@
 
 | 门禁 | 判定标准 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| [ ] 候选版本观察 | 发布候选在真实工作区完成一轮约定观察周期；覆盖连接、参数、查询、计划、导出、反馈、字段模式，或明确记录未覆盖范围 | 观察起止日期、版本与结果： | 阻断 |
+| [ ] 候选版本观察 | 发布候选在真实工作区完成一轮约定观察周期；覆盖连接、参数、查询、计划、复制 origin/extra、导出和字段保护，或明确记录未覆盖范围 | 观察起止日期、版本与结果： | 阻断 |
 | [ ] 阻断缺陷 | 观察期内没有阻断主流程、数据正确性或安全的已知缺陷；发现项修复并复验受影响门禁 | 缺陷与复验记录；日期： | 阻断 |
 | [ ] 版本冻结 | 所有 A–H 门禁为“通过”或用户明确接受的“不适用”；仅在此时将版本升为 `1.0.0` | 本表最终状态；日期： | 阻断 |
 

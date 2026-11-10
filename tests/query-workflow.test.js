@@ -45,7 +45,10 @@ function harness(sql, options = {}) {
     window: {
       activeTextEditor: editor,
       showInformationMessage: async (text) => { calls.notices.push(text); },
-      showErrorMessage: async (text) => { calls.notices.push(text); },
+      showErrorMessage: async (text, ...buttons) => {
+        calls.notices.push(text);
+        if (options.copyErrorAction && buttons.includes('复制错误引用')) return '复制错误引用';
+      },
       showWarningMessage: async (text, ...buttons) => {
         calls.notices.push(text);
         if (buttons[0]?.detail) (calls.confirmations ??= []).push(buttons[0].detail);
@@ -53,6 +56,7 @@ function harness(sql, options = {}) {
         return buttons.includes('继续导出') ? '继续导出' : undefined;
       },
       showSaveDialog: async () => { calls.saveDialogs = (calls.saveDialogs ?? 0) + 1; return options.saveDialog ? options.saveDialog() : options.target; },
+      setStatusBarMessage: () => ({ dispose() {} }),
       withProgress: async (_config, task) => task({ report: ({ message }) => calls.progress.push(message) }, new CancellationTokenSource().token),
       showQuickPick: async () => { throw new Error('unexpected connection picker'); },
     },
@@ -95,7 +99,6 @@ function harness(sql, options = {}) {
           constructor(report, extra) { super(report, { ...extra, ...options.progressOptions }); }
         } };
       }
-      if (id === './planPanel') return { openPlanPanel: (snapshot) => calls.plans.push(snapshot) };
       return realRequire(id);
     },
   };
@@ -103,6 +106,7 @@ function harness(sql, options = {}) {
   const hooks = module.exports.hooks;
   if (options.keys) hooks.setDataKeys(options.keys);
   hooks.ResultPanel.open = (result, metadata) => calls.results.push({ result, metadata });
+  hooks.ResultPanel.openPlan = (snapshot) => calls.plans.push(snapshot);
   const makeSession = (id) => ({
     broken: false, close: async () => { calls.closed.push(id); },
     execute: async (statement, signal, sink) => {
@@ -136,8 +140,7 @@ function harness(sql, options = {}) {
       reveal() {},
       onDidDispose() {},
     });
-    panel.result = calls.results[index].result;
-    panel.metadata = calls.results[index].metadata;
+    panel.update(calls.results[index].result, calls.results[index].metadata);
     panel.render();
     return panel;
   };
@@ -960,12 +963,15 @@ test('protected parameters reach each driver as plaintext while preview copies a
     setDataMode('encrypted'); const keys = await encryptionKeys(); const key = await keys.active();
     const token = encryptValue('private-id-001', 'user', key);
     const h = harness(`-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @param: id = ${token}\nSELECT * FROM t WHERE id='${'${id}'}';`, { keys, target: memoryTarget });
+    h.editor.document.uri.scheme = 'untitled';
     h.profiles[0].type = type;
     const rows = [{ id: 'private-id-001' }, { id: 'private-id-002' }, { id: 'private-id-003' }];
     protectedRows(h, rows); await h.run();
     assert.ok(h.calls.executed[0].includes("id='private-id-001'")); assert.ok(!h.calls.executed[0].includes('enc:'));
-    const panel = h.panelFor(); await panel.copyToClipboard();
+    const panel = h.panelFor(); await panel.copyResult();
     assert.ok(h.calls.clipboard.includes(token)); assert.ok(!h.calls.clipboard.includes('private-id-'));
+    assert.match(h.calls.clipboard, /未保存 SQL/);
+    assert.doesNotMatch(h.calls.clipboard, /SELECT \* FROM t/);
     h.editor.document.getText = () => '-- @encrypt: {"id":"later-rule"}\nSELECT 1;';
     // Changing mode while an export is awaiting its location cannot change its content.
     h.options.saveDialog = () => { setDataMode('plain'); return memoryTarget; };
@@ -974,9 +980,28 @@ test('protected parameters reach each driver as plaintext while preview copies a
     assert.ok(encrypted.includes(token)); assert.ok(!encrypted.includes('private-id-'));
     assert.equal(h.calls.executed.length, 2);
     panel.render();
-    await panel.copyToClipboard(); assert.ok(h.calls.clipboard.includes('private-id-001'));
+    await panel.copyResult(); assert.ok(h.calls.clipboard.includes('private-id-001'));
     setDataMode('encrypted');
   }
+});
+
+test('protected error reference keeps parameter ciphertext and the unsaved SQL template', async () => {
+  const { encryptValue } = require('../out/fieldEncryption');
+  const { setDataMode } = require('../out/dataProtection');
+  setDataMode('encrypted');
+  const keys = await encryptionKeys();
+  const key = await keys.active();
+  const token = encryptValue('private-id-001', 'user', key);
+  const h = harness(`-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @param: id = ${token}\nSELECT * FROM t WHERE id='${'${id}'}';`, {
+    keys, copyErrorAction: true,
+  });
+  h.editor.document.uri.scheme = 'untitled';
+  h.session.execute = async () => { throw new Error('query failed for private-id-001'); };
+  await h.run();
+  await new Promise(setImmediate);
+  assert.ok(h.calls.clipboard.includes(token));
+  assert.ok(!h.calls.clipboard.includes('private-id-001'));
+  assert.match(h.calls.clipboard, /```sql\nSELECT \* FROM t WHERE id='\$\{id\}';/);
 });
 
 test('direct encrypted exports project each streamed row even when global mode changes midway', async (t) => {

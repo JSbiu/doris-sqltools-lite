@@ -101,7 +101,7 @@ function assertConfiguration(manifest) {
 
 function assertCommands(manifest) {
   const declared = manifest.contributes.commands;
-  assert.equal(declared.length, 22);
+  assert.equal(declared.length, 21);
   const declaredIds = declared.map((command) => command.command);
   assert.equal(new Set(declaredIds).size, declaredIds.length, '命令 ID 应唯一');
   for (const command of declared) {

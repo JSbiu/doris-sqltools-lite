@@ -1,28 +1,28 @@
 # Doris SQLTools Lite
 
-面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，连接、参数、会话、结果、执行计划和 AI 审核材料沿同一条可核对工作流组织。
+面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，结果和执行计划进入同一个输出面板；复制只分“原始内容”和“带上下文”，导出只负责完整产物。
 
-当前发布线：`0.9.11`，目标版本：`1.0.0`。
+当前发布线：`0.9.12`，目标版本：`1.0.0`。
 
 ## 核心能力
 
 - 光标级执行：`Ctrl+Enter` 执行光标所在或最近一条 SQL。
+- 统一输出：结果和计划共用同一个面板、两个 Tab、两个动作：复制、导出。
 - 文件级连接：文件默认连接、语句级连接覆盖和按连接保留会话。
 - SQL 参数：`${name}`、默认值、候选值、参数页和实际发送 SQL 预览。
 - 执行计划：MySQL `EXPLAIN`、Doris `EXPLAIN VERBOSE`、Spark `EXPLAIN FORMATTED`。
-- 完整导出：`@output` 或面板按钮流式写出完整 TSV。
-- 顺序批次：PowerShell 生成参数，扩展预检全部批次并逐条执行。
-- 字段保护：注释声明字段，窗口内即时切换字段密文与字段原文。
-- AI 反馈：版本化 JSON，默认不含 SQL 正文、结果行或密码。
-- 统一界面：连接、参数、计划和结果页共享视觉与响应式规则。
+- 复制模式：`@copy: extra` 给 AI 引用包，`@copy: origin` 只给计划原文或原始 TSV。
+- 完整导出：`@output` 或面板“导出”流式写出完整 TSV。
+- 字段保护：`@encrypt` 声明的结果字段按当前输出模式处理；不再设置全局模式入口。
+- 顺序批次：作为高级命令保留，不进入日常右键菜单和输出面板。
 
 ## 文档导航
 
 | 文档 | 内容 |
 | --- | --- |
 | [使用指南](docs/usage.md) | 连接、SQL 注释、参数、执行、计划、结果、导出、会话和批次 |
-| [安全模型](docs/security.md) | SecretStorage、TLS、字段密文、密钥与工作区信任 |
-| [反馈 schema v1](docs/feedback-schema.md) | AI 反馈字段、批次摘要、完整报告和兼容规则 |
+| [安全模型](docs/security.md) | SecretStorage、TLS、字段保护、密钥与工作区信任 |
+| [反馈 schema v1（1.x 兼容）](docs/feedback-schema.md) | 旧反馈字段与兼容规则；1.0 输出界面不再使用 |
 | [架构](docs/architecture.md) | 模块分层、会话模型、驱动、Webview、文件完成点和测试边界 |
 | [开发与验证](docs/development.md) | 环境、构建、测试、预览、真实数据库检查和打包 |
 | [产品定位](docs/product.md) | 目标用户、产品原则、1.0 承诺和版本策略 |
@@ -52,7 +52,7 @@ VS Code 最低版本：`1.90.0`。
 pnpm install --frozen-lockfile
 pnpm test
 pnpm run package
-code --install-extension .\doris-sqltools-lite-0.9.11.vsix --force
+code --install-extension .\doris-sqltools-lite-0.9.12.vsix --force
 ```
 
 安装后执行 `Developer: Reload Window`。用以下命令核对版本：
@@ -67,12 +67,13 @@ code --list-extensions --show-versions
 2. 在“连接”视图执行 **添加连接**。
 3. 选择 Doris、MySQL 或 Spark Thrift，填写连接目标并测试。
 4. 新建 `.sql` 文件，在第一条 SQL 前声明默认连接。
-5. 将光标放在 SQL 上，按 `Ctrl+Enter`。
+5. 将光标放在 SQL 上，按 `Ctrl+Enter` 查看结果，或按 `Ctrl+Alt+Enter` 查看计划。
+6. 在输出面板按 **复制** 或 **导出**。
 
 ```sql
 -- @default-connection: 分析 Doris
 -- @default-param: biz_date = 2026-10-30
--- @default-encrypt: {"user_id":"user"}
+-- @copy: extra
 
 -- @name: 订单汇总
 SELECT dt, COUNT(*) AS order_count
@@ -85,19 +86,35 @@ GROUP BY dt;
 
 ## 常用工作流
 
-### 查询与结果
+### 统一输出面板
 
 - `Ctrl+Enter` 执行当前语句。
-- 结果面板复用同一个标签页，支持筛选、三态排序、复制和导出。
+- `Ctrl+Alt+Enter` 获取当前语句的执行计划。
+- 结果和计划进入同一个输出面板的“结果 / 计划”两个 Tab；取计划不覆盖结果，取结果不覆盖同一 SQL 的计划。
+- 面板只有两个动作：**复制**、**导出**。筛选和三态排序只改变当前表格，不影响复制和导出的顺序。
 - 有结果集的语句显示面板；真实无结果集的写入只显示完成通知。
 - 面板保留 `maxResultRows` 行；完整导出写出全部结果。
+
+### 复制：origin / extra
+
+`-- @copy: extra` 是默认值：
+
+- 计划 Tab 复制引用、引擎/连接、参数、耗时和计划正文。
+- 结果 Tab 复制引用、引擎/连接、参数、耗时、行列数和原始 TSV。
+- SQL 不复制正文，只给文件引用，例如 `[orders.sql:12-24](D:/queries/orders.sql:12)`；Codex 点开就是 VS Code 对应行。
+
+`-- @copy: origin` 只复制当前内容：
+
+- 计划 Tab 复制纯计划正文。
+- 结果 Tab 复制纯 TSV，可直接贴到表格。
+
+复制只使用面板已加载的行；需要完整结果时使用导出。
 
 ### 执行计划
 
 - 将光标放在 SQL 上，按 `Ctrl+Alt+Enter`。
-- 计划页保留完整缩进和全部行。
-- “复制 AI 反馈 / 保存 AI 反馈…”引用完整计划文件。
-- 需要含 SQL、请求和计划的快照时，显式使用“复制完整材料”。
+- 计划 Tab 保留完整缩进和全部行。
+- 计划正文始终可见；字段保护只影响结果数据和导出，不再遮挡计划或 SQL 引用。
 
 ### 完整 TSV
 
@@ -118,13 +135,13 @@ SELECT * FROM orders WHERE dt = '2026-10-30';
 
 执行 `Doris SQLTools Lite: 顺序分批执行 SQL`。脚本输出参数数组，扩展预检全部批次后按顺序执行。完整用法见 [使用指南](docs/usage.md#顺序分批执行)。
 
-### 字段密文
+### 字段保护
 
 ```sql
--- @default-encrypt: {"user_id":"user","owner_id":"user"}
+-- @encrypt: {"user_id":"user","owner_id":"user"}
 ```
 
-窗口初始显示字段密文。状态栏、结果页和计划页的模式按钮共享切换。详细算法与密钥管理见 [安全模型](docs/security.md)。
+字段保护由 SQL 注释声明，AI 通过 skill 生成 SQL 时可以直接决定保护哪些字段。声明的结果字段按当前输出模式处理，结果 Tab 只显示只读的“N 字段已保护”徽章；没有全局状态栏。密钥导入导出和切换原文留在命令面板。详细算法与密钥管理见 [安全模型](docs/security.md)。
 
 ## 命令
 
@@ -138,8 +155,7 @@ SELECT * FROM orders WHERE dt = '2026-10-30';
 | `dorisSqlLite.runQuery` | `Doris SQLTools Lite: 执行光标处 SQL` |
 | `dorisSqlLite.runQueryToTsv` | `Doris SQLTools Lite: 执行并导出完整 TSV` |
 | `dorisSqlLite.runBatch` | `Doris SQLTools Lite: 顺序分批执行 SQL` |
-| `dorisSqlLite.copyLastFeedback` | `Doris SQLTools Lite: 复制最近一次执行反馈` |
-| `dorisSqlLite.saveLastFeedback` | `Doris SQLTools Lite: 保存最近一次执行反馈` |
+| `dorisSqlLite.copySqlReference` | `Doris SQLTools Lite: 复制 SQL 引用` |
 | `dorisSqlLite.toggleDataMode` | `Doris SQLTools Lite: 切换字段密文 / 字段原文` |
 | `dorisSqlLite.exportDataKeys` | `Doris SQLTools Lite: 导出字段加密密钥` |
 | `dorisSqlLite.importDataKeys` | `Doris SQLTools Lite: 导入字段加密密钥` |
@@ -178,17 +194,15 @@ SELECT * FROM orders WHERE dt = '2026-10-30';
 
 完整边界与报告入口见 [安全模型](docs/security.md) 和 [SECURITY.md](SECURITY.md)。
 
-## AI 反馈
+## 复制给 AI
 
-反馈 `schemaVersion=1`，包含：
+输出面板的“复制”根据 `@copy` 生成：
 
-- 扩展版本、SQL 名称、连接名称与类型。
-- 实际参数和来源路径、行号。
-- 操作、状态、提交情况、耗时和行数。
-- 结果、计划与批次报告路径。
-- 会话状态、是否需要核对和脱敏诊断。
+- `extra`：引用链接、引擎/连接、实际参数、耗时、计划正文或结果摘要与 TSV。
+- `origin`：只复制当前 Tab 的原始内容，适合贴表格或交给其他工具。
 
-默认反馈不包含 SQL 正文、计划正文、结果行或连接凭证。完整字段与示例见 [反馈 schema v1](docs/feedback-schema.md)。
+SQL 正文不进入复制包；`[orders.sql:12-24](D:/queries/orders.sql:12)` 指向源文件，AI 按行号读取。结果和计划 `extra` 对未保存 SQL 只标“未保存 SQL”，不复制正文；显式“复制 SQL 引用”或错误引用才回退为带语言标记的原始 SQL 模板。计划请求、审核清单和固定提示语不重复复制；计划审核要求由 skill 维护。
+受保护参数同样按当前字段模式输出：字段密文模式下 `extra` 只带密文，字段原文模式下才带明文。
 
 ## 开发
 
@@ -216,10 +230,12 @@ pnpm run check:bundle
 当前工作流聚焦：
 
 - 一次一条 SQL，配合文件级会话。
-- 手工触发的计划和顺序批次。
+- 结果与计划进入同一个输出面板。
 - 有界结果预览与完整文件导出。
-- 显式生成、显式复制、显式保存的 AI 材料。
-- 单值解密和版本化反馈。
+- `@copy: origin` 的纯内容和 `@copy: extra` 的 AI 引用包。
+- 由 SQL 注释声明的字段保护。
+
+顺序批次保留为高级命令，不进入日常右键菜单；AI 反馈 JSON、计划请求和审核清单不再出现在复制/保存界面。
 
 SQL 智能补全、对象编辑、SSH 隧道编排、事务工作台和自动 AI 调用属于外部工具或后续版本方向。1.0 的范围与承诺见 [产品定位](docs/product.md)。
 

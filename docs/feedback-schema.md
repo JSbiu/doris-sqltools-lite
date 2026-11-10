@@ -1,4 +1,6 @@
-# AI 反馈 JSON 契约
+# AI 反馈 JSON 契约（1.x 兼容）
+
+> 1.0 的输出界面不再提供 AI 反馈、保存反馈或复制完整材料。当前复制由 `@copy: origin|extra` 控制；本文只保留旧反馈 schema 的兼容说明。
 
 本文定义 `schemaVersion=1` 的 SQL 反馈。反馈由扩展在白名单字段上生成，可复制到剪贴板、保存为 Markdown，或作为批次报告保存为 JSON。
 
@@ -102,7 +104,7 @@
 ```json
 {
   "schemaVersion": 1,
-  "extensionVersion": "0.9.11",
+  "extensionVersion": "0.9.12",
   "name": "订单明细",
   "connectionName": "分析 Doris",
   "databaseType": "Doris",

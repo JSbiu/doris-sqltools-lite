@@ -24,8 +24,8 @@ pnpm install --frozen-lockfile
 | `pnpm run watch` | 监听源码并重建 bundle |
 | `pnpm run watch:types` | 只监听 TypeScript 类型编译 |
 | `pnpm run lint` | ESLint |
-| `pnpm run check:webview` | 检查四个 Webview 脚本、nonce 和选择器 |
-| `pnpm run check:layout` | 用无头 Chrome 检查四页布局、主题变量、响应式和 200% 缩放 |
+| `pnpm run check:webview` | 检查连接、参数和输出 Webview 脚本、nonce 和选择器 |
+| `pnpm run check:layout` | 用无头 Chrome 检查连接、参数和输出面板布局、主题变量、响应式和 200% 缩放 |
 | `pnpm run check:bundle` | 在 VS Code 之外激活 bundle 并探测两个驱动 |
 | `pnpm run check:notices` | 检查第三方依赖声明与当前安装依赖一致 |
 | `pnpm run check:vsix` | 单独检查当前版本的实际 VSIX 内容 |
@@ -92,7 +92,7 @@ pnpm run test:vscode
 pnpm run preview:webviews
 ```
 
-脚本从 `out/` 加载真实渲染函数，把连接、参数、计划和结果页写到系统临时目录。输出 JSON 包含 HTML 文件路径。
+脚本从 `out/` 加载真实渲染函数，把连接、参数、输出面板的结果/计划 Tab 写到系统临时目录。输出 JSON 包含 HTML 文件路径。
 
 视觉验收至少检查：
 
@@ -106,7 +106,7 @@ pnpm run preview:webviews
 
 完整页面职责、状态模型、键盘与高对比主题检查见 [界面与交互规范](ux.md)。
 
-`pnpm run check:layout` 会先调用 `pnpm run preview:webviews` 生成真实 HTML，再通过 Chrome DevTools Protocol 检查 320px、420px、720px、1200px 与 100%/200% 设备比例下的页面级横向溢出、主题焦点变量、`aria-live` 状态区、结果表自身滚动和“更多操作”菜单视口边界。默认是 Chrome/Edge 的常用安装路径；可用 `CHROME_PATH` 指定其他可执行文件。主题变量覆盖不等于 VS Code 窗口内主题切换，完整键盘流程仍需实际窗口验收。
+`pnpm run check:layout` 会先调用 `pnpm run preview:webviews` 生成真实 HTML，再通过 Chrome DevTools Protocol 检查 320px、420px、720px、1200px 与 100%/200% 设备比例下的页面级横向溢出、主题焦点变量、`aria-live` 状态区和结果表自身滚动。默认是 Chrome/Edge 的常用安装路径；可用 `CHROME_PATH` 指定其他可执行文件。主题变量覆盖不等于 VS Code 窗口内主题切换，完整键盘流程仍需实际窗口验收。
 
 ## Bundle 检查
 
@@ -118,7 +118,7 @@ pnpm run check:bundle
 检查器在系统临时目录构建驱动 probe，避免依赖 `.local` 或个人目录。它验证：
 
 - `dist/extension.js` 能加载和激活。
-- 22 个命令完成注册。
+- 21 个命令完成注册。
 - `mysql2` 与 `hive-driver` 在 bundle 中可解析。
 - Hive 传输、认证和协议类型可用。
 
@@ -150,7 +150,7 @@ pnpm run check:vsix
 
 检查器使用 Node.js 内置 `fs` 与 `zlib`，可在 Windows、Linux 和 macOS 运行。
 
-`pnpm run check:vsix-install` 默认使用 VS Code `1.90.0` 的隔离用户目录，先确认目录中没有本扩展，再安装当前 VSIX，并通过官方扩展测试启动器核对版本、激活、22 个命令与关键配置。可传入 `--vscode-version=1.145.1` 复验其他版本，例如：`node scripts/check-vsix-install.js --vscode-version=1.145.1`。它不需要复用本机日常 VS Code 的扩展目录，也不连接数据库；窗口级 Reload Window、密码/密钥保留和命令面板人工观察仍需单独验收。
+`pnpm run check:vsix-install` 默认使用 VS Code `1.90.0` 的隔离用户目录，先确认目录中没有本扩展，再安装当前 VSIX，并通过官方扩展测试启动器核对版本、激活、21 个命令与关键配置。可传入 `--vscode-version=1.145.1` 复验其他版本，例如：`node scripts/check-vsix-install.js --vscode-version=1.145.1`。它不需要复用本机日常 VS Code 的扩展目录，也不连接数据库；窗口级 Reload Window、密码/密钥保留和命令面板人工观察仍需单独验收。
 
 本机安装：
 

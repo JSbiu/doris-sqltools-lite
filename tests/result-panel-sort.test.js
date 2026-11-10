@@ -368,6 +368,7 @@ function renderPanel(result, metadata = {}) {
     readComplete: true,
     ...metadata,
   });
+  panel.render();
   return { panel, webviewPanel, html: webview.html };
 }
 
@@ -564,7 +565,7 @@ test('sorting and filtering coexist without clearing either state', () => {
 
 test('shows the loaded-row scope and resets sort and filter on a re-render', () => {
   const { panel, webviewPanel, html } = renderPanel(resultOf(['b1', 'a2', 'b3', 'a4']));
-  assert.equal(webviewPanel.title, '结果 · demo');
+  assert.equal(webviewPanel.title, '查询输出 · demo');
   assert.match(html, /--ui-radius:/);
   assert.match(html, /id="action-status" class="status-banner action-status" role="status" aria-live="polite"/);
   assert.match(html, /table \{ width: max-content; min-width: 100%;/);
@@ -583,6 +584,7 @@ test('shows the loaded-row scope and resets sort and filter on a re-render', () 
     maxRows: 1000,
     readComplete: true,
   });
+  panel.render();
   const freshHtml = panel.panel.webview.html;
   assert.match(freshHtml, /已加载的 3 行/);
   const fresh = openPanel(freshHtml);
@@ -596,7 +598,7 @@ test('shows the loaded-row scope and resets sort and filter on a re-render', () 
 
 test('sorting and filtering never change copied content or the copy/export messages', async () => {
   const result = resultOf(['b1', 'a2', 'b3', 'a4']);
-  const { panel, html } = renderPanel(result);
+  const { panel, html } = renderPanel(result, { copyMode: 'origin' });
   const view = openPanel(html);
 
   view.filter().value = 'a';
@@ -608,54 +610,39 @@ test('sorting and filtering never change copied content or the copy/export messa
   assert.equal(view.messages.length, 0);
 
   clipboard.text = undefined;
-  await panel.copyToClipboard();
+  await panel.copyResult();
   assert.equal(
     clipboard.text,
     'v\r\nb1\r\na2\r\nb3\r\na4',
     'copy keeps every loaded row in its original order, ignoring sort and filter',
   );
 
-  view.button('button[data-action="copy"]').dispatch('click');
-  assert.deepEqual({ ...view.messages[0] }, { type: 'copy' });
+  view.button('#copy-output').dispatch('click');
+  assert.deepEqual({ ...view.messages[0] }, { type: 'copy', tab: 'result' });
 
-  view.button('button[data-export="default"]').dispatch('click');
-  assert.deepEqual({ ...view.messages[1] }, { type: 'export', format: 'tsv' });
-
-  view.button('button[data-export="custom"]').dispatch('click');
-  assert.deepEqual({ ...view.messages[2] }, { type: 'export', format: 'tsv', chooseLocation: true });
-  assert.equal(view.document.getElementById('more-actions').open, false, 'choosing an action closes the menu');
+  view.button('#export-output').dispatch('click');
+  assert.deepEqual({ ...view.messages[1] }, { type: 'export', tab: 'result', format: 'tsv' });
   assert.deepEqual(panel.result.rows.map((row) => row.v), ['b1', 'a2', 'b3', 'a4']);
 });
 
-test('secondary actions stay in a dismissible menu and repeated copies reuse the exact TSV', async () => {
-  const { panel, html } = renderPanel(resultOf(['one', 'two']));
+test('copy and export are the only output actions and repeated copies reuse the exact snapshot', async () => {
+  const { panel, html } = renderPanel(resultOf(['one', 'two']), { copyMode: 'origin' });
   const view = openPanel(html);
-  const menu = view.document.getElementById('more-actions');
-  assert.equal(menu.open, false);
-  assert.equal(view.button('.primary-actions > button[data-action="copy-feedback"]'), null);
-  assert.equal(view.button('.action-menu button[data-action="copy-feedback"]').textContent, '复制 AI 反馈');
+  assert.equal(view.button('#copy-output').textContent, '复制');
+  assert.equal(view.button('#export-output').textContent, '导出 TSV');
+  assert.equal(view.button('[data-action="copy-feedback"]'), null);
 
-  menu.open = true;
-  view.document.dispatchEvent({ type: 'click', target: view.filter() });
-  assert.equal(menu.open, false, 'clicking elsewhere dismisses the menu');
-  menu.open = true;
-  view.document.dispatchEvent({ type: 'focusin', target: view.filter() });
-  assert.equal(menu.open, false, 'moving focus elsewhere dismisses the menu');
-  menu.open = true;
-  view.document.dispatchEvent({ type: 'keydown', key: 'Escape' });
-  assert.equal(menu.open, false, 'Escape dismisses the menu');
-  assert.equal(view.document.activeElement, menu.querySelector('summary'), 'Escape restores the menu trigger focus');
-
-  await panel.copyToClipboard();
+  await panel.copyResult();
   const first = clipboard.text;
   panel.result.rows[0].v = 'edited outside the snapshot';
-  await panel.copyToClipboard();
+  await panel.copyResult();
   assert.equal(clipboard.text, first, 'copy keeps the projection shown by this result snapshot');
 
   panel.update(resultOf(['new']), {
-    connectionName: 'demo', durationMs: 5, maxRows: 1000, readComplete: true,
+    connectionName: 'demo', durationMs: 5, maxRows: 1000, readComplete: true, copyMode: 'origin',
   });
-  await panel.copyToClipboard();
+  panel.render();
+  await panel.copyResult();
   assert.equal(clipboard.text, 'v\r\nnew', 'a new result invalidates the previous copy');
 });
 
@@ -663,6 +650,8 @@ test('projects protected rows once per render and reuses that snapshot for copy'
   let rowCalls = 0;
   const protection = {
     mode: 'encrypted',
+    rules: { v: 'user' },
+    info: { mode: 'encrypted', keyId: 'test', fields: { v: 'user' } },
     withMode: () => protection,
     parameters: (parameters) => parameters,
     row: (row) => {
@@ -670,34 +659,33 @@ test('projects protected rows once per render and reuses that snapshot for copy'
       return { ...row, v: `encrypted:${row.v}` };
     },
   };
-  const { panel, html } = renderPanel(resultOf(['a', 'b', 'c']), { protection });
+  const { panel, html } = renderPanel(resultOf(['a', 'b', 'c']), { protection, copyMode: 'origin' });
 
   assert.equal(rowCalls, 3, 'rendering projects each row exactly once');
   assert.match(html, /id="visible-count">3<\/span> 行/);
-  await panel.copyToClipboard();
+  await panel.copyResult();
   assert.equal(clipboard.text, 'v\r\nencrypted:a\r\nencrypted:b\r\nencrypted:c');
   assert.equal(rowCalls, 3, 'copy reuses the rendered projection');
 });
 
-test('feedback actions block overlapping toolbar actions and release them after cancellation or failure', () => {
+test('copy and export block overlapping toolbar actions and release them after cancellation or failure', () => {
   const view = openPanel(renderPanel(resultOf([1])).html);
-  const copy = view.button('button[data-action="copy-feedback"]');
-  const save = view.button('button[data-action="save-feedback"]');
+  const copy = view.button('#copy-output');
+  const exportButton = view.button('#export-output');
   copy.dispatch('click');
-  assert.equal(view.messages[0].type, 'copy-feedback');
-  assert.equal(save.disabled, true);
-  assert.equal(view.button('button[data-export="default"]').disabled, true);
-  view.receive({ type: 'actionCancelled', action: 'feedback' });
+  assert.deepEqual({ ...view.messages[0] }, { type: 'copy', tab: 'result' });
+  assert.equal(exportButton.disabled, true);
+  view.receive({ type: 'actionCancelled', action: 'copy', tab: 'result' });
   assert.equal(copy.disabled, false);
-  assert.equal(save.disabled, false);
+  assert.equal(exportButton.disabled, false);
   assert.equal(view.document.getElementById('action-status').textContent, '已取消。');
-  save.dispatch('click');
-  assert.equal(view.messages[1].type, 'save-feedback');
-  view.receive({ type: 'actionFailed', action: 'feedback' });
+  exportButton.dispatch('click');
+  assert.deepEqual({ ...view.messages[1] }, { type: 'export', tab: 'result', format: 'tsv' });
+  view.receive({ type: 'actionFailed', action: 'export', tab: 'result' });
   assert.equal(copy.disabled, false);
-  assert.equal(save.disabled, false);
+  assert.equal(exportButton.disabled, false);
   assert.equal(view.document.getElementById('action-status').textContent, '操作未完成，详情请查看通知。');
-  assert.equal(save.textContent, save.dataset.defaultLabel);
+  assert.equal(exportButton.textContent, '导出 TSV');
 });
 
 test('renders safely escaped sort attributes and cell text', () => {
@@ -738,11 +726,57 @@ test('encrypted result HTML, sort attributes and clipboard contain no protected 
   const { createProtection, setDataMode } = require('../out/dataProtection');
   const key = createDataKey(); const protection = createProtection({ v: 'user', id: 'user' }, [], key, () => key, 'encrypted');
   setDataMode('encrypted');
-  const { panel, html } = renderPanel(resultOf(['private-id-001']), { protection, parameters: { id: 'private-id-param' } });
+  const { panel, html } = renderPanel(resultOf(['private-id-001']), {
+    protection, parameters: { id: 'private-id-param' }, copyMode: 'origin',
+  });
   assert.ok(!html.includes('private-id-')); assert.match(html, /data-sort-value="enc:v1:/);
-  await panel.copyToClipboard(); assert.ok(!clipboard.text.includes('private-id-'));
+  await panel.copyResult(); assert.ok(!clipboard.text.includes('private-id-'));
   setDataMode('plain'); panel.render();
   assert.equal(panel.outputRows[0].v, 'private-id-001');
-  await panel.copyToClipboard(); assert.ok(clipboard.text.includes('private-id-001'));
+  await panel.copyResult(); assert.ok(clipboard.text.includes('private-id-001'));
   setDataMode('encrypted');
+});
+
+test('unified output panel exposes result and plan tabs with only copy and export', async () => {
+  const { panel, html } = renderPanel(resultOf(['one', 'two']));
+  panel.setPlan({
+    name: '订单汇总',
+    source: 'D:/queries/orders.sql:12-24',
+    sourcePath: 'D:/queries/orders.sql',
+    startLine: 12,
+    endLine: 24,
+    saved: true,
+    copyMode: 'extra',
+    connectionName: '分析 Doris',
+    databaseType: 'Doris',
+    parameters: { biz_date: '2026-10-30' },
+    sql: 'SELECT * FROM orders',
+    explainSql: 'EXPLAIN VERBOSE\nSELECT * FROM orders',
+    plan: 'PLAN FRAGMENT 0\n  TABLE: orders',
+    generatedAt: '2026-11-10T00:00:00.000Z',
+    durationMs: 42,
+  }, { scheme: 'file', fsPath: 'D:/queries/orders.sql', toString: () => 'file:///D:/queries/orders.sql' }, 'extra');
+  panel.activeTab = 'plan';
+  panel.render();
+  const output = panel.panel.webview.html;
+  assert.match(output, /data-tab="result"/);
+  assert.match(output, /data-tab="plan"/);
+  assert.match(output, /id="copy-output"/);
+  assert.match(output, /id="export-output"/);
+  assert.equal((output.match(/id="copy-output"/g) ?? []).length, 1);
+  assert.doesNotMatch(output, /copy-feedback|save-feedback|more-actions|复制 AI 反馈/);
+
+  const view = openPanel(output);
+  const planTab = view.button('.output-tab[data-tab="plan"]');
+  assert.equal(view.document.querySelector('.output-pane[data-tab="plan"]').hidden, false);
+  assert.equal(view.document.querySelector('.output-pane[data-tab="result"]').hidden, true);
+  planTab.dispatch('click');
+  assert.equal(view.document.querySelector('.output-pane[data-tab="plan"]').hidden, false);
+  assert.equal(view.button('#copy-hint').textContent, '复制：extra（引用 + 参数 + 耗时 + 内容）');
+
+  clipboard.text = undefined;
+  await panel.copyPlan();
+  assert.match(clipboard.text, /\[orders\.sql:12-24\]/);
+  assert.match(clipboard.text, /计划:\nPLAN FRAGMENT 0/);
+  assert.doesNotMatch(clipboard.text, /EXPLAIN VERBOSE/);
 });

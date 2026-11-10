@@ -1,4 +1,5 @@
 import type { DatabaseType } from './connectionSecurity';
+import type { CopyMode } from './copyMode';
 import { displayValue } from './exports';
 import { findSqlStatementRanges, type Row } from './queryResults';
 
@@ -12,6 +13,12 @@ export interface PlanSnapshot {
   explainSql: string;
   plan: string;
   generatedAt: string;
+  sourcePath?: string;
+  startLine?: number;
+  endLine?: number;
+  saved?: boolean;
+  copyMode?: CopyMode;
+  durationMs?: number;
 }
 
 export function buildExplainSql(sql: string, type: DatabaseType): string {

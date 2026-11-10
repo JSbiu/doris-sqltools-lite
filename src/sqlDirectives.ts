@@ -1,5 +1,6 @@
 import { findSqlStatementRanges, type SqlStatementRange } from './queryResults';
 import { isParameterName } from './sqlParameters';
+import { DEFAULT_COPY_MODE, parseCopyMode, type CopyMode } from './copyMode';
 
 export interface StatementContext {
   sql: string;
@@ -8,6 +9,7 @@ export interface StatementContext {
   output?: string;
   encryption?: Readonly<Record<string, string>>;
   requiredEncryption?: readonly string[];
+  copy: CopyMode;
   parameters: Record<string, string>;
   line: number;
   endLine: number;
@@ -22,6 +24,7 @@ interface Header {
   output?: string;
   defaultEncryption?: Record<string, string>;
   encryption?: Record<string, string>;
+  copy?: CopyMode;
   batchScript?: string;
   batchSteps?: string[];
   batchInit?: string[];
@@ -58,7 +61,7 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
       const match = /^--\s*@([a-z-]+):\s*(.*)$/.exec(comment);
       if (!match) throw new Error(`SQL 注释格式错误：${comment}`);
       const [, key, value] = match;
-      if (!['default-connection', 'default-param', 'default-encrypt', 'connection', 'param', 'name', 'output', 'encrypt',
+      if (!['default-connection', 'default-param', 'default-encrypt', 'connection', 'param', 'name', 'output', 'encrypt', 'copy',
         'batch-script', 'batch-steps', 'batch-init'].includes(key)) {
         throw new Error(`未知 SQL 注释 @${key}。`);
       }
@@ -83,6 +86,7 @@ function readHeader(sql: string, fileDefaults: boolean): Header {
         if (key === 'default-connection') header.defaultConnection = value.trim();
         if (key === 'default-encrypt') header.defaultEncryption = encryptionFields(value, key);
         if (key === 'encrypt') header.encryption = encryptionFields(value, key);
+        if (key === 'copy') header.copy = parseCopyMode(value);
         if (key === 'batch-script') header.batchScript = value.trim();
         if (key === 'batch-steps') header.batchSteps = batchNames(value, key);
         if (key === 'batch-init') header.batchInit = batchNames(value, key);
@@ -187,6 +191,7 @@ export function resolveStatementContext(
       ]),
       requiredEncryption: Object.keys(header.encryption ?? {}),
     } : {}),
+    copy: header.copy ?? DEFAULT_COPY_MODE,
     parameters: { ...first.defaults, ...header.parameters },
     line: document.slice(0, end > start ? start : range.start).split('\n').length,
     endLine: document.slice(0, Math.max(0, (end > start ? end : range.end) - 1)).split('\n').length,

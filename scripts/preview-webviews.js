@@ -157,46 +157,57 @@ function renderParameterPreview() {
 }
 
 function renderPlanPreview() {
-  return withVscode(() => {
-    const { openPlanPanel } = require(path.join(outputRoot, 'planPanel.js'));
-    let captured = '';
-    const originalCreate = vscodeStub.window.createWebviewPanel;
-    vscodeStub.window.createWebviewPanel = (_viewType, title) => {
-      const panel = {
-        title,
-        viewColumn: vscodeStub.ViewColumn.Beside,
-        webview: {
-          get html() { return captured; },
-          set html(value) { captured = value; },
-          postMessage: async () => true,
-          onDidReceiveMessage: () => noopDisposable,
-        },
-        reveal() {},
-        onDidDispose() {},
-        dispose() {},
-      };
-      return panel;
-    };
-    try {
-      openPlanPanel({
-        name: '订单日汇总',
-        source: 'D:\\queries\\orders.sql:12-24',
-        connectionName: '分析 Doris',
-        databaseType: 'Doris',
-        parameters: { biz_date: '2026-10-30' },
-        sql: "SELECT dt, COUNT(*) FROM orders WHERE dt = '2026-10-30' GROUP BY dt",
-        explainSql: 'EXPLAIN VERBOSE\nSELECT dt, COUNT(*) FROM orders GROUP BY dt',
-        plan:
-          'PLAN FRAGMENT 0\n  OUTPUT EXPRS: dt | count(*)\n  PARTITION: HASH_PARTITIONED\n\n' +
-          '  1:AGGREGATE (update finalize)\n     |  output: count(*)\n     |  group by: dt\n\n' +
-          '  0:OlapScanNode\n     TABLE: orders\n     PREDICATES: dt = \'2026-10-30\'\n     PREAGGREGATION: ON\n',
-        generatedAt: '2026-10-30T08:00:00.000Z',
-      }, vscodeStub.Uri.file('D:\\queries\\orders.sql'));
-    } finally {
-      vscodeStub.window.createWebviewPanel = originalCreate;
-    }
-    return captured;
+  const extensionPath = path.join(outputRoot, 'extension.js');
+  const source = `${fs.readFileSync(extensionPath, 'utf8')}\nmodule.exports.__preview = { ResultPanel };\n`;
+  const module = { exports: {} };
+  const context = {
+    module,
+    exports: module.exports,
+    require: (id) => (id === 'vscode' ? vscodeStub : extensionRequire(id)),
+    __filename: extensionPath,
+    __dirname: path.dirname(extensionPath),
+    console, process, Buffer, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate,
+    URL, TextEncoder, TextDecoder,
+  };
+  context.global = context;
+  vm.createContext(context);
+  withVscode(() => vm.runInContext(source, context, { filename: extensionPath }));
+
+  let captured = '';
+  const panel = new context.module.exports.__preview.ResultPanel({
+    title: '',
+    webview: {
+      get html() { return captured; },
+      set html(value) { captured = value; },
+      postMessage: async () => true,
+      onDidReceiveMessage: () => noopDisposable,
+    },
+    reveal() {},
+    onDidDispose() {},
   });
+  panel.setPlan({
+    name: '订单日汇总',
+    source: 'D:\\queries\\orders.sql:12-24',
+    sourcePath: 'D:\\queries\\orders.sql',
+    startLine: 12,
+    endLine: 24,
+    saved: true,
+    copyMode: 'extra',
+    connectionName: '分析 Doris',
+    databaseType: 'Doris',
+    parameters: { biz_date: '2026-10-30' },
+    sql: "SELECT dt, COUNT(*) FROM orders WHERE dt = '2026-10-30' GROUP BY dt",
+    explainSql: 'EXPLAIN VERBOSE\nSELECT dt, COUNT(*) FROM orders GROUP BY dt',
+    plan:
+      'PLAN FRAGMENT 0\n  OUTPUT EXPRS: dt | count(*)\n  PARTITION: HASH_PARTITIONED\n\n' +
+      '  1:AGGREGATE (update finalize)\n     |  output: count(*)\n     |  group by: dt\n\n' +
+      '  0:OlapScanNode\n     TABLE: orders\n     PREDICATES: dt = \'2026-10-30\'\n     PREAGGREGATION: ON\n',
+    generatedAt: '2026-10-30T08:00:00.000Z',
+    durationMs: 42,
+  }, vscodeStub.Uri.file('D:\\queries\\orders.sql'), 'extra');
+  panel.activeTab = 'plan';
+  panel.render();
+  return captured;
 }
 
 function renderResultPreview() {
@@ -258,7 +269,11 @@ function renderResultPreview() {
     maxRows: 5,
     readComplete: true,
     parameters: { biz_date: '2026-10-30' },
+    copyMode: 'extra',
+    source: { path: 'D:\\queries\\orders.sql', startLine: 12, endLine: 24, saved: true },
+    sql: "SELECT * FROM orders WHERE dt = '2026-10-30'",
   });
+  panel.render();
   return captured;
 }
 

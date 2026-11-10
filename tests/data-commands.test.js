@@ -23,6 +23,7 @@ function fixture(t) {
     commands: { registerCommand(id, callback) { commands.set(id, callback); return disposable; } },
     window: {
       createStatusBarItem: () => status,
+      setStatusBarMessage: (text) => { status.text = text; return disposable; },
       showSaveDialog: async () => choices.target,
       showOpenDialog: async () => choices.target && [choices.target],
       showQuickPick: async () => choices.output,

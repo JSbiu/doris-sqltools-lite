@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { open, readFile, unlink } from 'node:fs/promises';
 import type { DataKeys } from './dataKeys';
 import { decryptValue } from './fieldEncryption';
-import { getDataMode, onDataModeChange, setDataMode } from './dataProtection';
+import { getDataMode, setDataMode } from './dataProtection';
 
 function decryptedText(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -14,22 +14,17 @@ function decryptedText(value: unknown): string {
 }
 
 export function registerDataCommands(context: vscode.ExtensionContext, keys: DataKeys): void {
-  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-  status.name = '字段输出模式';
-  status.command = 'dorisSqlLite.toggleDataMode';
-  const refresh = (): void => {
-    status.text = getDataMode() === 'encrypted' ? '$(lock) 字段密文' : '$(unlock) 字段原文';
-    status.tooltip = '切换当前窗口结果、参数、复制和导出的字段保护输出。只有 SQL 注释声明的字段参与转换。';
-    status.show();
-  };
-  refresh();
   const register = (name: string, action: () => Promise<void> | void): vscode.Disposable =>
     vscode.commands.registerCommand(`dorisSqlLite.${name}`, async () => {
       try { await action(); }
       catch { void vscode.window.showErrorMessage('字段加密操作未完成，请核对密钥文件、密文格式和本地文件权限；未输出密钥或原值。'); }
     });
-  context.subscriptions.push(status, onDataModeChange(refresh),
-    register('toggleDataMode', () => setDataMode(getDataMode() === 'encrypted' ? 'plain' : 'encrypted')),
+  context.subscriptions.push(
+    register('toggleDataMode', () => {
+      const next = getDataMode() === 'encrypted' ? 'plain' : 'encrypted';
+      setDataMode(next);
+      void vscode.window.setStatusBarMessage(next === 'encrypted' ? '字段输出：字段密文' : '字段输出：字段原文', 2000);
+    }),
     register('exportDataKeys', async () => {
       const target = await vscode.window.showSaveDialog({
         title: '导出数据密钥：文件包含敏感密钥，请自行妥善保管',

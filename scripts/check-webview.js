@@ -1,6 +1,6 @@
 'use strict';
 
-// The result panel and the connection form build their HTML inside TypeScript
+// The output panel and the connection form build their HTML inside TypeScript
 // template literals, so a broken inline <script> or a selector that no longer
 // matches anything only surfaces at runtime, inside a panel. This script
 // re-checks the failure modes that have actually bitten us, straight from the
@@ -21,10 +21,9 @@ const vm = require('node:vm');
 const projectRoot = path.resolve(__dirname, '..');
 
 const defaultTargets = [
-  { label: 'result panel', file: 'src/extension.ts' },
+  { label: 'output panel', file: 'src/extension.ts' },
   { label: 'connection form', file: 'src/connectionForm.ts' },
   { label: 'parameter form', file: 'src/parameterForm.ts' },
-  { label: 'execution plan', file: 'src/planPanel.ts' },
 ];
 
 const scriptBlock = /<script\b[^>]*nonce="\$\{([A-Za-z0-9_$]+)\}"[^>]*>([\s\S]*?)<\/script>/g;

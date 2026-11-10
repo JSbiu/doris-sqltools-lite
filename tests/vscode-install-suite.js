@@ -25,7 +25,7 @@ async function run() {
     .filter((command) => command.startsWith('dorisSqlLite.'))
     .sort();
   assert.deepEqual(registered, declared, 'installed VSIX commands differ from its manifest');
-  assert.equal(declared.length, 22);
+  assert.equal(declared.length, 21);
 
   const configuration = vscode.workspace.getConfiguration('dorisSqlLite');
   assert.equal(configuration.inspect('maxResultRows')?.defaultValue, 1000);

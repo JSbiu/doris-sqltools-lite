@@ -1,8 +1,8 @@
 {
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
-  "description": "在 VS Code 中执行 MySQL、Apache Doris 与 Spark Thrift SQL，查看执行计划，流式导出完整 TSV，并生成可核对的 AI 反馈与字段密文。",
-  "version": "0.9.11",
+  "description": "在 VS Code 中执行 MySQL、Apache Doris 与 Spark Thrift SQL，在统一输出面板查看结果与执行计划，复制 AI 引用或原始 TSV，并流式导出完整结果。",
+  "version": "0.9.12",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -72,12 +72,8 @@
         "icon": "$(run-all)"
       },
       {
-        "command": "dorisSqlLite.copyLastFeedback",
-        "title": "Doris SQLTools Lite: 复制最近一次执行反馈"
-      },
-      {
-        "command": "dorisSqlLite.saveLastFeedback",
-        "title": "Doris SQLTools Lite: 保存最近一次执行反馈"
+        "command": "dorisSqlLite.copySqlReference",
+        "title": "Doris SQLTools Lite: 复制 SQL 引用"
       },
       {
         "command": "dorisSqlLite.toggleDataMode",
@@ -169,16 +165,6 @@
     "menus": {
       "editor/context": [
         {
-          "command": "dorisSqlLite.decryptSelectedValue",
-          "when": "editorHasSelection",
-          "group": "navigation@4"
-        },
-        {
-          "command": "dorisSqlLite.resetFileSessions",
-          "when": "editorTextFocus && resourceLangId == sql",
-          "group": "navigation@3"
-        },
-        {
           "command": "dorisSqlLite.explainQuery",
           "when": "editorTextFocus && resourceLangId == sql",
           "group": "navigation@1.5"
@@ -194,14 +180,9 @@
           "group": "navigation@1"
         },
         {
-          "command": "dorisSqlLite.runQueryToTsv",
+          "command": "dorisSqlLite.copySqlReference",
           "when": "editorTextFocus && resourceLangId == sql",
-          "group": "navigation@1.7"
-        },
-        {
-          "command": "dorisSqlLite.runBatch",
-          "when": "editorTextFocus && resourceLangId == sql",
-          "group": "navigation@1.8"
+          "group": "navigation@1.2"
         },
         {
           "command": "dorisSqlLite.cancelQuery",

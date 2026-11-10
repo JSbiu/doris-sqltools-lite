@@ -119,12 +119,22 @@ test('file batch directives are stripped in ordinary execution and cannot appear
 test('statements without encryption directives keep the legacy context shape', () => {
   assert.deepEqual(resolveStatementContext('SELECT 1;', 0), {
     sql: 'SELECT 1;', name: undefined, connection: undefined, output: undefined,
-    parameters: {}, line: 1, endLine: 1,
+    copy: 'extra', parameters: {}, line: 1, endLine: 1,
   });
   const sql = '-- @encrypt: {"user_id":"user"}\nSELECT 1;\nSELECT 2;';
   const second = resolveStatementContext(sql, sql.length);
   assert.equal(Object.hasOwn(second, 'encryption'), false);
   assert.equal(Object.hasOwn(second, 'requiredEncryption'), false);
+});
+
+test('@copy selects the enrichment mode and defaults to extra', () => {
+  const sql = '-- @copy: origin\nSELECT 1;\n-- @copy: extra\nSELECT 2;';
+  assert.equal(resolveStatementContext(sql, sql.indexOf('SELECT')).copy, 'origin');
+  assert.equal(resolveStatementContext(sql, sql.lastIndexOf('SELECT')).copy, 'extra');
+  assert.equal(resolveStatementContext('SELECT 3;', 0).copy, 'extra');
+  for (const value of ['', 'mini', 'full', 'origin,extra']) {
+    assert.throws(() => resolveStatementContext(`-- @copy: ${value}\nSELECT 1;`, 0), /@copy/);
+  }
 });
 
 test('encryption defaults merge with local domains without leaking local fields to other SQL', () => {
