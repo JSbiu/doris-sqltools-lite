@@ -101,7 +101,6 @@ export function buildResultCopy(input: ResultCopyInput): string {
       : `结果: 已加载 ${input.rows.length} 行，结果未读完`
     : `结果: ${input.rows.length} 行 × ${input.columns.length} 列（完整）`;
   const lines = [...contextLines(input.context), resultLine];
-  if (input.columns.length > 0) lines.push(`列: ${input.columns.join(', ')}`);
   lines.push('', text);
   return lines.join('\n');
 }

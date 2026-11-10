@@ -2,7 +2,7 @@
 
 面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，结果和执行计划进入同一个输出面板；复制只分“原始内容”和“带上下文”，导出只负责完整产物。
 
-当前发布线：`0.9.12`，目标版本：`1.0.0`。
+当前发布线：`0.9.13`，目标版本：`1.0.0`。
 
 ## 核心能力
 
@@ -52,7 +52,7 @@ VS Code 最低版本：`1.90.0`。
 pnpm install --frozen-lockfile
 pnpm test
 pnpm run package
-code --install-extension .\doris-sqltools-lite-0.9.12.vsix --force
+code --install-extension .\doris-sqltools-lite-0.9.13.vsix --force
 ```
 
 安装后执行 `Developer: Reload Window`。用以下命令核对版本：
@@ -100,7 +100,7 @@ GROUP BY dt;
 `-- @copy: extra` 是默认值：
 
 - 计划 Tab 复制引用、引擎/连接、参数、耗时和计划正文。
-- 结果 Tab 复制引用、引擎/连接、参数、耗时、行列数和原始 TSV。
+- 结果 Tab 复制引用、引擎/连接、参数、耗时、行列数和原始 TSV；列头只由 TSV 提供，不另列字段清单。
 - SQL 不复制正文，只给文件引用，例如 `[orders.sql:12-24](D:/queries/orders.sql:12)`；Codex 点开就是 VS Code 对应行。
 
 `-- @copy: origin` 只复制当前内容：

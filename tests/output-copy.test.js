@@ -49,7 +49,8 @@ test('origin result is pure TSV and extra result adds facts without SQL body', (
   assert.match(extra, /参数: biz_date=2026-10-30/);
   assert.match(extra, /耗时: 842 ms/);
   assert.match(extra, /结果: 2 行 × 2 列（完整）/);
-  assert.match(extra, /列: id, name/);
+  assert.doesNotMatch(extra, /^列:/m);
+  assert.equal((extra.match(/id\tname/g) ?? []).length, 1, 'TSV header is the only column definition');
   assert.match(extra, /id\tname\r\n1\tA\r\n2\tB/);
   assert.doesNotMatch(extra, /SELECT \* FROM orders/);
 });
