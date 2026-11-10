@@ -776,7 +776,7 @@ test('unified output panel exposes result and plan tabs with only copy and expor
 
   clipboard.text = undefined;
   await panel.copyPlan();
-  assert.match(clipboard.text, /\[orders\.sql:12-24\]/);
+  assert.match(clipboard.text, /【D:\/queries\/orders\.sql†L12-L24】/);
   assert.match(clipboard.text, /计划:\nPLAN FRAGMENT 0/);
   assert.doesNotMatch(clipboard.text, /EXPLAIN VERBOSE/);
 });

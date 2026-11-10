@@ -2,7 +2,7 @@
 
 面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，结果和执行计划进入同一个输出面板；复制只分“原始内容”和“带上下文”，导出只负责完整产物。
 
-当前发布线：`0.9.13`，目标版本：`1.0.0`。
+当前发布线：`0.9.14`，目标版本：`1.0.0`。
 
 ## 核心能力
 
@@ -52,7 +52,7 @@ VS Code 最低版本：`1.90.0`。
 pnpm install --frozen-lockfile
 pnpm test
 pnpm run package
-code --install-extension .\doris-sqltools-lite-0.9.13.vsix --force
+code --install-extension .\doris-sqltools-lite-0.9.14.vsix --force
 ```
 
 安装后执行 `Developer: Reload Window`。用以下命令核对版本：
@@ -101,7 +101,7 @@ GROUP BY dt;
 
 - 计划 Tab 复制引用、引擎/连接、参数、耗时和计划正文。
 - 结果 Tab 复制引用、引擎/连接、参数、耗时、行列数和原始 TSV；列头只由 TSV 提供，不另列字段清单。
-- SQL 不复制正文，只给文件引用，例如 `[orders.sql:12-24](D:/queries/orders.sql:12)`；Codex 点开就是 VS Code 对应行。
+- SQL 不复制正文，只给 Codex 文件引用，例如 `【D:/queries/orders.sql†L12-L24】`；粘贴后显示为可点击文件，右键可用 VS Code 打开到对应行。
 
 `-- @copy: origin` 只复制当前内容：
 
@@ -201,7 +201,7 @@ SELECT * FROM orders WHERE dt = '2026-10-30';
 - `extra`：引用链接、引擎/连接、实际参数、耗时、计划正文或结果摘要与 TSV。
 - `origin`：只复制当前 Tab 的原始内容，适合贴表格或交给其他工具。
 
-SQL 正文不进入复制包；`[orders.sql:12-24](D:/queries/orders.sql:12)` 指向源文件，AI 按行号读取。结果和计划 `extra` 对未保存 SQL 只标“未保存 SQL”，不复制正文；显式“复制 SQL 引用”或错误引用才回退为带语言标记的原始 SQL 模板。计划请求、审核清单和固定提示语不重复复制；计划审核要求由 skill 维护。
+SQL 正文不进入复制包；`【D:/queries/orders.sql†L12-L24】` 是 Codex 可点击的源文件引用，AI 按行号读取。结果和计划 `extra` 对未保存 SQL 只标“未保存 SQL”，不复制正文；显式“复制 SQL 引用”或错误引用才回退为带语言标记的原始 SQL 模板。计划请求、审核清单和固定提示语不重复复制；计划审核要求由 skill 维护。
 受保护参数同样按当前字段模式输出：字段密文模式下 `extra` 只带密文，字段原文模式下才带明文。
 
 ## 开发

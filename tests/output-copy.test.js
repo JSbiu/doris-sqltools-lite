@@ -19,9 +19,9 @@ const context = {
   sql: 'SELECT * FROM orders',
 };
 
-test('saved SQL uses a Codex-compatible file reference and no SQL body', () => {
+test('saved SQL uses a clickable Codex file reference and no SQL body', () => {
   const reference = buildSqlReference(context);
-  assert.match(reference, /\[orders\.sql:12-24\]\(D:\/queries\/orders\.sql:12\)/);
+  assert.equal(reference, '订单汇总 · Doris\n【D:/queries/orders.sql†L12-L24】');
   assert.doesNotMatch(reference, /SELECT/);
 });
 
@@ -45,7 +45,7 @@ test('origin result is pure TSV and extra result adds facts without SQL body', (
     mode: 'extra', rows, columns, context, totalRows: 2, readComplete: true, truncated: false,
   });
   assert.match(extra, /订单汇总 · Doris · 分析 Doris/);
-  assert.match(extra, /\[orders\.sql:12-24\]/);
+  assert.match(extra, /【D:\/queries\/orders\.sql†L12-L24】/);
   assert.match(extra, /参数: biz_date=2026-10-30/);
   assert.match(extra, /耗时: 842 ms/);
   assert.match(extra, /结果: 2 行 × 2 列（完整）/);
@@ -59,7 +59,7 @@ test('plan origin is pure plan text and extra carries facts, not the explain req
   const plan = 'PLAN FRAGMENT 0\n  TABLE: orders';
   assert.equal(buildPlanCopy({ mode: 'origin', plan, context }), plan);
   const extra = buildPlanCopy({ mode: 'extra', plan, context });
-  assert.match(extra, /\[orders\.sql:12-24\]/);
+  assert.match(extra, /【D:\/queries\/orders\.sql†L12-L24】/);
   assert.match(extra, /计划:\nPLAN FRAGMENT 0/);
   assert.doesNotMatch(extra, /EXPLAIN VERBOSE/);
   assert.doesNotMatch(extra, /审核要求/);
@@ -68,7 +68,7 @@ test('plan origin is pure plan text and extra carries facts, not the explain req
 
 test('error copy contains the reference and error without SQL body', () => {
   const text = buildErrorCopy({ context, error: 'Unknown column x' });
-  assert.match(text, /\[orders\.sql:12-24\]/);
+  assert.match(text, /【D:\/queries\/orders\.sql†L12-L24】/);
   assert.match(text, /错误: Unknown column x/);
   assert.doesNotMatch(text, /SELECT \* FROM orders/);
 });

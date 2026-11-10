@@ -53,9 +53,10 @@ export function formatSourceReference(source: OutputSource): string {
   const range = source.startLine === source.endLine
     ? `${source.startLine}` : `${source.startLine}-${source.endLine}`;
   if (!source.saved || !source.path) return `未保存 SQL · L${range}`;
-  const fileName = source.path.split(/[\\/]/).pop() || source.path;
   const target = source.path.replace(/\\/g, '/');
-  return `[${fileName.replace(/\]/g, '\\]')}:${range}](${target}:${source.startLine})`;
+  const citationRange = source.startLine === source.endLine
+    ? `L${source.startLine}` : `L${source.startLine}-L${source.endLine}`;
+  return `【${target}†${citationRange}】`;
 }
 
 function contextLines(context: OutputCopyContext): string[] {

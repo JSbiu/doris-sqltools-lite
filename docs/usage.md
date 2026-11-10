@@ -330,7 +330,7 @@ ConvertTo-Json -InputObject $batches -Compress
 - `@copy: extra`（默认）：引用链接 + 引擎/连接 + 实际参数 + 耗时 + 行列数/保护字段 + 计划正文或 TSV。结果只保留 TSV 表头作为列定义，不重复复制 `列:` 清单。
 - `@copy: origin`：只复制计划正文或 TSV，适合贴表格和交给其他工具。
 
-SQL 正文不进入复制包，只给 Markdown 文件引用，例如 `[orders.sql:12-24](D:/queries/orders.sql:12)`。结果和计划 `extra` 对未保存 SQL 只标“未保存 SQL”，不复制正文；显式“复制 SQL 引用”或错误引用才回退为带语言标记的原始 SQL 模板。计划请求和审核清单不重复复制。AI 反馈 JSON 不再出现在 1.0 的输出界面。
+SQL 正文不进入复制包，只给 Codex 文件引用，例如 `【D:/queries/orders.sql†L12-L24】`。粘贴到 Codex 后显示为可点击文件，右键可用 VS Code 打开到对应行。结果和计划 `extra` 对未保存 SQL 只标“未保存 SQL”，不复制正文；显式“复制 SQL 引用”或错误引用才回退为带语言标记的原始 SQL 模板。计划请求和审核清单不重复复制。AI 反馈 JSON 不再出现在 1.0 的输出界面。
 受保护参数也按当前字段模式输出：字段密文模式下 `extra` 只带密文，字段原文模式下才带明文。
 
 ## 常见问题
