@@ -156,7 +156,7 @@ function renderParameterPreview() {
   });
 }
 
-function renderPlanPreview() {
+function createOutputPreview() {
   const extensionPath = path.join(outputRoot, 'extension.js');
   const source = `${fs.readFileSync(extensionPath, 'utf8')}\nmodule.exports.__preview = { ResultPanel };\n`;
   const module = { exports: {} };
@@ -185,6 +185,15 @@ function renderPlanPreview() {
     reveal() {},
     onDidDispose() {},
   });
+  return {
+    panel,
+    html: () => captured,
+  };
+}
+
+function renderPlanPreview() {
+  const preview = createOutputPreview();
+  const { panel } = preview;
   panel.setPlan({
     name: '订单日汇总',
     source: 'D:\\queries\\orders.sql:12-24',
@@ -207,47 +216,12 @@ function renderPlanPreview() {
   }, vscodeStub.Uri.file('D:\\queries\\orders.sql'), 'extra');
   panel.activeTab = 'plan';
   panel.render();
-  return captured;
+  return preview.html();
 }
 
 function renderResultPreview() {
-  const extensionPath = path.join(outputRoot, 'extension.js');
-  const source = `${fs.readFileSync(extensionPath, 'utf8')}\nmodule.exports.__preview = { ResultPanel };\n`;
-  const module = { exports: {} };
-  const context = {
-    module,
-    exports: module.exports,
-    require: (id) => (id === 'vscode' ? vscodeStub : extensionRequire(id)),
-    __filename: extensionPath,
-    __dirname: path.dirname(extensionPath),
-    console,
-    process,
-    Buffer,
-    setTimeout,
-    clearTimeout,
-    setInterval,
-    clearInterval,
-    setImmediate,
-    URL,
-    TextEncoder,
-    TextDecoder,
-  };
-  context.global = context;
-  vm.createContext(context);
-  withVscode(() => vm.runInContext(source, context, { filename: extensionPath }));
-
-  let captured = '';
-  const panel = new context.module.exports.__preview.ResultPanel({
-    title: '',
-    webview: {
-      get html() { return captured; },
-      set html(value) { captured = value; },
-      postMessage: async () => true,
-      onDidReceiveMessage: () => noopDisposable,
-    },
-    reveal() {},
-    onDidDispose() {},
-  });
+  const preview = createOutputPreview();
+  const { panel } = preview;
   panel.update({
     rows: [
       { order_id: '100031', dt: '2026-10-30', amount: 128.5, status: 'paid' },
@@ -274,7 +248,42 @@ function renderResultPreview() {
     sql: "SELECT * FROM orders WHERE dt = '2026-10-30'",
   });
   panel.render();
-  return captured;
+  return preview.html();
+}
+
+function renderErrorPreview() {
+  const preview = createOutputPreview();
+  const { panel } = preview;
+  const message = [
+    'org.apache.hive.service.cli.HiveSQLException: Error running query: org.apache.spark.SparkException: Job aborted due to stage failure',
+    'Task 598 in stage 12.0 failed 4 times, most recent failure: Lost task 598.3 in stage 12.0 (TID 587) (192.168.170.5 executor 2)',
+    'org.apache.hadoop.hive.ql.metadata.HiveException: Unable to execute method public java.lang.Long com.example.udf.DecodeId.evaluate(java.lang.String) with arguments {0}',
+    'For input string: ""',
+    ...Array.from(
+      { length: 36 },
+      (_, index) => `  at org.apache.spark.sql.execution.FilterExec.frame${index + 1}(basicPhysicalOperators.scala:${275 + index})`,
+    ),
+  ].join('\n');
+  panel.error = {
+    label: '「订单汇总」执行失败，耗时 1.2 s',
+    message,
+    copyMode: 'extra',
+    context: {
+      name: '订单汇总',
+      connectionName: 'Spark数仓',
+      databaseType: 'Spark',
+      database: 'analytics',
+      parameters: { biz_date: '2026-11-11' },
+      durationMs: 1200,
+      generatedAt: '2026-11-11T03:20:00.000Z',
+      source: { path: 'D:\\queries\\orders.sql', startLine: 12, endLine: 24, saved: true },
+      sql: 'SELECT biz_date, COUNT(*) FROM orders GROUP BY biz_date',
+    },
+    sourceUri: vscodeStub.Uri.file('D:\\queries\\orders.sql'),
+  };
+  panel.activeTab = 'error';
+  panel.render();
+  return preview.html();
 }
 
 const PREVIEW_PALETTE = `
@@ -323,6 +332,7 @@ const previews = {
   parameters: withPalette(renderParameterPreview()),
   plan: withPalette(renderPlanPreview()),
   results: withPalette(renderResultPreview()),
+  error: withPalette(renderErrorPreview()),
 };
 
 const files = {};

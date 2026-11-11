@@ -104,7 +104,7 @@
 ```json
 {
   "schemaVersion": 1,
-  "extensionVersion": "0.9.14",
+  "extensionVersion": "0.9.15",
   "name": "订单明细",
   "connectionName": "分析 Doris",
   "databaseType": "Doris",

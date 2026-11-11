@@ -224,6 +224,14 @@ interface PlanOutput {
   protection?: ProtectionProjection;
 }
 
+interface ErrorOutput {
+  label: string;
+  message: string;
+  copyMode: CopyMode;
+  context: OutputCopyContext;
+  sourceUri: vscode.Uri;
+}
+
 function sameOutputSource(left: OutputSource | undefined, right: OutputSource | undefined): boolean {
   if (!left || !right) return left === right;
   return left.path === right.path
@@ -353,8 +361,9 @@ const MAX_CACHED_CLIPBOARD_CHARS = 8 * 1024 * 1024;
 class ResultPanel {
   private static current: ResultPanel | undefined;
   private plan?: PlanOutput;
+  private error?: ErrorOutput;
   private hasResult = false;
-  private activeTab: 'result' | 'plan' = 'result';
+  private activeTab: 'result' | 'plan' | 'error' = 'result';
   private result: QueryResultView = {
     rows: [],
     columns: [],
@@ -387,7 +396,17 @@ class ResultPanel {
   ): void {
     const resultPanel = ResultPanel.ensure();
     resultPanel.setPlan(snapshot, sourceUri, copyMode, protection);
+    resultPanel.error = undefined;
     resultPanel.activeTab = 'plan';
+    resultPanel.render();
+    resultPanel.panel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
+  public static openError(error: ErrorOutput): void {
+    const resultPanel = ResultPanel.ensure();
+    resultPanel.error = error;
+    resultPanel.panel.title = `查询输出 · ${error.context.name}`;
+    resultPanel.activeTab = 'error';
     resultPanel.render();
     resultPanel.panel.reveal(vscode.ViewColumn.Beside, true);
   }
@@ -410,10 +429,11 @@ class ResultPanel {
     panel.webview.onDidReceiveMessage(async (message: {
       type?: unknown; tab?: unknown; format?: unknown; chooseLocation?: unknown;
     }) => {
-      const tab = message.tab === 'plan' ? 'plan' : 'result';
+      const tab = message.tab === 'plan' ? 'plan' : message.tab === 'error' ? 'error' : 'result';
       if (message.type === 'copy') {
         try {
-          if (tab === 'plan') await resultPanel.copyPlan();
+          if (tab === 'error') await resultPanel.copyError();
+          else if (tab === 'plan') await resultPanel.copyPlan();
           else await resultPanel.copyResult();
           await panel.webview.postMessage({ type: 'actionComplete', action: 'copy', tab });
         } catch (error) {
@@ -424,8 +444,10 @@ class ResultPanel {
       }
       if (message.type === 'export') {
         try {
-          const exported = tab === 'plan'
-            ? await resultPanel.exportPlan()
+          const exported = tab === 'error'
+            ? await resultPanel.exportError()
+            : tab === 'plan'
+              ? await resultPanel.exportPlan()
             : isExportFormat(message.format)
               ? await resultPanel.export(message.format, { chooseLocation: message.chooseLocation === true })
               : false;
@@ -444,6 +466,7 @@ class ResultPanel {
   private update(result: QueryResultView, metadata: ResultPanelMetadata): void {
     this.result = result;
     this.metadata = metadata;
+    this.error = undefined;
     this.hasResult = true;
     this.panel.title = `查询输出 · ${metadata.statementName ?? metadata.connectionName}`;
     if (this.plan && !sameOutputSource(this.plan.source, metadata.source)) this.plan = undefined;
@@ -485,12 +508,18 @@ class ResultPanel {
     const scriptNonce = nonce();
     const hasResult = this.hasResult;
     const hasPlan = this.plan !== undefined;
-    if (!hasResult && !hasPlan) {
+    const hasError = this.error !== undefined;
+    if (!hasResult && !hasPlan && !hasError) {
       this.panel.webview.html = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"></head><body>执行 SQL 或查看计划后，结果会显示在这里。</body></html>';
       return;
     }
-    const activeTab = hasPlan && this.activeTab === 'plan' ? 'plan' : hasResult ? 'result' : 'plan';
+    const activeTab = this.activeTab === 'error' && hasError
+      ? 'error'
+      : hasPlan && this.activeTab === 'plan'
+        ? 'plan'
+        : hasResult ? 'result' : hasPlan ? 'plan' : 'error';
     this.activeTab = activeTab;
+    const activeError = activeTab === 'error' ? this.error : undefined;
     const projection = hasResult ? this.metadata.protection?.withMode(getDataMode()) : undefined;
     const projectedRows = hasResult && projection
       ? this.result.rows.map((row) => projection.row(row)) : this.result.rows;
@@ -499,15 +528,20 @@ class ResultPanel {
     const hasTable = hasResult && columns.length > 0;
     const resultCopyMode = this.metadata.copyMode ?? DEFAULT_COPY_MODE;
     const planCopyMode = this.plan?.copyMode ?? DEFAULT_COPY_MODE;
-    const activeCopyMode = activeTab === 'plan' ? planCopyMode : resultCopyMode;
+    const errorCopyMode = this.error?.copyMode ?? DEFAULT_COPY_MODE;
+    const activeCopyMode = activeTab === 'error' ? errorCopyMode : activeTab === 'plan' ? planCopyMode : resultCopyMode;
     const copyHint = activeCopyMode === 'origin'
       ? '复制：origin（纯内容）' : '复制：extra（引用 + 参数 + 耗时 + 内容）';
-    const exportLabel = activeTab === 'plan' ? '导出计划' : '导出 TSV';
-    const title = this.metadata.statementName ?? this.plan?.snapshot.name ?? '查询输出';
-    const connectionName = hasResult ? this.metadata.connectionName : this.plan?.snapshot.connectionName ?? '';
-    const databaseType = hasResult ? this.metadata.databaseType : this.plan?.snapshot.databaseType;
-    const database = hasResult ? this.metadata.database : undefined;
-    const durationMs = hasResult ? this.metadata.durationMs : this.plan?.snapshot.durationMs ?? 0;
+    const exportLabel = activeTab === 'error' ? '导出错误' : activeTab === 'plan' ? '导出计划' : '导出 TSV';
+    const title = activeError?.context.name
+      ?? this.metadata.statementName ?? this.plan?.snapshot.name ?? '查询输出';
+    const connectionName = activeError?.context.connectionName
+      ?? (hasResult ? this.metadata.connectionName : this.plan?.snapshot.connectionName ?? '');
+    const databaseType = activeError?.context.databaseType
+      ?? (hasResult ? this.metadata.databaseType : this.plan?.snapshot.databaseType);
+    const database = activeError?.context.database ?? (hasResult ? this.metadata.database : undefined);
+    const durationMs = activeError?.context.durationMs
+      ?? (hasResult ? this.metadata.durationMs : this.plan?.snapshot.durationMs ?? 0);
     const protection = activeTab === 'result' ? this.metadata.protection : undefined;
     const protectedFields = Object.keys(protection?.rules ?? {});
     const protectionBadge = protectedFields.length > 0
@@ -557,10 +591,22 @@ class ResultPanel {
     <pre class="code-surface plan-code">${escapeHtml(this.plan.snapshot.plan || '服务端未返回计划文本。')}</pre>
   </section>
 </section>` : '';
-    const tabs = hasResult && hasPlan
+    const errorPane = this.error ? `
+<section class="output-pane" data-tab="error" data-copy-mode="${errorCopyMode}"${activeTab === 'error' ? '' : ' hidden'}>
+  <div class="status-banner bad error-intro">${escapeHtml(this.error.label)}</div>
+  <section class="section">
+    <div class="section-header"><span class="section-title">完整错误</span><span class="section-note">面板保留完整文本；复制与导出使用当前内容</span></div>
+    <pre class="code-surface error-code" tabindex="0" aria-label="完整错误文本">${escapeHtml(this.error.message)}</pre>
+  </section>
+</section>` : '';
+    const outputTabs = [
+      hasResult ? { id: 'result', label: '结果' } : undefined,
+      hasPlan ? { id: 'plan', label: '计划' } : undefined,
+      hasError ? { id: 'error', label: '错误' } : undefined,
+    ].filter((tab): tab is { id: string; label: string } => tab !== undefined);
+    const tabs = outputTabs.length > 1
       ? `<div class="output-tabs" role="tablist">
-  <button class="output-tab" type="button" role="tab" data-tab="result" aria-selected="${activeTab === 'result'}">结果</button>
-  <button class="output-tab" type="button" role="tab" data-tab="plan" aria-selected="${activeTab === 'plan'}">计划</button>
+${outputTabs.map((tab) => `  <button class="output-tab" type="button" role="tab" data-tab="${tab.id}" aria-selected="${activeTab === tab.id}">${tab.label}</button>`).join('\n')}
 </div>` : '';
 
     this.panel.webview.html = `<!doctype html>
@@ -578,6 +624,8 @@ class ResultPanel {
     .output-pane[hidden] { display: none; }
     .plan-meta { margin-bottom: 10px; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); font-size: 11.5px; word-break: break-all; }
     .plan-code { max-height: calc(100vh - 330px); min-height: 220px; white-space: pre; }
+    .error-intro { margin-bottom: 12px; }
+    .error-code { max-height: calc(100vh - 350px); min-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
     .result-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin-bottom: 12px; padding: 10px 12px; background: var(--ui-surface); border: 1px solid var(--ui-line-soft); border-radius: var(--ui-radius); }
     .filter-wrap { position: relative; flex: 1 1 220px; max-width: 440px; }
     .filter-wrap input { padding-left: 30px; }
@@ -616,12 +664,13 @@ class ResultPanel {
       <div class="page-heading">
         <div class="eyebrow">查询输出 · ${escapeHtml(connectionName)}</div>
         <h1>${escapeHtml(title)}</h1>
-        <p class="sub">${database ? `数据库 ${escapeHtml(database)} · ` : ''}${formatDuration(durationMs)} · 结果与计划共用复制/导出</p>
+        <p class="sub">${database ? `数据库 ${escapeHtml(database)} · ` : ''}${formatDuration(durationMs)} · 结果、计划与错误共用复制/导出</p>
       </div>
       <div class="badge-row">
         ${databaseType ? `<span class="badge accent">${escapeHtml(databaseType)}</span>` : ''}
-        ${hasResult ? `<span class="badge" role="status" aria-live="polite"><span id="visible-count">${projectedRows.length}</span> 行</span>` : ''}
-        ${hasResult ? `<span class="badge">${columns.length} 列</span>` : ''}
+        ${hasResult && activeTab !== 'error' ? `<span class="badge" role="status" aria-live="polite"><span id="visible-count">${projectedRows.length}</span> 行</span>` : ''}
+        ${hasResult && activeTab !== 'error' ? `<span class="badge">${columns.length} 列</span>` : ''}
+        ${activeError ? '<span class="badge warning">失败</span>' : ''}
         ${protectionBadge}
       </div>
     </header>
@@ -634,6 +683,7 @@ class ResultPanel {
     <p id="action-status" class="status-banner action-status" role="status" aria-live="polite"></p>
     ${resultPane}
     ${planPane}
+    ${errorPane}
   </div>
   <script nonce="${scriptNonce}">
     const api = acquireVsCodeApi();
@@ -645,7 +695,7 @@ class ResultPanel {
     const panes = [...document.querySelectorAll('.output-pane')];
     let activeTab = (panes.find((pane) => !pane.hidden) || panes[0])?.dataset.tab || 'result';
     const paneFor = (tab) => document.querySelector('.output-pane[data-tab="' + tab + '"]');
-    const exportLabelFor = () => activeTab === 'plan' ? '导出计划' : '导出 TSV';
+    const exportLabelFor = () => activeTab === 'error' ? '导出错误' : activeTab === 'plan' ? '导出计划' : '导出 TSV';
     const refreshToolbar = () => {
       const mode = paneFor(activeTab)?.dataset.copyMode || 'extra';
       copyHint.textContent = mode === 'origin'
@@ -1060,6 +1110,38 @@ class ResultPanel {
       plan: this.plan.snapshot.plan,
       context,
     }));
+  }
+
+  private async copyError(): Promise<void> {
+    if (!this.error) throw new Error('当前没有可复制的错误。');
+    await vscode.env.clipboard.writeText(buildErrorCopy({
+      mode: this.error.copyMode,
+      context: this.error.context,
+      error: this.error.message,
+    }));
+  }
+
+  private async exportError(): Promise<boolean> {
+    if (!this.error) throw new Error('当前没有可导出的错误。');
+    const folder = this.error.sourceUri.scheme === 'untitled'
+      ? vscode.workspace.workspaceFolders?.[0]?.uri
+      : vscode.Uri.joinPath(this.error.sourceUri, '..');
+    const defaultUri = folder
+      ? vscode.Uri.joinPath(folder, buildExportFileName(this.error.context.name, 'txt', new Date()))
+      : undefined;
+    const target = await vscode.window.showSaveDialog({
+      title: '导出完整错误',
+      saveLabel: '导出错误',
+      filters: { '错误文本': ['txt'] },
+      defaultUri,
+    });
+    if (!target) return false;
+    if (target.toString() === this.error.sourceUri.toString()) {
+      throw new Error('不能覆盖原 SQL 文件。');
+    }
+    await vscode.workspace.fs.writeFile(target, Buffer.from(this.error.message, 'utf8'));
+    vscode.window.showInformationMessage(`已导出完整错误到 ${target.fsPath || target.toString()}。`);
+    return true;
   }
 
   private async exportPlan(): Promise<boolean> {
@@ -1805,22 +1887,30 @@ function notifyCompletion(message: string): void {
   void vscode.window.showInformationMessage(message);
 }
 
-function notifyErrorWithCopy(message: string, record?: FeedbackRecord): void {
-  const action = '复制错误引用';
-  const notice = vscode.window.showErrorMessage(message, action);
-  void notice.then(async (answer) => {
-    if (answer !== action || !record) return;
-    try {
-      const detail = record.value.error ?? message;
-      await vscode.env.clipboard.writeText(buildErrorCopy({
-        context: feedbackOutputContext(record),
-        error: record.protectRaw ? protectedMessage(detail, record.protection, true) : detail,
-      }));
-      vscode.window.setStatusBarMessage('已复制错误引用', 2000);
-    } catch (error) {
-      showError('复制错误引用失败', error);
-    }
+function showOutputError(
+  record: FeedbackRecord | undefined,
+  label: string,
+  message: string,
+  sourceUri: vscode.Uri,
+  copyMode: CopyMode,
+  database?: string,
+): void {
+  if (!record) {
+    void vscode.window.showErrorMessage(message);
+    return;
+  }
+  record.value.durationMs = Math.max(0, Date.now() - record.startedAt);
+  if (!record.value.generatedAt) record.value.generatedAt = new Date().toISOString();
+  const context = feedbackOutputContext(record);
+  if (database) context.database = database;
+  ResultPanel.openError({
+    label,
+    message,
+    copyMode,
+    context,
+    sourceUri,
   });
+  void vscode.window.showErrorMessage(`${label}，完整错误已显示在查询输出面板。`);
 }
 
 function tokenSignal(token: vscode.CancellationToken): CancelSignal {
@@ -2414,7 +2504,14 @@ async function executeQuery(
               const reason = error instanceof Error ? error.message : String(error);
               const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
               if (details) { details.status = 'failed'; details.error = formatDatabaseError(error); details.warning = cleanupReason; details.temporaryFile = fileWriter.temporaryPath; }
-              showError('执行并导出未完成', new Error(protectedMessage(`${reason}；${cleanupReason}`, protection)));
+              showOutputError(
+                feedback,
+                '执行并导出未完成',
+                protectedMessage(`${reason}；${cleanupReason}`, protection),
+                sourceUri,
+                context?.copy ?? DEFAULT_COPY_MODE,
+                profile.database,
+              );
               return;
             }
           }
@@ -2429,11 +2526,12 @@ async function executeQuery(
               details.status = 'failed'; details.error = formatDatabaseError(error);
               details.needsReview = !outputMode && details.submitted && (entry?.session?.broken === true || classifyDatabaseError(error).kind === 'network');
             }
-            if (outputMode) showError(`执行并导出失败（${profile.name}）`, new Error(protectedMessage(error, protection)));
-            else notifyErrorWithCopy(
-              `「${context?.name ?? profile.name}」执行失败，耗时 ${formatDuration(Date.now() - startedAt)}。 ${protectedMessage(error, protection)}`
-                + (details?.needsReview ? ' 已提交操作的写入结果需核对。' : ''), feedback,
-            );
+            const detail = feedback?.value.error ?? formatDatabaseError(error);
+            const message = feedback?.protectRaw ? protectedMessage(detail, protection, true) : detail;
+            const label = outputMode
+              ? `执行并导出失败（${profile.name}）`
+              : `「${context?.name ?? profile.name}」执行失败，耗时 ${formatDuration(Date.now() - startedAt)}${details?.needsReview ? ' · 已提交操作的写入结果需核对' : ''}`;
+            showOutputError(feedback, label, message, sourceUri, context?.copy ?? DEFAULT_COPY_MODE, profile.database);
           }
         }
       },

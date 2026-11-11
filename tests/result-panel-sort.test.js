@@ -780,3 +780,41 @@ test('unified output panel exposes result and plan tabs with only copy and expor
   assert.match(clipboard.text, /计划:\nPLAN FRAGMENT 0/);
   assert.doesNotMatch(clipboard.text, /EXPLAIN VERBOSE/);
 });
+
+test('error tab shows the full diagnostic and shares copy and export actions', async () => {
+  const { panel, webviewPanel } = renderPanel(resultOf(['one', 'two']));
+  const message = `SparkThrift 执行失败\n${'at org.apache.spark.example.StackFrame\n'.repeat(180)}`;
+  panel.error = {
+    label: '「订单汇总」执行失败',
+    message,
+    copyMode: 'extra',
+    context: {
+      name: '订单汇总',
+      connectionName: 'Spark数仓',
+      databaseType: 'Spark',
+      parameters: { biz_date: '2026-11-11' },
+      durationMs: 1200,
+      source: { path: 'D:/queries/orders.sql', startLine: 12, endLine: 24, saved: true },
+    },
+    sourceUri: { scheme: 'file', fsPath: 'D:/queries/orders.sql', toString: () => 'file:///D:/queries/orders.sql' },
+  };
+  panel.activeTab = 'error';
+  panel.render();
+  const html = webviewPanel.webview.html;
+  assert.match(html, /data-tab="error"/);
+  assert.match(html, /完整错误/);
+  assert.match(html, /id="copy-output"/);
+  assert.match(html, /id="export-output"/);
+  assert.ok(html.includes('at org.apache.spark.example.StackFrame'));
+
+  const view = openPanel(html);
+  assert.equal(view.document.querySelector('.output-pane[data-tab="error"]').hidden, false);
+  assert.equal(view.button('#copy-hint').textContent, '复制：extra（引用 + 参数 + 耗时 + 内容）');
+  assert.equal(view.button('#export-output').textContent, '导出错误');
+
+  clipboard.text = undefined;
+  await panel.copyError();
+  assert.match(clipboard.text, /【D:\/queries\/orders\.sql†L12-L24】/);
+  assert.match(clipboard.text, /错误: SparkThrift 执行失败/);
+  assert.ok(clipboard.text.includes(message.split('\n')[1]));
+});

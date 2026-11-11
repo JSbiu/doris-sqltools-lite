@@ -10,7 +10,7 @@ const { DocumentSessions } = require('../out/documentSessions');
 // Exercise the real runner with fake database sessions: no network or VS Code
 // host is needed, and a mistakenly executed original SQL is observable here.
 function harness(sql, options = {}) {
-  const calls = { executed: [], opened: [], closed: [], forms: [], plans: [], results: [], notices: [], writes: [], scripts: [], progress: [] };
+  const calls = { executed: [], opened: [], closed: [], forms: [], plans: [], results: [], errors: [], notices: [], writes: [], scripts: [], progress: [] };
   const profiles = [
     { id: 'spark', name: 'Spark数仓', type: 'Spark' },
     { id: 'mysql', name: 'MySQL业务库', type: 'MySQL' },
@@ -65,7 +65,13 @@ function harness(sql, options = {}) {
       fs: { writeFile: async (uri, bytes) => calls.writes.push({ uri, text: bytes.toString('utf8') }) },
       getConfiguration: () => ({ get: (key, fallback) => ({ maxResultRows: 2, readRowLimit: 0, ...options.settings })[key] ?? fallback }),
     },
-    Uri: { file: (fsPath) => ({ scheme: 'file', fsPath }) },
+    Uri: {
+      file: (fsPath) => ({ scheme: 'file', fsPath }),
+      joinPath: (uri, ...parts) => {
+        const joined = path.join(uri.fsPath ?? uri.path ?? '', ...parts);
+        return { scheme: uri.scheme, fsPath: joined, toString: () => joined };
+      },
+    },
   };
   const filename = path.resolve(__dirname, '../out/extension.js');
   const realRequire = createRequire(filename);
@@ -107,6 +113,7 @@ function harness(sql, options = {}) {
   if (options.keys) hooks.setDataKeys(options.keys);
   hooks.ResultPanel.open = (result, metadata) => calls.results.push({ result, metadata });
   hooks.ResultPanel.openPlan = (snapshot) => calls.plans.push(snapshot);
+  hooks.ResultPanel.openError = (error) => calls.errors.push(error);
   const makeSession = (id) => ({
     broken: false, close: async () => { calls.closed.push(id); },
     execute: async (statement, signal, sink) => {
@@ -144,7 +151,19 @@ function harness(sql, options = {}) {
     panel.render();
     return panel;
   };
-  return { calls, hooks, editor, manager, state, session, profileSessions, profiles, options, seed, panelFor,
+  const errorPanelFor = (index = calls.errors.length - 1) => {
+    const panel = new hooks.ResultPanel({
+      title: '',
+      webview: { html: '', postMessage: async () => true, onDidReceiveMessage: () => ({ dispose() {} }) },
+      reveal() {},
+      onDidDispose() {},
+    });
+    panel.error = calls.errors[index];
+    panel.activeTab = 'error';
+    panel.render();
+    return panel;
+  };
+  return { calls, hooks, editor, manager, state, session, profileSessions, profiles, options, seed, panelFor, errorPanelFor,
     run: (explain = false) => hooks.runQuery(manager, state, undefined, undefined, explain),
     runToTsv: () => hooks.runQuery(manager, state, undefined, undefined, false, true),
     runBatch: () => hooks.runBatch(manager, state) };
@@ -432,15 +451,28 @@ test('explicit TSV command uses the default directory, and a cancelled save dial
   assert.equal(cancelled.calls.executed.length, 0);
 });
 
-test('an existing output or invalid output type fails before opening a session or executing SQL', async (t) => {
+test('an existing output opens the error panel before execution, while an invalid path still fails preparation', async (t) => {
   const directory = exportDirectory(t);
   fs.writeFileSync(path.join(directory, 'existing.tsv'), 'original');
-  for (const output of ['existing.tsv', 'source.sql', 'results/${day}.tsv']) {
-    const h = harness(`-- @connection: Spark数仓\n-- @output: ${output}\nSELECT 1;`, { sourceFile: path.join(directory, 'orders.sql') });
-    await assert.rejects(h.run());
-    assert.equal(h.calls.opened.length, 0);
-    assert.equal(h.calls.executed.length, 0);
-  }
+  const existing = harness('-- @connection: Spark数仓\n-- @output: existing.tsv\nSELECT 1;', {
+    sourceFile: path.join(directory, 'orders.sql'),
+  });
+  await existing.run();
+  assert.ok(existing.calls.errors.some((error) => error.message.includes('目标文件已存在')));
+  assert.equal(existing.calls.opened.length, 0);
+  assert.equal(existing.calls.executed.length, 0);
+  const wrongType = harness('-- @connection: Spark数仓\n-- @output: source.sql\nSELECT 1;', {
+    sourceFile: path.join(directory, 'orders.sql'),
+  });
+  await assert.rejects(wrongType.run(), /只支持文件系统中的 \.tsv/);
+  assert.equal(wrongType.calls.opened.length, 0);
+  assert.equal(wrongType.calls.executed.length, 0);
+  const invalid = harness('-- @connection: Spark数仓\n-- @output: results/${day}.tsv\nSELECT 1;', {
+    sourceFile: path.join(directory, 'orders.sql'),
+  });
+  await assert.rejects(invalid.run());
+  assert.equal(invalid.calls.opened.length, 0);
+  assert.equal(invalid.calls.executed.length, 0);
   assert.equal(fs.readFileSync(path.join(directory, 'existing.tsv'), 'utf8'), 'original');
   const remote = harness('-- @connection: Spark数仓\nSELECT 1;', { target: memoryTarget });
   await assert.rejects(remote.runToTsv(), /流式写入/);
@@ -466,7 +498,8 @@ test('database failure after streaming rows cleans partial output and never retr
     await sink.onRow({ id: 1 });
     throw new Error('test lost connection');
   };
-  await assert.rejects(h.runToTsv(), /test lost connection/);
+  await h.runToTsv();
+  assert.ok(h.calls.errors.some((error) => error.message.includes('test lost connection')));
   assert.equal(h.calls.executed.length, 1);
   assert.equal(h.calls.saveDialogs, undefined);
   assert.deepEqual(fs.readdirSync(directory), []);
@@ -599,7 +632,8 @@ test('failure feedback keeps partial counts and lost-session state without claim
     h.session.broken = true;
     throw new Error('test network failure');
   };
-  await assert.rejects(h.run(), /test network failure/);
+  await h.run();
+  assert.ok(h.calls.errors.some((error) => error.message.includes('test network failure')));
   const value = h.calls.feedback.value;
   assert.equal(value.status, 'failed');
   assert.equal(value.submitted, true);
@@ -678,15 +712,41 @@ test('DML without result sets only notifies, while zero-row SELECT keeps an empt
   assert.equal(empty.calls.feedback.value.totalRows, 0);
 });
 
-test('failed writes notify the statement name and duration and retain feedback without a result panel', async () => {
+test('failed writes open the error panel with the statement name and duration and retain feedback', async () => {
   const h = harness('-- @connection: MySQL业务库\n-- @name: 清理当天\nDELETE FROM target;');
   h.profileSessions.get('mysql').execute = async () => { throw Object.assign(new Error('syntax error'), { code: 'ER_PARSE_ERROR' }); };
   await h.run();
   assert.equal(h.calls.results.length, 0);
+  assert.equal(h.calls.errors.length, 1);
+  assert.match(h.calls.errors[0].label, /清理当天.*执行失败.*耗时/);
   assert.ok(h.calls.notices.some((text) => /清理当天.*执行失败.*耗时/.test(text)));
   assert.equal(h.calls.feedback.value.status, 'failed');
   assert.equal(h.calls.feedback.value.submitted, true);
   assert.equal(h.calls.feedback.value.needsReview, false);
+});
+
+test('long query errors open the output panel without truncating the diagnostic and can be exported', async () => {
+  const h = harness('-- @connection: Spark数仓\n-- @name: 核对权益\nSELECT 1;', {
+    target: { scheme: 'memory', toString: () => 'memory:/error.txt' },
+  });
+  const diagnostic = `org.apache.spark.SparkException: Job aborted due to stage failure\n${'  at org.apache.spark.scheduler.Stage.execute(Stage.scala:1)\n'.repeat(180)}`;
+  h.profiles[0].database = 'analytics';
+  h.session.execute = async () => { throw new Error(diagnostic); };
+  await h.run();
+  assert.equal(h.calls.errors.length, 1);
+  assert.ok(h.calls.errors[0].message.length > 2000);
+  assert.ok(h.calls.errors[0].message.includes('Stage.execute(Stage.scala:1)'));
+  assert.equal(h.calls.errors[0].context.database, 'analytics');
+  assert.ok(h.calls.notices.some((text) => text.includes('完整错误已显示在查询输出面板')));
+  assert.ok(!h.calls.notices.some((text) => text.includes('Stage.execute')));
+
+  const panel = h.errorPanelFor();
+  assert.ok(panel.panel.webview.html.includes('Stage.execute(Stage.scala:1)'));
+  await panel.copyError();
+  assert.match(h.calls.clipboard, /数据库: analytics/);
+  assert.equal(await panel.exportError(), true);
+  assert.ok(h.calls.writes.at(-1).text.length > 2000);
+  assert.match(h.calls.writes.at(-1).text, /Stage\.execute\(Stage\.scala:1\)/);
 });
 
 test('cancelled submitted statements without result metadata need review, while known result queries do not', async () => {
@@ -992,13 +1052,14 @@ test('protected error reference keeps parameter ciphertext and the unsaved SQL t
   const keys = await encryptionKeys();
   const key = await keys.active();
   const token = encryptValue('private-id-001', 'user', key);
-  const h = harness(`-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @param: id = ${token}\nSELECT * FROM t WHERE id='${'${id}'}';`, {
-    keys, copyErrorAction: true,
-  });
+  const h = harness(`-- @connection: Spark数仓\n-- @encrypt: {"id":"user"}\n-- @param: id = ${token}\nSELECT * FROM t WHERE id='${'${id}'}';`, { keys });
   h.editor.document.uri.scheme = 'untitled';
   h.session.execute = async () => { throw new Error('query failed for private-id-001'); };
   await h.run();
   await new Promise(setImmediate);
+  assert.equal(h.calls.errors.length, 1);
+  const panel = h.errorPanelFor();
+  await panel.copyError();
   assert.ok(h.calls.clipboard.includes(token));
   assert.ok(!h.calls.clipboard.includes('private-id-001'));
   assert.match(h.calls.clipboard, /```sql\nSELECT \* FROM t WHERE id='\$\{id\}';/);

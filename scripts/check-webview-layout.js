@@ -12,7 +12,7 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 
 const WIDTHS = [320, 420, 720, 1200];
-const PAGES = ['connection', 'parameters', 'plan', 'results'];
+const PAGES = ['connection', 'parameters', 'plan', 'results', 'error'];
 const DEVICE_SCALE_FACTORS = [1, 2];
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,

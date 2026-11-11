@@ -1,4 +1,4 @@
 interface:
   display_name: "Doris SQLTools Lite 使用"
-  short_description: "编写连接、参数与字段保护注释，按统一输出面板复制 AI 引用或原始 TSV"
-  default_prompt: "使用 $doris-sqltools-lite 整理 SQL 的连接、参数、名称、字段保护与复制模式；结果和计划共用一个输出面板，复制分 origin 和 extra；需要补数时生成顺序批次参数并检查报告。"
+  short_description: "编写连接、参数与字段保护注释，从统一输出面板复制引用或原始内容并查看完整错误"
+  default_prompt: "使用 $doris-sqltools-lite 整理 SQL 的连接、参数、名称、字段保护与复制模式；结果、计划和错误共用一个输出面板，复制分 origin 和 extra；需要补数时生成顺序批次参数并检查报告。"

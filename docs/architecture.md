@@ -53,7 +53,7 @@ VS Code 接口层可以组合纯逻辑模块，纯逻辑模块不反向依赖 UI
 | `rowLimit.ts` | 预览 LIMIT 注入与危险尾部语法保护 |
 | `sqlDirectives.ts` | 文件注释、连接、参数、输出、字段和批次解析 |
 | `copyMode.ts` | `@copy: origin/extra` 的类型与校验 |
-| `outputCopy.ts` | 引用链接、origin/extra 结果与计划复制文本 |
+| `outputCopy.ts` | 引用链接、origin/extra 结果、计划与错误复制文本 |
 | `sqlParameters.ts` | `${...}` 扫描、默认值、候选和替换 |
 | `executionPlan.ts` | 各引擎 EXPLAIN SQL 与计划文本 |
 | `directExport.ts` | 一次执行并导出前的语句类型检查 |
@@ -97,7 +97,7 @@ VS Code 接口层可以组合纯逻辑模块，纯逻辑模块不反向依赖 UI
   -> row LIMIT planning
   -> driver execute
   -> result collector or TSV writer
-  -> 统一输出面板（结果 / 计划）
+  -> 统一输出面板（结果 / 计划 / 错误）
   -> copy (@copy) / export
   -> notification
 ```

@@ -40,6 +40,7 @@ export interface PlanCopyInput {
 }
 
 export interface ErrorCopyInput {
+  mode: CopyMode;
   context: OutputCopyContext;
   error: string;
 }
@@ -112,6 +113,7 @@ export function buildPlanCopy(input: PlanCopyInput): string {
 }
 
 export function buildErrorCopy(input: ErrorCopyInput): string {
+  if (input.mode === 'origin') return input.error;
   const lines = [...contextLines(input.context), `错误: ${input.error}`];
   lines.push(...unsavedSqlLines(input.context));
   return lines.join('\n');

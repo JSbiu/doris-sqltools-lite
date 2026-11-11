@@ -92,7 +92,7 @@ pnpm run test:vscode
 pnpm run preview:webviews
 ```
 
-脚本从 `out/` 加载真实渲染函数，把连接、参数、输出面板的结果/计划 Tab 写到系统临时目录。输出 JSON 包含 HTML 文件路径。
+脚本从 `out/` 加载真实渲染函数，把连接、参数、输出面板的结果、计划和错误 Tab 写到系统临时目录。输出 JSON 包含 HTML 文件路径。
 
 视觉验收至少检查：
 

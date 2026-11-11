@@ -66,8 +66,10 @@ test('plan origin is pure plan text and extra carries facts, not the explain req
   assert.doesNotMatch(extra, /分区裁剪/);
 });
 
-test('error copy contains the reference and error without SQL body', () => {
-  const text = buildErrorCopy({ context, error: 'Unknown column x' });
+test('error origin is pure error text and extra contains the reference without SQL body', () => {
+  const error = 'Unknown column x';
+  assert.equal(buildErrorCopy({ mode: 'origin', context, error }), error);
+  const text = buildErrorCopy({ mode: 'extra', context, error });
   assert.match(text, /【D:\/queries\/orders\.sql†L12-L24】/);
   assert.match(text, /错误: Unknown column x/);
   assert.doesNotMatch(text, /SELECT \* FROM orders/);

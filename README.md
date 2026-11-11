@@ -1,13 +1,13 @@
 # Doris SQLTools Lite
 
-面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，结果和执行计划进入同一个输出面板；复制只分“原始内容”和“带上下文”，导出只负责完整产物。
+面向 VS Code 的 MySQL、Apache Doris 与 Spark Thrift SQL 工作台。文件中的 SQL 直接执行，结果、执行计划和执行错误进入同一个输出面板；复制只分“原始内容”和“带上下文”，导出只负责完整产物。
 
-当前发布线：`0.9.14`，目标版本：`1.0.0`。
+当前发布线：`0.9.15`，目标版本：`1.0.0`。
 
 ## 核心能力
 
 - 光标级执行：`Ctrl+Enter` 执行光标所在或最近一条 SQL。
-- 统一输出：结果和计划共用同一个面板、两个 Tab、两个动作：复制、导出。
+- 统一输出：结果、计划和错误共用同一个面板、三个按需出现的 Tab、两个动作：复制、导出。
 - 文件级连接：文件默认连接、语句级连接覆盖和按连接保留会话。
 - SQL 参数：`${name}`、默认值、候选值、参数页和实际发送 SQL 预览。
 - 执行计划：MySQL `EXPLAIN`、Doris `EXPLAIN VERBOSE`、Spark `EXPLAIN FORMATTED`。
@@ -52,7 +52,7 @@ VS Code 最低版本：`1.90.0`。
 pnpm install --frozen-lockfile
 pnpm test
 pnpm run package
-code --install-extension .\doris-sqltools-lite-0.9.14.vsix --force
+code --install-extension .\doris-sqltools-lite-0.9.15.vsix --force
 ```
 
 安装后执行 `Developer: Reload Window`。用以下命令核对版本：
@@ -90,9 +90,9 @@ GROUP BY dt;
 
 - `Ctrl+Enter` 执行当前语句。
 - `Ctrl+Alt+Enter` 获取当前语句的执行计划。
-- 结果和计划进入同一个输出面板的“结果 / 计划”两个 Tab；取计划不覆盖结果，取结果不覆盖同一 SQL 的计划。
+- 结果、计划和错误进入同一个输出面板的“结果 / 计划 / 错误”三个 Tab；错误 Tab 只在执行失败时出现，取计划不覆盖结果，失败也不覆盖已有结果或计划。
 - 面板只有两个动作：**复制**、**导出**。筛选和三态排序只改变当前表格，不影响复制和导出的顺序。
-- 有结果集的语句显示面板；真实无结果集的写入只显示完成通知。
+- 有结果集的语句显示面板；真实无结果集的写入只显示完成通知；执行失败自动打开错误 Tab，通知只提示完整错误已写入输出面板。
 - 面板保留 `maxResultRows` 行；完整导出写出全部结果。
 
 ### 复制：origin / extra
@@ -101,12 +101,14 @@ GROUP BY dt;
 
 - 计划 Tab 复制引用、引擎/连接、参数、耗时和计划正文。
 - 结果 Tab 复制引用、引擎/连接、参数、耗时、行列数和原始 TSV；列头只由 TSV 提供，不另列字段清单。
+- 错误 Tab 复制引用、引擎/连接、参数、耗时和完整错误。
 - SQL 不复制正文，只给 Codex 文件引用，例如 `【D:/queries/orders.sql†L12-L24】`；粘贴后显示为可点击文件，右键可用 VS Code 打开到对应行。
 
 `-- @copy: origin` 只复制当前内容：
 
 - 计划 Tab 复制纯计划正文。
 - 结果 Tab 复制纯 TSV，可直接贴到表格。
+- 错误 Tab 复制纯错误文本。
 
 复制只使用面板已加载的行；需要完整结果时使用导出。
 
@@ -190,7 +192,7 @@ SELECT * FROM orders WHERE dt = '2026-10-30';
 - 字段密钥独立保存在 SecretStorage。
 - MySQL / Doris TLS 默认校验证书链和 DNS 主机名。
 - 分批脚本只在受信任工作区运行。
-- 扩展不自动发送 SQL、结果、计划或参数到远端服务。
+- 扩展不自动发送 SQL、结果、计划、错误诊断或参数到远端服务。
 
 完整边界与报告入口见 [安全模型](docs/security.md) 和 [SECURITY.md](SECURITY.md)。
 
@@ -198,10 +200,10 @@ SELECT * FROM orders WHERE dt = '2026-10-30';
 
 输出面板的“复制”根据 `@copy` 生成：
 
-- `extra`：引用链接、引擎/连接、实际参数、耗时、计划正文或结果摘要与 TSV。
+- `extra`：引用链接、引擎/连接、实际参数、耗时、计划正文、结果摘要与 TSV 或完整错误。
 - `origin`：只复制当前 Tab 的原始内容，适合贴表格或交给其他工具。
 
-SQL 正文不进入复制包；`【D:/queries/orders.sql†L12-L24】` 是 Codex 可点击的源文件引用，AI 按行号读取。结果和计划 `extra` 对未保存 SQL 只标“未保存 SQL”，不复制正文；显式“复制 SQL 引用”或错误引用才回退为带语言标记的原始 SQL 模板。计划请求、审核清单和固定提示语不重复复制；计划审核要求由 skill 维护。
+SQL 正文不进入复制包；`【D:/queries/orders.sql†L12-L24】` 是 Codex 可点击的源文件引用，AI 按行号读取。结果、计划和错误 `extra` 对未保存 SQL 只标“未保存 SQL”，不复制正文；显式“复制 SQL 引用”或错误引用才回退为带语言标记的原始 SQL 模板。计划请求、审核清单和固定提示语不重复复制；计划审核要求由 skill 维护。
 受保护参数同样按当前字段模式输出：字段密文模式下 `extra` 只带密文，字段原文模式下才带明文。
 
 ## 开发
@@ -230,7 +232,7 @@ pnpm run check:bundle
 当前工作流聚焦：
 
 - 一次一条 SQL，配合文件级会话。
-- 结果与计划进入同一个输出面板。
+- 结果、计划和错误进入同一个输出面板。
 - 有界结果预览与完整文件导出。
 - `@copy: origin` 的纯内容和 `@copy: extra` 的 AI 引用包。
 - 由 SQL 注释声明的字段保护。
