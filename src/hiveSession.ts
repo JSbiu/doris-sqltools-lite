@@ -72,6 +72,13 @@ export const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
 // Only a transport that is already gone will ever hit this.
 const CLOSE_TIMEOUT_MS = 2_000;
 
+// Cancellation cleanup has to wait for any in-flight status request to come
+// back before the session can be reused; dropping the client early turns a
+// successful cancel into a broken session. Spark's status call can legitimately
+// block for several seconds while a CPU-saturated query is running, so this
+// bound is deliberately longer than the close timeout.
+const CANCEL_CLEANUP_TIMEOUT_MS = 10_000;
+
 type HiveClientInstance = InstanceType<typeof HiveClient>;
 type HiveSessionHandle = Awaited<ReturnType<HiveClientInstance['openSession']>>;
 type HiveOperation = Awaited<ReturnType<HiveSessionHandle['executeStatement']>>;
@@ -436,7 +443,7 @@ class HiveQuerySession implements QuerySession {
     };
     // Starts at the request, including submission/fetch with idle disabled.
     // Local sink IO is awaited separately; abandoned network requests are not.
-    const cancellation = createIdleGuard(CLOSE_TIMEOUT_MS, invalidate);
+    const cancellation = createIdleGuard(CANCEL_CLEANUP_TIMEOUT_MS, invalidate);
     const idle = createIdleGuard(this.idleTimeoutMs, invalidate);
     let announceCancel: (() => void) | undefined;
     const cancelledSignal = new Promise<void>((resolve) => {
@@ -600,7 +607,9 @@ class HiveQuerySession implements QuerySession {
         await pendingSink;
       } finally {
         try {
-          const closing = operation ? this.closeOperation(operation) : undefined;
+          const closing = operation
+            ? this.closeOperation(operation, cancelled ? CANCEL_CLEANUP_TIMEOUT_MS : CLOSE_TIMEOUT_MS)
+            : undefined;
           if (cancelled) {
             // Reuse requires acknowledgements for requests already sent, not
             // merely a close reply while an older fetch/status is still lost.
@@ -617,13 +626,13 @@ class HiveQuerySession implements QuerySession {
     }
   }
 
-  private async closeOperation(operation: HiveOperation): Promise<void> {
+  private async closeOperation(operation: HiveOperation, timeoutMs = CLOSE_TIMEOUT_MS): Promise<void> {
     const invalidate = (): void => {
       this.invalid = true;
       closeClient(this.client);
     };
     await settleWithin(Promise.resolve().then(() => operation.close()).catch(invalidate),
-      CLOSE_TIMEOUT_MS, invalidate);
+      timeoutMs, invalidate);
   }
 
   public async close(): Promise<void> {

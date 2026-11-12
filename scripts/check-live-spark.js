@@ -171,9 +171,12 @@ async function main() {
       "INSERT INTO e2e_types VALUES (1, 1.5, 'a', true), (2, 2.5, NULL, false)",
       1,
     );
+    // Spark 3.2 can omit the modified-row count; the adapter reports that as
+    // null ("unknown") by contract, which is not a failed DML.
     check(
-      'CREATE + INSERT accepted, affectedRows numeric',
-      Number.isFinite(insert.summary.affectedRows) && insert.summary.affectedRows >= 0,
+      'CREATE + INSERT accepted, affectedRows numeric or unknown',
+      insert.summary.affectedRows === null
+        || (Number.isFinite(insert.summary.affectedRows) && insert.summary.affectedRows >= 0),
       `affectedRows=${insert.summary.affectedRows} rowsRead=${insert.summary.rowsRead}`,
     );
     const read = await query(session, 'SELECT * FROM e2e_types ORDER BY i', 10);

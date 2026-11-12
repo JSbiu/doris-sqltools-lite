@@ -43,7 +43,7 @@ function loadSession(name, className, dependencies = {}) {
   const filename = path.resolve(__dirname, `../out/${name}.js`);
   const realRequire = createRequire(filename);
   const module = { exports: {} };
-  const scaled = (ms) => ms >= 2000 ? 40 : ms;
+  const scaled = (ms) => ms >= 2000 ? Math.max(40, Math.round(ms / 50)) : ms;
   vm.runInNewContext(fs.readFileSync(filename, 'utf8') + `\nmodule.exports.Session = ${className};`, {
     module, exports: module.exports, Buffer,
     setTimeout: (callback, ms) => setTimeout(callback, scaled(ms)), clearTimeout,
@@ -281,6 +281,19 @@ for (const stage of ['submission', 'fetch']) {
     assert.equal(delivered, 0);
   });
 }
+
+test('Hive cancellation tolerates a slow operation close without retiring the session', async () => {
+  const h = hive({ closeOperation: () => sleep(120) });
+  const signal = cancellation();
+  const rejected = assert.rejects(
+    bounded(h.session.execute('SELECT id', signal, sink(() => signal.cancel()))),
+    QueryCancelledError,
+  );
+  await rejected;
+  assert.equal(h.session.broken, false);
+  const summary = await bounded(h.session.execute('SELECT again', neverCancelled, sink()));
+  assert.equal(summary.rowsRead, 2);
+});
 
 for (const stage of ['reject', 'hang']) {
   test(`Hive operation close ${stage} retires the session while complete rows remain usable`, async () => {

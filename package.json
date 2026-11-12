@@ -2,7 +2,7 @@
   "name": "doris-sqltools-lite",
   "displayName": "Doris SQLTools Lite",
   "description": "在 VS Code 中执行 MySQL、Apache Doris 与 Spark Thrift SQL，在统一输出面板查看结果、执行计划和完整错误，复制 AI 引用或原始内容，并流式导出完整结果。",
-  "version": "0.9.15",
+  "version": "1.0.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
